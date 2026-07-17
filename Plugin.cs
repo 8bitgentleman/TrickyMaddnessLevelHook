@@ -44,11 +44,45 @@ namespace TrickyMaddnessLevelHook
         // jump is the point; heavier gravity would shrink the arcs right back.
         // Inert at scale 1 and on built-in levels regardless of the flag.
         internal static ConfigEntry<bool> scaleGravityWithMap;
+        // Fine-tune multiplier on the skydome's auto-fit (feature 13). SkydomeFollow
+        // sizes the dome to ~95% of the camera far-clip plane each frame so it envelops
+        // the whole visible course; this scales that target (1 = the fit). Tunable, no
+        // rebuild.
+        internal static ConfigEntry<float> skydomeScale;
+        // SSX domes only reach ~+20 deg elevation — an open-topped bowl. Above the rim
+        // the camera shows its clear color, which is black by default (feature-5's blue
+        // clear only fires for skybox-remapped maps, and a domed map's RenderSettings
+        // .skybox is null → that fallback stays dormant). So for a domed map SkydomeFollow
+        // clears the camera to this sky color so looking up past the rim reads as sky, not
+        // a black void. Hex; tunable without a rebuild.
+        internal static ConfigEntry<string> skydomeFillColor;
+        // Per-level sky-fill override, baked into the bundle by SSXImporter as an empty
+        // marker GO named "SkyFill_<RRGGBB>" (from Overrides.json lighting.skyFillColor).
+        // Parsed in LoadLevelManager before SkydomeFollow attaches; wins over the global
+        // [Skydome] FillColor config wherever the Hook clears the camera. Null = no
+        // override on the active map.
+        internal static Color? SceneSkyFill;
+        // Animated-texture playback speed (feature 14). The importer decodes SSX's
+        // UVScrolling effect (SSFLogic MainType 0 / SubType 10) and bakes the two
+        // scroll rates into the GO name ("UVScroll_<u>_<v>_<orig>"); those rates are
+        // UV-units PER FRAME at the PS2's 60 Hz, so UVScrollBehaviour multiplies by
+        // this to get UV-units/second. 60 = authentic speed. Tunable, no rebuild.
+        internal static ConfigEntry<float> uvScrollFrameRate;
         // World scale of the active custom map, from the optional "scale <f>"
         // header line in its .aipaths.txt sidecar (gen_aipaths.py --scale).
         // 1.0 for built-in levels, sidecar-less maps, and maps with no scale line
         // — i.e. everything that exists today.
         internal static float WorldScale = 1f;
+        // Platform the active custom map's bundle was authored native to, from an
+        // optional "platform <windows|mac>" line in its .aipaths.txt sidecar. null
+        // (every existing map, no header) means "unknown — assume the bytecode is
+        // foreign to whatever GPU we're on", the historical always-remap behavior.
+        // Declaring it lets ShaderLooksBroken trust the bundle's own shaders when
+        // it runs on that platform: the original Windows-built Garibaldi ships
+        // "platform windows" so its native D3D shaders are left alone on a Windows
+        // box (restoring the pre-D3D-distrust look) yet still remapped on Metal,
+        // where a Windows bundle genuinely is foreign. Reset to null on non-custom loads.
+        internal static string BundleNativePlatform;
 
         public static List<string> TrackNames = new List<string>();
         public static List<string> Paths = new List<string>();
@@ -119,6 +153,23 @@ namespace TrickyMaddnessLevelHook
                 "toward original proportions. Off by default — scaled-up maps are " +
                 "meant to keep stock gravity so jumps cover proportionally less " +
                 "ground. No effect on built-in levels or unscaled maps.");
+            skydomeScale = Config.Bind("Skydome", "Scale", 1f,
+                "Fine-tune multiplier on the skydome's automatic fit. The dome is " +
+                "auto-sized each frame so its radius is ~90% of the camera's far-clip " +
+                "plane — big enough to envelop the whole visible course so it reads as a " +
+                "distant sky, not a nearby wall. 1 = the auto fit; raise slightly to push " +
+                "it out further (values >1.1 risk the far plane clipping the dome), lower " +
+                "to pull it in. No rebuild needed, just relaunch.");
+            skydomeFillColor = Config.Bind("Skydome", "FillColor", "#3373C3",
+                "Camera clear color (hex) for maps with a skydome. SSX domes are open " +
+                "at the top (~+20 deg), so above the rim the camera would otherwise show " +
+                "black; this fills it with sky. Default matches the dome's blue so the " +
+                "rim seam blends. No rebuild needed, just relaunch.");
+            uvScrollFrameRate = Config.Bind("Visual", "UVScrollFrameRate", 60f,
+                "Playback speed for animated (UV-scrolling) textures on custom maps — " +
+                "LCD scanlines, jumbotrons, boost-pad chevrons, river water. The " +
+                "authored rates are per-frame at the PS2's 60 Hz, so 60 = authentic " +
+                "speed, 0 = frozen. No rebuild needed, just relaunch.");
 
             MapsDir = ResolveMapsDir();
             Logger.LogInfo($"Maps directory resolved to: {MapsDir}");
@@ -262,6 +313,11 @@ namespace TrickyMaddnessLevelHook
                 Log.LogInfo("[Gravity] left scaled custom map; world scale reset to 1");
             }
 
+            // Per-level sky fill must never outlive its map (same lifetime rule as
+            // WorldScale); LoadLevelManager re-reads it on the next custom load.
+            if (!isCustomScene && pendingSceneName == null)
+                SceneSkyFill = null;
+
             // The skybox needs watching on EVERY scene: on built-in levels/menus we
             // only cache a known-good game skybox material (never modify anything);
             // on the custom scene we wait for the bundle's skybox to be bound —
@@ -270,6 +326,10 @@ namespace TrickyMaddnessLevelHook
             if (Instance != null) Instance.StartCoroutine(SkyboxWatch(isCustomScene));
 
             if (!isCustomScene) return;
+
+            // (The open-top sky-fill for domed maps is applied by SkydomeFollow directly
+            // on the render camera in OnBeginCamera — it can't rely on Camera.main here,
+            // which is null on these maps, so it doesn't route through SolidColorSky.)
 
             try
             {
@@ -288,6 +348,20 @@ namespace TrickyMaddnessLevelHook
                             FixMaterial(mat, missing, ref remapped, ref litFallbacks, ref pruned);
                         }
                     }
+                }
+
+                // Clip-only materials: the V2-ported animation flipbooks (crowd cd
+                // frames, sign frames) live ONLY inside AnimationClips until their
+                // first frame swaps them onto a renderer — the renderer walk above
+                // never sees them, so on the foreign-GPU path they'd flip to
+                // magenta mid-animation. Sweep every loaded material with the
+                // importer's "tex_" name prefix instead; FixMaterial is a no-op on
+                // game-origin shaders, so catching a stray game "tex_*" is harmless.
+                foreach (var mat in Resources.FindObjectsOfTypeAll<Material>())
+                {
+                    if (mat == null || !mat.name.StartsWith("tex_", StringComparison.Ordinal) || !seen.Add(mat)) continue;
+                    scanned++;
+                    FixMaterial(mat, missing, ref remapped, ref litFallbacks, ref pruned);
                 }
 
                 string miss = missing.Count == 0 ? "none" : string.Join(", ", missing);
@@ -314,15 +388,41 @@ namespace TrickyMaddnessLevelHook
         // because community bundles were Windows-built; that assumption no longer
         // holds now that we author the bundles ourselves on Mac — see CLAUDE.md
         // Hook feature 4. Verified on real D3D via CrossOver 2026-07-13.)
+        // The one exception to the always-distrust default above: a bundle may
+        // declare (via a "platform" header in its .aipaths.txt) the platform it
+        // was authored native to. When it runs on THAT GPU family its own shaders
+        // are the platform-correct bytecode — remapping them is not just needless
+        // but LOSSY for hand-authored materials (the original Windows-built
+        // Garibaldi's cutout trees flattened and its skybox vanished on a
+        // Windows/D3D box the moment the D3D distrust was added, because the
+        // keyword-prune dropped variants the game's own build never compiled).
+        // Undeclared maps (every Mac-built bundle we author) keep the default.
         private static bool ShaderLooksBroken(Shader s, bool gameOrigin)
         {
             if (gameOrigin) return false;
             if (!s.isSupported) return true;
             var gpu = SystemInfo.graphicsDeviceType;
+            if (BundleIsNativeToCurrentGpu()) return false;
             return gpu == UnityEngine.Rendering.GraphicsDeviceType.Metal
                 || gpu == UnityEngine.Rendering.GraphicsDeviceType.Vulkan
                 || gpu == UnityEngine.Rendering.GraphicsDeviceType.Direct3D11
                 || gpu == UnityEngine.Rendering.GraphicsDeviceType.Direct3D12;
+        }
+
+        // True when the active custom bundle declared (via its .aipaths.txt
+        // "platform" header) that it was built native to the running GPU family:
+        // "windows" → Direct3D11/12, "mac" → Metal. Undeclared (BundleNativePlatform
+        // null — every existing map) returns false, so nothing is trusted by
+        // default and the remap fires exactly as it did before this opt-out existed.
+        private static bool BundleIsNativeToCurrentGpu()
+        {
+            var gpu = SystemInfo.graphicsDeviceType;
+            if (BundleNativePlatform == "windows")
+                return gpu == UnityEngine.Rendering.GraphicsDeviceType.Direct3D11
+                    || gpu == UnityEngine.Rendering.GraphicsDeviceType.Direct3D12;
+            if (BundleNativePlatform == "mac")
+                return gpu == UnityEngine.Rendering.GraphicsDeviceType.Metal;
+            return false;
         }
 
         private static void Diag(Material mat, string action)
@@ -351,10 +451,19 @@ namespace TrickyMaddnessLevelHook
                 return;
             }
 
+            // Assigning Material.shader RESETS renderQueue to the new shader's
+            // default (documented Unity behavior). Our importer's transparent
+            // materials rely on m_CustomRenderQueue (2450 cutout / 3000 blend);
+            // losing it drops a ZWrite-off blend material into the opaque pass,
+            // where later same-queue draws (terrain) overwrite it — fences/foliage
+            // rendered invisible except against sky/buildings (2026-07-16 report).
+            int queue = mat.renderQueue;
+
             Shader replacement;
             if (!bakedError && GameShaders != null && GameShaders.TryGetValue(sh.name, out replacement))
             {
                 mat.shader = replacement;
+                mat.renderQueue = queue;
                 remapped++;
                 List<string> removed = PruneKeywords(mat, replacement);
                 if (removed != null) pruned++;
@@ -371,7 +480,14 @@ namespace TrickyMaddnessLevelHook
             if (GameShaders != null && GameShaders.TryGetValue("Universal Render Pipeline/Lit", out replacement))
             {
                 mat.shader = replacement;
-                mat.shaderKeywords = new string[0];
+                mat.renderQueue = queue;
+                // Keep the safe-listed feature keywords (alpha clip / transparent
+                // surface) — clearing them un-cuts cutout foliage; the base Lit
+                // variant plus these is still a variant the game build compiles.
+                var keep = new List<string>();
+                foreach (var k in mat.shaderKeywords)
+                    if (SafeKeywords.Contains(k)) keep.Add(k);
+                mat.shaderKeywords = keep.ToArray();
                 litFallbacks++;
                 Diag(mat, "lit-fallback (keywords cleared)");
             }
@@ -381,6 +497,19 @@ namespace TrickyMaddnessLevelHook
                 Diag(mat, "UNFIXABLE: no game shader with this name and no game URP Lit");
             }
         }
+
+        // Feature keywords the game build is KNOWN to compile even though the
+        // menu-time snapshot can't see them: the materials that use them live in
+        // built-in level scenes (ForestBush01/MapleTree01 carry _ALPHATEST_ON,
+        // glass carries _SURFACE_TYPE_TRANSPARENT — verified in sharedassets1),
+        // which aren't loaded when the union is taken. Without this safe-list the
+        // prune strips alpha clip from every cutout material and foliage/fences
+        // render as opaque blocks (2026-07-16 gari_25x report: exactly the 13
+        // cutout + 4 blend mats were the 17 pruned).
+        private static readonly HashSet<string> SafeKeywords = new HashSet<string>
+        {
+            "_ALPHATEST_ON", "_SURFACE_TYPE_TRANSPARENT",
+        };
 
         // Drop material keywords never observed on any game material using the same
         // shader: the game build only compiles the shader variants its own content
@@ -400,7 +529,7 @@ namespace TrickyMaddnessLevelHook
             var removed = new List<string>();
             foreach (var k in kws)
             {
-                if (union != null && union.Contains(k)) kept.Add(k);
+                if (SafeKeywords.Contains(k) || (union != null && union.Contains(k))) kept.Add(k);
                 else removed.Add(k);
             }
             if (removed.Count == 0) return null;
@@ -501,7 +630,8 @@ namespace TrickyMaddnessLevelHook
             // — a plain sky beats a pink one. RenderSettings.skybox is deliberately
             // left alone: the scene's baked ambient probe is unaffected by it at
             // runtime, and clearing it could black out ambient lighting.
-            Color skyColor = sky.HasProperty("_Tint") ? sky.GetColor("_Tint") : new Color(0.53f, 0.70f, 0.86f);
+            Color skyColor = SceneSkyFill
+                ?? (sky.HasProperty("_Tint") ? sky.GetColor("_Tint") : new Color(0.53f, 0.70f, 0.86f));
             Log.LogInfo($"[ShaderRemap] skybox '{sh.name}' unfixable (no game skybox available); falling back to solid sky color {skyColor}");
             if (Instance != null) Instance.StartCoroutine(SolidColorSky(skyColor));
         }
@@ -603,9 +733,54 @@ namespace TrickyMaddnessLevelHook
             }
         }
 
+        // Desired level-selector order: SSX Tricky courses (user's chosen sequence),
+        // then SSX3 A-E. Matched case-insensitively against each map's file name via
+        // StartsWith, so scale variants ("Garibaldi 2.5x") and the "Rebuilt" suffix
+        // ("Ssx3_Acourse_Tricky Rebuilt") share their base's rank. Any map matching
+        // nothing here (e.g. the "Tricky" bonus arena, or a future drop-in) sorts
+        // after all known courses, alphabetically. Note "Tricky" must never be a key:
+        // it's a substring of the SSX3 "..._Tricky" names, and StartsWith on the file
+        // name keeps them apart, but a bare "Tricky" key would still be redundant.
+        private static readonly string[] TrackOrder =
+        {
+            "Garibaldi",
+            "Snowdream",
+            "Elysium Alps",
+            "Mesablanca",
+            "Merqury",
+            "Tokyo",
+            "Aloha",
+            "Alaska",
+            "Untracked",
+            "Pipedream",
+            "Ssx3_Acourse",
+            "Ssx3_Bcourse",
+            "Ssx3_Ccourse",
+            "Ssx3_Dcourse",
+            "Ssx3_Ecourse",
+        };
+
+        private static int TrackRank(string name)
+        {
+            for (int i = 0; i < TrackOrder.Length; i++)
+                if (name.StartsWith(TrackOrder[i], StringComparison.OrdinalIgnoreCase))
+                    return i;
+            return int.MaxValue; // unranked maps go last
+        }
+
         public void AddTracks()
         {
             var List = Directory.GetFiles(MapsDir, "*.asset");
+            // Directory.GetFiles order is filesystem-defined (roughly alphabetical),
+            // so sort into the curated course order; scale variants of one course sit
+            // adjacent (same rank) and fall back to name order (base before "2x").
+            Array.Sort(List, (a, b) =>
+            {
+                string na = Path.GetFileNameWithoutExtension(a);
+                string nb = Path.GetFileNameWithoutExtension(b);
+                int cmp = TrackRank(na).CompareTo(TrackRank(nb));
+                return cmp != 0 ? cmp : string.Compare(na, nb, StringComparison.OrdinalIgnoreCase);
+            });
             for (int i = 0; i < List.Length; i++)
             {
                 Paths.Add(List[i]);
@@ -1063,6 +1238,167 @@ namespace TrickyMaddnessLevelHook
             }
             if (tpAttached > 0 || tpSkipped > 0)
                 Log.LogInfo($"[Teleport] attached {tpAttached} teleport volume(s), skipped {tpSkipped}");
+
+            // Per-level sky-fill override. Naming contract with SSXImporter.BuildLighting:
+            // an empty marker GO named "SkyFill_<RRGGBB>" (from Overrides.json
+            // lighting.skyFillColor). MUST be read before the SkydomeFollow attach below —
+            // its OnEnable samples the fill once. Always assigned (found or null) so a
+            // previous map's override can't leak onto the next one.
+            SceneSkyFill = null;
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("SkyFill_")) continue;
+                    string hex = "#" + t.name.Substring("SkyFill_".Length);
+                    if (ColorUtility.TryParseHtmlString(hex, out var fill))
+                    {
+                        SceneSkyFill = fill;
+                        Log.LogInfo($"[Skydome] per-level sky fill {hex} (overrides [Skydome] FillColor)");
+                    }
+                    else
+                        Log.LogWarning($"[Skydome] sky-fill marker '{t.name}' not parseable; using [Skydome] FillColor");
+                }
+            }
+
+            // Skydome. Naming contract with SSXImporter.BuildSkybox: a GO named
+            // "Skydome" carries the level's unlit, Background-queue, ZWrite-off dome
+            // mesh (no collider). We attach SkydomeFollow so it stays centered on the
+            // camera — the dome is baked at map scale (only tens of units across), so
+            // without following, the rider would ride out of it and lose the sky. Only
+            // position follows; rotation stays world-fixed so the sky is compass-stable.
+            int skydomes = 0;
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (t.name != "Skydome") continue;
+                    if (t.GetComponent<SkydomeFollow>() != null) continue; // already attached
+                    t.gameObject.AddComponent<SkydomeFollow>();
+                    skydomes++;
+                }
+            }
+            if (skydomes > 0)
+                Log.LogInfo($"[Skydome] attached camera-follow to {skydomes} skydome(s)");
+
+            // Animated textures (feature 14). Naming contract with SSXImporter.BuildProps:
+            // a GO named "UVScroll_<u>_<v>_<originalName>" (rates written with the
+            // invariant-culture round-trip format) renders SSX geometry whose material
+            // UVs scroll — LCD scanlines, jumbotrons, boost-pad chevrons, river water.
+            // The original name may itself contain underscores, so only the first three
+            // '_'-separated segments are parsed. UVScrollBehaviour instantiates the
+            // renderers' materials once and scrolls their base-map offset per frame.
+            int uvAttached = 0, uvSkipped = 0;
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("UVScroll_")) continue;
+                    if (t.GetComponent<UVScrollBehaviour>() != null) continue; // already attached
+                    string[] seg = t.name.Split(new[] { '_' }, 4);
+                    float ru, rv;
+                    if (seg.Length < 4 ||
+                        !float.TryParse(seg[1], NumberStyles.Float, CultureInfo.InvariantCulture, out ru) ||
+                        !float.TryParse(seg[2], NumberStyles.Float, CultureInfo.InvariantCulture, out rv))
+                    {
+                        uvSkipped++;
+                        Log.LogDebug($"[UVScroll] '{t.name}' skipped: unparseable rates");
+                        continue;
+                    }
+                    var us = t.gameObject.AddComponent<UVScrollBehaviour>();
+                    us.RatePerFrame = new Vector2(ru, rv);
+                    uvAttached++;
+                }
+            }
+            if (uvAttached > 0 || uvSkipped > 0)
+                Log.LogInfo($"[UVScroll] attached {uvAttached} UV-scroller(s), skipped {uvSkipped}");
+
+            // Smashable glass / breakables. Naming contract with SSXImporter.BuildProps:
+            // a GO named "Destructible_<orig>" carries the intact model (render mesh, NO
+            // collider) plus inactive "Frag_<i>" children (per-shard meshes) and optional
+            // "DisableRef_<name>" markers. We wire the game's own Destructible on it, plus a
+            // Hook-side Smashable that DRIVES the break. WHY not rely on the game's trigger:
+            // Snowboarder.OnTriggerEnter does call Destructible.Break, but only if the pane's
+            // trigger fires an enter event for the rider's CharacterController — unreliable
+            // for us (the rider crosses at 150-190 mph → ~1.5 m/tick, tunnelling a thin pane;
+            // and a bundle-added trigger on the glass layer isn't guaranteed to fire against
+            // the rider's layer). Smashable does a SWEPT test instead (can't tunnel) and calls
+            // the public Break directly. The BoxCollider (render-mesh bounds, min 0.3 m thick)
+            // is a geometry carrier for Smashable and for Break's GetComponent<Collider>() —
+            // Smashable DISABLES it at runtime; layer 2 (the game's glass layer, excluded from
+            // the ground SphereCast) keeps an intact pane from ever reading as ground. Private
+            // serialized List<T>/string fields arrive null on runtime-added components
+            // (feature 7): Traverse-set all four — lists may be empty but NEVER null
+            // (Break foreach-es fragmentList; soundName null would PostEvent(null)).
+            int smashWired = 0, smashFrags = 0;
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("Destructible_")) continue;
+                    var dGO = t.gameObject;
+                    if (dGO.GetComponent<Destructible>() != null) continue; // already wired
+                    var box = dGO.AddComponent<BoxCollider>();
+                    var dmf = dGO.GetComponent<MeshFilter>();
+                    if (dmf != null && dmf.sharedMesh != null)
+                    {
+                        var b = dmf.sharedMesh.bounds;
+                        box.center = b.center;
+                        box.size = Vector3.Max(b.size, new Vector3(0.3f, 0.3f, 0.3f));
+                    }
+                    box.isTrigger = true;
+                    dGO.layer = 2;
+                    var frags = new List<DestructibleFragment>();
+                    var disables = new List<GameObject>();
+                    foreach (Transform child in t)
+                    {
+                        if (child.name.StartsWith("Frag_"))
+                        {
+                            child.gameObject.SetActive(false);
+                            child.gameObject.layer = 0;
+                            frags.Add(child.gameObject.AddComponent<DestructibleFragment>());
+                        }
+                        else if (child.name.StartsWith("DisableRef_"))
+                        {
+                            // Resolve by original instance name; the scene GO may carry a
+                            // pipeline prefix (UVScroll_/PhysProp_). Unresolved refs are
+                            // fine — megaple's invisible Glass_Surface proxies are dropped
+                            // at import, and the pane needs no wall (it's a pure trigger).
+                            string target = child.name.Substring("DisableRef_".Length);
+                            var found = FindSceneGOByInstanceName(levelManagerMaker.gameObject.scene, target);
+                            if (found != null) disables.Add(found);
+                        }
+                    }
+                    var destr = dGO.AddComponent<Destructible>();
+                    var trav = Traverse.Create(destr);
+                    trav.Field("fragmentList").SetValue(frags);
+                    trav.Field("disableList").SetValue(disables);
+                    trav.Field("hideSelf").SetValue(true);
+                    trav.Field("soundName").SetValue("Play_GlassSmash_Large");
+                    dGO.AddComponent<Smashable>(); // drives Break via swept detection; disables the box
+                    smashWired++; smashFrags += frags.Count;
+                }
+            }
+            if (smashWired > 0)
+                Log.LogInfo($"[Destructible] wired {smashWired} smashable(s) with {smashFrags} shard fragment(s)");
+            // NB: the open-top sky-fill is started from OnSceneLoaded (not here) —
+            // SolidColorSky captures the ACTIVE scene name, which isn't the custom scene
+            // yet at LoadLevelManager time, so starting it here exits immediately.
+        }
+
+        // Resolves a Destructible DisableRef_ marker back to the live scene GO. The
+        // importer records the SSX instance's ORIGINAL name, but the pipeline may have
+        // prefixed the scene GO (UVScroll_<u>_<v>_<name>, PhysProp_<name>) — so accept
+        // an exact match or any name ending in "_<name>". Dropped instances (megaple's
+        // invisible Glass_Surface proxies) simply resolve to null and are skipped.
+        private static GameObject FindSceneGOByInstanceName(UnityEngine.SceneManagement.Scene scene, string instName)
+        {
+            string suffix = "_" + instName;
+            foreach (var root in scene.GetRootGameObjects())
+                foreach (var tr in root.GetComponentsInChildren<Transform>(true))
+                    if (tr.name == instName || tr.name.EndsWith(suffix, StringComparison.Ordinal))
+                        return tr.gameObject;
+            return null;
         }
 
         // Builds a solid (non-convex) MeshCollider along the rail's segment line —
@@ -1181,6 +1517,7 @@ namespace TrickyMaddnessLevelHook
                     string line = raw.Trim();
                     if (line.Length == 0 || line.StartsWith("#")) continue;
                     if (line.StartsWith("scale")) continue; // world-scale header, read at load time (ReadWorldScale)
+                    if (line.StartsWith("platform")) continue; // native-platform header, read at load time (ReadBundleNativePlatform)
                     if (line == "path")
                     {
                         cur = new List<AIPath.Point>();
@@ -1279,6 +1616,38 @@ namespace TrickyMaddnessLevelHook
             }
         }
 
+        // Reads the optional "platform <windows|mac>" header from a map's
+        // .aipaths.txt sidecar. Returns null (no declaration) for a missing
+        // sidecar, no platform line, or an unrecognized value — the safe default
+        // that keeps the always-remap behavior. Only "windows" and "mac" are
+        // honored; they let the shader remap trust the bundle's own shaders when
+        // it runs on that platform (see BundleIsNativeToCurrentGpu).
+        internal static string ReadBundleNativePlatform(string bundlePath)
+        {
+            try
+            {
+                string sidecarPath = Path.ChangeExtension(bundlePath, ".aipaths.txt");
+                if (!File.Exists(sidecarPath)) return null;
+                foreach (var raw in File.ReadAllLines(sidecarPath))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("#")) continue;
+                    var t = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (t.Length != 2 || t[0] != "platform") continue;
+                    string p = t[1].ToLowerInvariant();
+                    if (p == "windows" || p == "mac") return p;
+                    Log.LogWarning($"[ShaderRemap] sidecar {Path.GetFileName(sidecarPath)} declares platform '{t[1]}' (expected 'windows' or 'mac'); ignoring");
+                    return null;
+                }
+                return null;
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"[ShaderRemap] failed reading platform sidecar for {bundlePath}: {e}");
+                return null;
+            }
+        }
+
         // Gravity for a world WorldScale times bigger. Called (via the transpilers
         // below) everywhere Snowboarder/Caster.Cast used their inlined 20f/17f
         // gravity constants. Returns the input untouched when the map is unscaled
@@ -1359,6 +1728,7 @@ namespace TrickyMaddnessLevelHook
                 }
                 Plugin.pendingSceneName = null;
                 Plugin.WorldScale = 1f;
+                Plugin.BundleNativePlatform = null;
                 return true;
             }
 
@@ -1438,6 +1808,12 @@ namespace TrickyMaddnessLevelHook
                 Plugin.WorldScale = Plugin.ReadWorldScale(path);
                 if (Plugin.WorldScale != 1f)
                     Plugin.Log.LogInfo($"[Gravity] map declares world scale {Plugin.WorldScale.ToString(CultureInfo.InvariantCulture)}; gravity scaling {(Plugin.scaleGravityWithMap.Value ? "enabled" : "disabled by config")}");
+
+                // Native-platform declaration from the same sidecar (null when absent).
+                // Read on reuse too — the sidecar may have changed on disk.
+                Plugin.BundleNativePlatform = Plugin.ReadBundleNativePlatform(path);
+                if (Plugin.BundleNativePlatform != null)
+                    Plugin.Log.LogInfo($"[ShaderRemap] map declares native platform '{Plugin.BundleNativePlatform}'; its own shaders are trusted (not remapped) when running on that backend");
 
                 // Derive the bundle-internal scene name from LoadedTrack. NOT Path.*:
                 // on macOS '\' is an ordinary filename character, not a separator.
@@ -1762,6 +2138,124 @@ namespace TrickyMaddnessLevelHook
         }
     }
 
+    // Keeps a skydome mesh centered on the camera and sized to envelop the whole visible
+    // course, so a finite (map-scaled) dome reads as a distant sky. The importer emits an
+    // unlit, Background-queue, ZWrite-off, cull-off dome named "Skydome" with no collider.
+    //
+    // Two jobs, both in URP's beginCameraRendering (fires AFTER every Update/LateUpdate,
+    // right before the camera culls — the exact render viewpoint, zero lag):
+    //
+    // 1) POSITION: snap the dome onto the camera every render. A plain LateUpdate follow
+    //    lags a frame behind the chase-cam rig; at 200 mph that ~1.5 m offset swims the
+    //    dome edge / makes the near ground "emerge like water." beginCameraRendering has
+    //    no lag. Only position follows; rotation stays world-fixed (compass-stable sky).
+    //
+    // 2) SCALE: the dome is a FINITE bowl baked at map scale (tens of units). If its radius
+    //    is smaller than the distance to far course terrain, that terrain pokes past the
+    //    dome edge and the dome reads as a nearby wall (user report). Centering alone can't
+    //    fix this — the course is a fixed size the dome must ENVELOP. So auto-fit the dome
+    //    radius to ~90% of the camera's far-clip plane each frame: as distant as possible
+    //    while staying inside the frustum (overshoot → the far plane clips the dome into
+    //    chunks). [Skydome] Scale is a residual multiplier on that fit (default 1).
+    //
+    // Also clears the camera to [Skydome] FillColor so looking up past the open rim (~+20
+    // deg) reads as sky, not black. Done on the pipeline-supplied camera, NOT Camera.main
+    // (null on these maps — the game camera isn't the enabled MainCamera the whole time).
+    public class SkydomeFollow : MonoBehaviour
+    {
+        Transform _cam;
+        Color _fill;
+        bool _fillValid;
+        float _baseRadius = -1f;   // unscaled dome radius (map units), computed once
+        bool _fitLogged;
+
+        void OnEnable()
+        {
+            // Per-level override (Overrides.json lighting.skyFillColor, via the SkyFill_
+            // marker Plugin.LoadLevelManager parses before attaching us) wins over the
+            // global [Skydome] FillColor config.
+            if (Plugin.SceneSkyFill.HasValue) { _fill = Plugin.SceneSkyFill.Value; _fillValid = true; }
+            else
+            {
+                string hex = Plugin.skydomeFillColor != null ? Plugin.skydomeFillColor.Value : "#3373C3";
+                if (ColorUtility.TryParseHtmlString(hex, out _fill)) _fillValid = true;
+                else { _fill = new Color(0.20f, 0.45f, 0.76f); _fillValid = true;
+                       Plugin.Log.LogWarning($"[Skydome] FillColor '{hex}' not parseable; using #3373C3"); }
+            }
+
+            UnityEngine.Rendering.RenderPipelineManager.beginCameraRendering += OnBeginCamera;
+        }
+        void OnDisable()
+        {
+            UnityEngine.Rendering.RenderPipelineManager.beginCameraRendering -= OnBeginCamera;
+        }
+
+        // Farthest dome vertex from the pivot, in the dome's UNSCALED local frame — the
+        // InverseTransformPoint round-trip cancels the root's own localScale, so this is
+        // scale-independent and only needs computing once.
+        float ComputeBaseRadius()
+        {
+            float maxSq = 0f;
+            foreach (var mf in GetComponentsInChildren<MeshFilter>())
+            {
+                var mesh = mf.sharedMesh;
+                if (mesh == null) continue;
+                var b = mesh.bounds;
+                for (int i = 0; i < 8; i++)
+                {
+                    var corner = b.center + new Vector3(
+                        (i & 1) == 0 ? b.extents.x : -b.extents.x,
+                        (i & 2) == 0 ? b.extents.y : -b.extents.y,
+                        (i & 4) == 0 ? b.extents.z : -b.extents.z);
+                    Vector3 rootLocal = transform.InverseTransformPoint(mf.transform.TransformPoint(corner));
+                    float sq = rootLocal.sqrMagnitude;
+                    if (sq > maxSq) maxSq = sq;
+                }
+            }
+            return Mathf.Sqrt(maxSq);
+        }
+
+        void OnBeginCamera(UnityEngine.Rendering.ScriptableRenderContext ctx, Camera cam)
+        {
+            if (cam == null || !cam.CompareTag("MainCamera")) return;
+
+            transform.position = cam.transform.position;
+
+            if (_baseRadius < 0f) _baseRadius = ComputeBaseRadius();
+            if (_baseRadius > 0.001f && cam.farClipPlane > 1f)
+            {
+                float mult = Plugin.skydomeScale != null ? Mathf.Max(0.01f, Plugin.skydomeScale.Value) : 1f;
+                float targetR = cam.farClipPlane * 0.95f * mult;
+                float s = targetR / _baseRadius;
+                transform.localScale = Vector3.one * s;
+                if (!_fitLogged)
+                {
+                    Plugin.Log.LogInfo($"[Skydome] auto-fit: baseR={_baseRadius:F1} farClip={cam.farClipPlane:F0} mult={mult:F2} -> scale={s:F1}");
+                    _fitLogged = true;
+                }
+            }
+
+            if (_fillValid && (cam.clearFlags != CameraClearFlags.SolidColor || cam.backgroundColor != _fill))
+            {
+                cam.clearFlags = CameraClearFlags.SolidColor;
+                cam.backgroundColor = _fill;
+            }
+        }
+
+        // First-frame / built-in-pipeline fallback; harmless under URP where OnBeginCamera
+        // repositions before the render.
+        void LateUpdate()
+        {
+            if (_cam == null)
+            {
+                var c = Camera.main;
+                if (c == null) return;
+                _cam = c.transform;
+            }
+            transform.position = _cam.position;
+        }
+    }
+
     // A wind push volume. Attached by the Hook's scene scan to every "Wind_<strength>" GO
     // the importer emits. While a Snowboarder's origin is inside the (oriented) box, each
     // physics step adds WorldDir * Strength * dt to that rider's private Snowboarder.velocity
@@ -1821,6 +2315,110 @@ namespace TrickyMaddnessLevelHook
                 Vector3 v = t.GetValue<Vector3>();
                 v += WorldDir * Strength * dt;
                 t.SetValue(v);
+            }
+        }
+    }
+
+    // Scrolls the material UVs of everything under this GO — the runtime half of the
+    // animated-texture pipeline (SSX's UVScrolling effect: LCD scanlines, jumbotrons,
+    // boost-pad chevrons, river water). The importer bakes the decoded rates into the
+    // GO name; the Hook parses them and attaches this. renderer.materials instantiates
+    // per-renderer material COPIES once in Awake — required, or scrolling one LCD would
+    // scroll every material sharing that texture (the importer's material cache dedups
+    // aggressively). The offset is absolute (rate * time), not accumulated, so playback
+    // speed changes cleanly and no float error builds up; wrapped to [0,1) so precision
+    // holds over long sessions.
+    public class UVScrollBehaviour : MonoBehaviour
+    {
+        public Vector2 RatePerFrame; // UV units per frame @60Hz, parsed from the GO name
+
+        Renderer[] _rends;
+        Material[][] _mats;
+        Vector2[][] _base;
+
+        // First-attached instance emits two one-line probes (~15s and ~30s into the
+        // level) — shader name, written vs read-back offsets, and whether the renderer
+        // still holds our instances. Cheap enough to leave on; it's the evidence for
+        // the "attached but nothing moves" class of report (2026-07-16 playtest).
+        static UVScrollBehaviour _diag;
+        int _diagShots = 2;
+        float _nextDiagAt = 15f;
+
+        void Awake()
+        {
+            _rends = GetComponentsInChildren<Renderer>(true);
+            _mats = new Material[_rends.Length][];
+            _base = new Vector2[_rends.Length][];
+            for (int i = 0; i < _rends.Length; i++)
+                Bind(i);
+            if (_diag == null) _diag = this;
+        }
+
+        void OnDestroy()
+        {
+            if (_diag == this) _diag = null;
+        }
+
+        // renderer.materials instantiates per-renderer COPIES and assigns them —
+        // required, or scrolling one LCD would scroll every material sharing that
+        // texture (the importer's material cache dedups aggressively).
+        void Bind(int i)
+        {
+            _mats[i] = _rends[i].materials;
+            _base[i] = new Vector2[_mats[i].Length];
+            for (int j = 0; j < _mats[i].Length; j++)
+                _base[i][j] = _mats[i][j] != null ? _mats[i][j].mainTextureOffset : Vector2.zero;
+        }
+
+        void Update()
+        {
+            float fps = Plugin.uvScrollFrameRate != null ? Plugin.uvScrollFrameRate.Value : 60f;
+            Vector2 scroll = RatePerFrame * fps * Time.time;
+            Vector2 o = Vector2.zero;
+            for (int i = 0; i < _rends.Length; i++)
+            {
+                var r = _rends[i];
+                if (r == null) continue;
+                // Self-heal: if anything replaced the renderer's material array after
+                // our Awake (the copies we scroll would then be orphaned — writes land
+                // on materials nobody renders), re-instantiate from the current array.
+                var shared = r.sharedMaterials;
+                if (_mats[i].Length != shared.Length ||
+                    (shared.Length > 0 && !ReferenceEquals(shared[0], _mats[i][0])))
+                    Bind(i);
+                for (int j = 0; j < _mats[i].Length; j++)
+                {
+                    var m = _mats[i][j];
+                    if (m == null) continue;
+                    o = _base[i][j] + scroll;
+                    o.x -= Mathf.Floor(o.x);
+                    o.y -= Mathf.Floor(o.y);
+                    // URP/Lit tags _BaseMap [MainTexture], so mainTextureOffset targets
+                    // it — but write the property explicitly too, so the scroll doesn't
+                    // hang on the main-texture resolution of a remapped shader.
+                    m.mainTextureOffset = o;
+                    if (m.HasProperty("_BaseMap"))
+                        m.SetTextureOffset("_BaseMap", o);
+                }
+            }
+
+            if (_diag == this && _diagShots > 0 && Time.timeSinceLevelLoad >= _nextDiagAt)
+            {
+                _diagShots--;
+                _nextDiagAt += 15f;
+                Material m0 = null;
+                if (_mats.Length > 0 && _mats[0].Length > 0) m0 = _mats[0][0];
+                if (m0 != null && _rends.Length > 0 && _rends[0] != null)
+                {
+                    var shared = _rends[0].sharedMaterials;
+                    bool bound = shared.Length > 0 && ReferenceEquals(shared[0], m0);
+                    Vector2 rb = m0.HasProperty("_BaseMap") ? m0.GetTextureOffset("_BaseMap") : new Vector2(-9, -9);
+                    Plugin.Log.LogInfo(string.Format(CultureInfo.InvariantCulture,
+                        "[UVScroll] diag t={0:F0}s '{1}': shader='{2}' wrote=({3:F3},{4:F3}) baseMapST=({5:F3},{6:F3}) mainOfs=({7:F3},{8:F3}) bound={9} rate=({10:R},{11:R})",
+                        Time.timeSinceLevelLoad, name, m0.shader != null ? m0.shader.name : "null",
+                        o.x, o.y, rb.x, rb.y, m0.mainTextureOffset.x, m0.mainTextureOffset.y,
+                        bound, RatePerFrame.x, RatePerFrame.y));
+                }
             }
         }
     }
@@ -1907,6 +2505,98 @@ namespace TrickyMaddnessLevelHook
             if (!_vel.TryGetValue(sb, out var velT))
             { velT = Traverse.Create(sb).Field("velocity"); _vel[sb] = velT; }
             velT.SetValue(Vector3.zero);
+        }
+    }
+
+    // Drives the game's own Destructible.Break on a smashable pane/prop when the rider
+    // rides through it. WHY NOT the game's trigger path: Snowboarder.OnTriggerEnter DOES
+    // call Destructible.Break(velocity) — but only when a live trigger fires an enter
+    // event for the rider's CharacterController, and that path is unreliable for us: the
+    // rider crosses at 150-190 mph (~70-85 m/s → ~1.5 m per fixed tick) so a thin pane
+    // trigger is tunnelled between discrete overlap samples, and a bundle-added trigger on
+    // the game's glass layer isn't guaranteed to fire against the rider's layer. So we
+    // drive Break ourselves with a SWEPT test (segment from the rider's previous origin to
+    // its current one vs the box), which can't tunnel. Same collider-free design as Wind/
+    // Teleport: the BoxCollider is a geometry carrier, DISABLED at runtime (a live trigger
+    // on a cast-included layer would perturb the rider) — but kept present, because
+    // Destructible.Break calls GetComponent<Collider>().enabled=false and would NPE without
+    // one. One-shot: Break has no re-entry guard (it re-launches every fragment), so we
+    // Destroy this component after the first hit.
+    public class Smashable : MonoBehaviour
+    {
+        const float RiderRadiusWorld = 0.6f; // ~capsule radius; catch margin, scale-folded
+
+        Destructible _destr;
+        Vector3 _center;                     // box centre, local (unscaled) space
+        Vector3 _half = new Vector3(0.15f, 0.15f, 0.15f);
+        Snowboarder[] _riders;
+        readonly Dictionary<Snowboarder, Vector3> _prev = new Dictionary<Snowboarder, Vector3>();
+
+        void Awake()
+        {
+            _destr = GetComponent<Destructible>();
+            var box = GetComponent<BoxCollider>();
+            if (box != null)
+            {
+                _center = box.center;
+                _half = box.size * 0.5f;
+                box.enabled = false; // geometry carrier only — never a live collider
+            }
+            if (_destr == null) enabled = false;
+        }
+
+        void FixedUpdate()
+        {
+            if (_destr == null) { Destroy(this); return; }
+            if (_riders == null || _riders.Length == 0)
+            {
+                _riders = UnityEngine.Object.FindObjectsOfType<Snowboarder>();
+                if (_riders.Length == 0) return; // riders not spawned yet
+            }
+            // Fold the rider's world catch-radius into local (unscaled) units so the margin
+            // is a constant ~0.6 m in the world regardless of map WorldScale (the box is
+            // authored at unit scale; the transform carries the scale-up).
+            float ls = transform.lossyScale.x;
+            float m = ls > 1e-4f ? RiderRadiusWorld / ls : RiderRadiusWorld;
+            Vector3 half = _half + new Vector3(m, m, m);
+
+            foreach (var sb in _riders)
+            {
+                if (sb == null) continue;
+                Vector3 cur = transform.InverseTransformPoint(sb.transform.position);
+                if (!_prev.TryGetValue(sb, out var prev)) prev = cur; // first tick: point test
+                _prev[sb] = cur;
+                if (!SegmentHitsBox(prev, cur, _center, half)) continue;
+
+                Vector3 vel = Traverse.Create(sb).Field("velocity").GetValue<Vector3>();
+                _destr.Break(vel);
+                Destroy(this); // one-shot — Break re-launches every fragment if called twice
+                return;
+            }
+        }
+
+        // Slab test: does segment p0->p1 intersect the AABB centred at c with half-extents h?
+        static bool SegmentHitsBox(Vector3 p0, Vector3 p1, Vector3 c, Vector3 h)
+        {
+            Vector3 d = p1 - p0;
+            float tmin = 0f, tmax = 1f;
+            for (int a = 0; a < 3; a++)
+            {
+                float o = p0[a] - c[a], di = d[a], ha = h[a];
+                if (Mathf.Abs(di) < 1e-8f)
+                {
+                    if (o < -ha || o > ha) return false; // parallel to slab and outside it
+                }
+                else
+                {
+                    float t1 = (-ha - o) / di, t2 = (ha - o) / di;
+                    if (t1 > t2) { var tmp = t1; t1 = t2; t2 = tmp; }
+                    if (t1 > tmin) tmin = t1;
+                    if (t2 < tmax) tmax = t2;
+                    if (tmin > tmax) return false;
+                }
+            }
+            return true;
         }
     }
 }
