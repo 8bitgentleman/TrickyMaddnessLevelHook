@@ -36,6 +36,7 @@ mcs -target:library -out:"$HERE/TrickyMaddnessLevelHook.dll" \
   -r:"$MANAGED/UnityEngine.TextRenderingModule.dll" \
   -r:"$MANAGED/UnityEngine.AssetBundleModule.dll" \
   -r:"$MANAGED/UnityEngine.PhysicsModule.dll" \
+  -r:"$MANAGED/UnityEngine.AnimationModule.dll" \
   -r:"$MANAGED/UnityEngine.ImageConversionModule.dll" \
   -r:"$MANAGED/Unity.TextMeshPro.dll" \
   -r:"$MANAGED/netstandard.dll" \
