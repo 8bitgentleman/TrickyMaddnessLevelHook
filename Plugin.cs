@@ -1239,6 +1239,48 @@ namespace TrickyMaddnessLevelHook
             if (tpAttached > 0 || tpSkipped > 0)
                 Log.LogInfo($"[Teleport] attached {tpAttached} teleport volume(s), skipped {tpSkipped}");
 
+            // Phase 4 custom items — TriggerAnim ("door") volumes. Naming contract with
+            // SSXImporter.BuildItems: a GO named "TriggerAnim_*" ships fully authored —
+            // LIVE trigger BoxCollider (layer 2), legacy Animation with the baked
+            // closed→open clip (ClampForever), and the door prop reparented underneath.
+            // We only attach the GAME'S OWN PlayAnimationOnTriggerEnter (HOOK_NOTES §11,
+            // the SSX-Tokyo tree-trigger mechanism): any Snowboarder entering plays the
+            // Animation. Its Start() self-heals m_animation and the audio locations, but
+            // OnTriggerEnter posts startEvent with NO null check — a component born via
+            // AddComponent (not deserialization) has null Wwise event fields, so blank
+            // AK.Wwise.Event instances are Traverse-set (Event.Post is IsValid()-gated:
+            // a blank event no-ops silently instead of NRE'ing). Its private `triggered`
+            // one-shot flag is checked but never set by the game, so the anim replays on
+            // every entry — harmless: ClampForever means an open door just stays open.
+            int taAttached = 0, taSkipped = 0;
+            var patType = AccessTools.TypeByName("PlayAnimationOnTriggerEnter");
+            var wwiseEventType = AccessTools.TypeByName("AK.Wwise.Event");
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("TriggerAnim_")) continue;
+                    var taGO = t.gameObject;
+                    if (patType == null || wwiseEventType == null)
+                    { taSkipped++; Log.LogWarning("[TriggerAnim] game types missing — skipped"); continue; }
+                    if (taGO.GetComponent(patType) != null) continue;   // already attached
+                    if (taGO.GetComponent<Animation>() == null)
+                    { taSkipped++; Log.LogDebug($"[TriggerAnim] '{taGO.name}' skipped: no Animation"); continue; }
+                    var pat = taGO.AddComponent(patType);
+                    var tr = Traverse.Create(pat);
+                    tr.Field("startEvent").SetValue(Activator.CreateInstance(wwiseEventType));
+                    tr.Field("endEvent").SetValue(Activator.CreateInstance(wwiseEventType));
+                    // Start() would set these anyway; set them here too in case a rider is
+                    // already inside the box when physics wakes up before Start runs.
+                    tr.Field("m_animation").SetValue(taGO.GetComponent<Animation>());
+                    tr.Field("audioLocation1").SetValue(taGO);
+                    tr.Field("audioLocation2").SetValue(taGO);
+                    taAttached++;
+                }
+            }
+            if (taAttached > 0 || taSkipped > 0)
+                Log.LogInfo($"[TriggerAnim] attached {taAttached} door trigger(s), skipped {taSkipped}");
+
             // Per-level sky-fill override. Naming contract with SSXImporter.BuildLighting:
             // an empty marker GO named "SkyFill_<RRGGBB>" (from Overrides.json
             // lighting.skyFillColor). MUST be read before the SkydomeFollow attach below —
