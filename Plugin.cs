@@ -1204,7 +1204,12 @@ namespace TrickyMaddnessLevelHook
                         Log.LogDebug($"[Wind] '{windGO.name}' name has no parseable strength -> default {strength}");
                     }
                     var wv = windGO.AddComponent<WindVolume>();
-                    wv.WorldDir = t.forward;
+                    // Push direction: an optional "Dir" child (importer emits it for SSX boost
+                    // fields, whose push vector is independent of the box's own orientation — the
+                    // box is oriented to the source volume so its OBB containment matches). No
+                    // Dir child (editor-drawn wind volumes) => the box's own forward, as before.
+                    var windDir = t.Find("Dir");
+                    wv.WorldDir = windDir != null ? windDir.forward : t.forward;
                     wv.Strength = strength;
                     windAttached++;
                 }
