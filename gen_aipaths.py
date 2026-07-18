@@ -10,14 +10,21 @@ bundle, though — this script reads it with UnityPy and writes
 
 Sidecar format (one token line per point, invariant-culture floats):
     # comment
-    scale <f>       <- optional map world-scale header (Hook gravity scaling)
-    path            <- starts a new path
-    <x> <z> <0|1>   <- world XZ position + windup flag
+    scale <f>          <- optional map world-scale header (Hook gravity scaling)
+    platform <p>       <- optional native-GPU platform: "mac" or "windows".
+                          Tells the Hook the bundle's own shaders are native to
+                          that backend so it trusts them (no shader remap). Our
+                          bundles are Mac-built, so Mac ports want "platform mac"
+                          — WITHOUT it every URP/Unlit material (emissive glow,
+                          lightmap-overlay decal) collapses to the Lit fallback.
+    path               <- starts a new path
+    <x> <z> <0|1>      <- world XZ position + windup flag
 
 Usage:
-    python3 gen_aipaths.py [--scale <f>] <map1.asset> [map2.asset ...]
+    python3 gen_aipaths.py [--scale <f>] [--platform <mac|windows>] \
+        <map1.asset> [map2.asset ...]
 
---scale applies to every asset listed in the same invocation.
+--scale/--platform apply to every asset listed in the same invocation.
 """
 import sys
 import os
@@ -80,17 +87,30 @@ def extract(asset_path):
 def main(argv):
     args = argv[1:]
     scale = None
-    if args and args[0] == "--scale":
+    platform = None
+    while args and args[0].startswith("--"):
+        flag = args[0]
         if len(args) < 2:
-            print("--scale requires a value", file=sys.stderr)
+            print("%s requires a value" % flag, file=sys.stderr)
             return 2
-        try:
-            scale = float(args[1])
-        except ValueError:
-            print("--scale value must be a float, got %r" % args[1],
-                  file=sys.stderr)
-            return 2
+        val = args[1]
         args = args[2:]
+        if flag == "--scale":
+            try:
+                scale = float(val)
+            except ValueError:
+                print("--scale value must be a float, got %r" % val,
+                      file=sys.stderr)
+                return 2
+        elif flag == "--platform":
+            if val not in ("mac", "windows"):
+                print("--platform must be 'mac' or 'windows', got %r" % val,
+                      file=sys.stderr)
+                return 2
+            platform = val
+        else:
+            print("unknown flag %r" % flag, file=sys.stderr)
+            return 2
     if not args:
         print(__doc__)
         return 2
@@ -107,6 +127,8 @@ def main(argv):
                     % os.path.basename(asset_path))
             if scale is not None:
                 f.write("scale %r\n" % scale)
+            if platform is not None:
+                f.write("platform %s\n" % platform)
             for pts in paths:
                 f.write("path\n")
                 for x, z, w in pts:
