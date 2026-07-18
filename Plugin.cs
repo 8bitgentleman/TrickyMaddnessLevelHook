@@ -1286,6 +1286,46 @@ namespace TrickyMaddnessLevelHook
             if (taAttached > 0 || taSkipped > 0)
                 Log.LogInfo($"[TriggerAnim] attached {taAttached} door trigger(s), skipped {taSkipped}");
 
+            // AnimDoor (feature: gameplay.animDoors). Naming contract with
+            // SSXImporter.BuildAnimDoors:
+            //   AnimDoor_<doorIdx>            — door GO with a legacy Animation (baked open clip).
+            //   AnimDoorTrig_<doorIdx>_<trig> — trigger box relaying into that door.
+            // Unlike TriggerAnim above (1 trigger reparents + plays 1 prop on its OWN GO),
+            // SSX doors are N triggers -> M doors (merquer: one trigger opens two gates), and
+            // the game's PlayAnimationOnTriggerEnter force-binds m_animation to its own GO in
+            // Start() — so a shared door can't ride under a trigger. The door instead carries
+            // its own Animation; each trigger references it by parsing <doorIdx> from its name.
+            // AnimDoorTrigger Play()s the resolved door on rider entry (analytic OBB
+            // containment like Teleport/Wind — no trigger-callback reliance for thin volumes).
+            int adDoors = 0, adTrig = 0, adSkip = 0;
+            var animDoorByIdx = new Dictionary<string, Animation>();
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("AnimDoor_")) continue;
+                    var anim = t.GetComponent<Animation>();
+                    if (anim == null) continue;   // static door (no animated part) — nothing to drive
+                    animDoorByIdx[t.name.Substring("AnimDoor_".Length)] = anim;
+                    adDoors++;
+                }
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("AnimDoorTrig_")) continue;
+                    var trigGO = t.gameObject;
+                    if (trigGO.GetComponent<AnimDoorTrigger>() != null) continue;   // already attached
+                    // name = AnimDoorTrig_<doorIdx>_<trigIdx>; the door idx is segment [1].
+                    var segs = t.name.Split('_');
+                    if (segs.Length < 3 || !animDoorByIdx.TryGetValue(segs[1], out var doorAnim))
+                    { adSkip++; Log.LogDebug($"[AnimDoor] trigger '{t.name}' has no matching AnimDoor_ — skipped"); continue; }
+                    var rel = trigGO.AddComponent<AnimDoorTrigger>();
+                    rel.target = doorAnim;
+                    rel.clipName = "AnimDoor_" + segs[1];
+                    adTrig++;
+                }
+            if (adDoors > 0 || adTrig > 0 || adSkip > 0)
+                Log.LogInfo($"[AnimDoor] attached {adTrig} trigger(s) driving {adDoors} door(s), skipped {adSkip}");
+
             // Per-level sky-fill override. Naming contract with SSXImporter.BuildLighting:
             // an empty marker GO named "SkyFill_<RRGGBB>" (from Overrides.json
             // lighting.skyFillColor). MUST be read before the SkydomeFollow attach below —
@@ -2552,6 +2592,58 @@ namespace TrickyMaddnessLevelHook
             if (!_vel.TryGetValue(sb, out var velT))
             { velT = Traverse.Create(sb).Field("velocity"); _vel[sb] = velT; }
             velT.SetValue(Vector3.zero);
+        }
+    }
+
+    // Relay for a trigger-driven animated door (feature: gameplay.animDoors). The
+    // importer emits the door GO's Animation separately (N triggers can share one door,
+    // which the game's own PlayAnimationOnTriggerEnter can't express — it force-binds to
+    // its own GO). While a Snowboarder's origin enters this box we Play() the referenced
+    // door once per entry (edge-triggered). Analytic OBB containment (box disabled) like
+    // TeleportVolume/WindVolume — thin trigger volumes tunnel physics trigger callbacks.
+    // ClampForever clips: the door opens and stays open; a replay on re-entry is harmless.
+    public class AnimDoorTrigger : MonoBehaviour
+    {
+        public Animation target;
+        public string clipName;
+
+        Vector3 _halfLocal = new Vector3(0.5f, 0.5f, 0.5f);
+        Vector3 _center = Vector3.zero;   // box.center: model-bounds offset from the instance origin
+        Snowboarder[] _riders;
+        readonly HashSet<Snowboarder> _inside = new HashSet<Snowboarder>();
+
+        void Awake()
+        {
+            var box = GetComponent<BoxCollider>();
+            if (box != null)
+            {
+                _halfLocal = box.size * 0.5f;   // local half-extents; containment is in local space
+                _center = box.center;
+                box.enabled = false;            // geometry carrier only
+            }
+            if (target == null) enabled = false;
+        }
+
+        void FixedUpdate()
+        {
+            if (target == null) return;
+            if (_riders == null || _riders.Length == 0)
+            {
+                _riders = UnityEngine.Object.FindObjectsOfType<Snowboarder>();
+                if (_riders.Length == 0) return; // riders not spawned yet
+            }
+            foreach (var sb in _riders)
+            {
+                if (sb == null) continue;
+                Vector3 local = transform.InverseTransformPoint(sb.transform.position) - _center;
+                bool inside = Mathf.Abs(local.x) <= _halfLocal.x
+                           && Mathf.Abs(local.y) <= _halfLocal.y
+                           && Mathf.Abs(local.z) <= _halfLocal.z;
+                if (!inside) { _inside.Remove(sb); continue; }
+                if (!_inside.Add(sb)) continue;   // already inside — edge-trigger only
+                if (!string.IsNullOrEmpty(clipName)) target.Play(clipName);
+                else target.Play();
+            }
         }
     }
 
