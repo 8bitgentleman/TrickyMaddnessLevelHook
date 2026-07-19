@@ -11,6 +11,9 @@ bundle, though — this script reads it with UnityPy and writes
 Sidecar format (one token line per point, invariant-culture floats):
     # comment
     scale <f>          <- optional map world-scale header (Hook gravity scaling)
+    gravity <f>        <- optional per-map gravity multiplier (Hook feature 8).
+                          Independent of scale: >1 = heavier, <1 = lighter,
+                          applied at any world scale. Absent = 1.0 (stock).
     platform <p>       <- optional native-GPU platform: "mac" or "windows".
                           Tells the Hook the bundle's own shaders are native to
                           that backend so it trusts them (no shader remap). Our
@@ -21,10 +24,10 @@ Sidecar format (one token line per point, invariant-culture floats):
     <x> <z> <0|1>      <- world XZ position + windup flag
 
 Usage:
-    python3 gen_aipaths.py [--scale <f>] [--platform <mac|windows>] \
-        <map1.asset> [map2.asset ...]
+    python3 gen_aipaths.py [--scale <f>] [--gravity <f>] \
+        [--platform <mac|windows>] <map1.asset> [map2.asset ...]
 
---scale/--platform apply to every asset listed in the same invocation.
+--scale/--gravity/--platform apply to every asset listed in the same invocation.
 """
 import sys
 import os
@@ -87,6 +90,7 @@ def extract(asset_path):
 def main(argv):
     args = argv[1:]
     scale = None
+    gravity = None
     platform = None
     while args and args[0].startswith("--"):
         flag = args[0]
@@ -101,6 +105,16 @@ def main(argv):
             except ValueError:
                 print("--scale value must be a float, got %r" % val,
                       file=sys.stderr)
+                return 2
+        elif flag == "--gravity":
+            try:
+                gravity = float(val)
+            except ValueError:
+                print("--gravity value must be a float, got %r" % val,
+                      file=sys.stderr)
+                return 2
+            if gravity <= 0:
+                print("--gravity must be > 0, got %r" % val, file=sys.stderr)
                 return 2
         elif flag == "--platform":
             if val not in ("mac", "windows"):
@@ -127,6 +141,8 @@ def main(argv):
                     % os.path.basename(asset_path))
             if scale is not None:
                 f.write("scale %r\n" % scale)
+            if gravity is not None:
+                f.write("gravity %r\n" % gravity)
             if platform is not None:
                 f.write("platform %s\n" % platform)
             for pts in paths:

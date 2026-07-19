@@ -73,6 +73,14 @@ namespace TrickyMaddnessLevelHook
         // 1.0 for built-in levels, sidecar-less maps, and maps with no scale line
         // — i.e. everything that exists today.
         internal static float WorldScale = 1f;
+        // Per-map gravity multiplier from the optional "gravity <f>" header line in
+        // the active custom map's .aipaths.txt sidecar. INDEPENDENT of WorldScale:
+        // applies at 1x too, so a course can ask for heavier (>1) or lighter (<1)
+        // gravity regardless of its size. 1.0 for built-in levels, sidecar-less
+        // maps, and maps with no gravity line — i.e. everything that exists today.
+        // Reset to 1 on every built-in selection and menu return (same lifetime
+        // rule as WorldScale) so built-in gravity stays provably stock.
+        internal static float MapGravityMultiplier = 1f;
         // Platform the active custom map's bundle was authored native to, from an
         // optional "platform <windows|mac>" line in its .aipaths.txt sidecar. null
         // (every existing map, no header) means "unknown — assume the bytecode is
@@ -307,10 +315,11 @@ namespace TrickyMaddnessLevelHook
             // go through the LoadScene prefix) restores stock gravity. The pending
             // guard keeps a possible intermediate loading scene during a custom
             // load from resetting the scale the prefix just read.
-            if (!isCustomScene && pendingSceneName == null && WorldScale != 1f)
+            if (!isCustomScene && pendingSceneName == null && (WorldScale != 1f || MapGravityMultiplier != 1f))
             {
                 WorldScale = 1f;
-                Log.LogInfo("[Gravity] left scaled custom map; world scale reset to 1");
+                MapGravityMultiplier = 1f;
+                Log.LogInfo("[Gravity] left custom map; world scale + gravity multiplier reset to 1");
             }
 
             // Per-level sky fill must never outlive its map (same lifetime rule as
@@ -1703,6 +1712,36 @@ namespace TrickyMaddnessLevelHook
             }
         }
 
+        // Reads the optional "gravity <f>" header from a map's .aipaths.txt
+        // sidecar. Returns 1.0 (no change) for a missing sidecar, no gravity
+        // line, or a non-positive value. Independent of the "scale" header —
+        // applies at any world scale (see ScaledGravity).
+        internal static float ReadGravityMultiplier(string bundlePath)
+        {
+            try
+            {
+                string sidecarPath = Path.ChangeExtension(bundlePath, ".aipaths.txt");
+                if (!File.Exists(sidecarPath)) return 1f;
+                foreach (var raw in File.ReadAllLines(sidecarPath))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("#")) continue;
+                    var t = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (t.Length != 2 || t[0] != "gravity") continue;
+                    float g = float.Parse(t[1], CultureInfo.InvariantCulture);
+                    if (g > 0f) return g;
+                    Log.LogWarning($"[Gravity] sidecar {Path.GetFileName(sidecarPath)} declares gravity {t[1]} (must be > 0); ignoring");
+                    return 1f;
+                }
+                return 1f;
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"[Gravity] failed reading gravity multiplier sidecar for {bundlePath}: {e}");
+                return 1f;
+            }
+        }
+
         // Reads the optional "platform <windows|mac>" header from a map's
         // .aipaths.txt sidecar. Returns null (no declaration) for a missing
         // sidecar, no platform line, or an unrecognized value — the safe default
@@ -1742,9 +1781,19 @@ namespace TrickyMaddnessLevelHook
         // built-in selection and menu return, built-in gravity is provably stock.
         public static float ScaledGravity(float baseGravity)
         {
-            if (WorldScale == 1f || scaleGravityWithMap == null || !scaleGravityWithMap.Value)
-                return baseGravity;
-            return baseGravity * WorldScale;
+            float g = baseGravity;
+            // Legacy opt-in: heavier gravity proportional to a scaled-UP world,
+            // to shrink jump arcs back toward original proportions. Off by
+            // default; inert at scale 1.
+            if (WorldScale != 1f && scaleGravityWithMap != null && scaleGravityWithMap.Value)
+                g *= WorldScale;
+            // Per-map gravity multiplier from the sidecar (feature 8). Independent
+            // of world scale and always applied — so a 1x port can still ask for
+            // heavier gravity. 1.0 (the default, and reset on every built-in
+            // selection / menu return) leaves gravity untouched, keeping built-in
+            // levels provably stock.
+            g *= MapGravityMultiplier;
+            return g;
         }
 
         // Routes matching ldc.r4 literals through ScaledGravity. The gravity
@@ -1815,6 +1864,7 @@ namespace TrickyMaddnessLevelHook
                 }
                 Plugin.pendingSceneName = null;
                 Plugin.WorldScale = 1f;
+                Plugin.MapGravityMultiplier = 1f;
                 Plugin.BundleNativePlatform = null;
                 return true;
             }
@@ -1895,6 +1945,12 @@ namespace TrickyMaddnessLevelHook
                 Plugin.WorldScale = Plugin.ReadWorldScale(path);
                 if (Plugin.WorldScale != 1f)
                     Plugin.Log.LogInfo($"[Gravity] map declares world scale {Plugin.WorldScale.ToString(CultureInfo.InvariantCulture)}; gravity scaling {(Plugin.scaleGravityWithMap.Value ? "enabled" : "disabled by config")}");
+
+                // Per-map gravity multiplier from the same sidecar (1.0 when absent).
+                // Read on reuse too — the sidecar may have changed on disk.
+                Plugin.MapGravityMultiplier = Plugin.ReadGravityMultiplier(path);
+                if (Plugin.MapGravityMultiplier != 1f)
+                    Plugin.Log.LogInfo($"[Gravity] map declares gravity multiplier {Plugin.MapGravityMultiplier.ToString(CultureInfo.InvariantCulture)}x (applied on top of any world-scale gravity)");
 
                 // Native-platform declaration from the same sidecar (null when absent).
                 // Read on reuse too — the sidecar may have changed on disk.
