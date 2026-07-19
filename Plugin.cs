@@ -2667,6 +2667,8 @@ namespace TrickyMaddnessLevelHook
         Vector3 _center = Vector3.zero;   // box.center: model-bounds offset from the instance origin
         Snowboarder[] _riders;
         readonly HashSet<Snowboarder> _inside = new HashSet<Snowboarder>();
+        readonly Dictionary<Snowboarder, Vector3> _prev = new Dictionary<Snowboarder, Vector3>();
+        bool _opened;   // door colliders disabled once (idempotent), and log emitted once
 
         void Awake()
         {
@@ -2677,7 +2679,10 @@ namespace TrickyMaddnessLevelHook
                 _center = box.center;
                 box.enabled = false;            // geometry carrier only
             }
-            if (target == null) enabled = false;
+            // NOTE: do NOT self-disable on a null target here. AddComponent runs Awake
+            // synchronously, BEFORE the wiring assigns `target` on the next line — so target is
+            // ALWAYS null at this point and disabling would switch off every relay permanently
+            // (the "attached N, fired 0" bug). FixedUpdate already early-returns on a null target.
         }
 
         void FixedUpdate()
@@ -2691,15 +2696,60 @@ namespace TrickyMaddnessLevelHook
             foreach (var sb in _riders)
             {
                 if (sb == null) continue;
-                Vector3 local = transform.InverseTransformPoint(sb.transform.position) - _center;
-                bool inside = Mathf.Abs(local.x) <= _halfLocal.x
-                           && Mathf.Abs(local.y) <= _halfLocal.y
-                           && Mathf.Abs(local.z) <= _halfLocal.z;
-                if (!inside) { _inside.Remove(sb); continue; }
-                if (!_inside.Add(sb)) continue;   // already inside — edge-trigger only
-                if (!string.IsNullOrEmpty(clipName)) target.Play(clipName);
-                else target.Play();
+                // Swept test: the trigger boxes are only ~6 m across and the rider crosses at
+                // 70-85 m/s (>1 box-width per fixed tick), so a point-in-box sample tunnels clean
+                // through and never fires. Test the segment from the rider's PREVIOUS origin to its
+                // current one against the box (local-space slab test) — this can't tunnel. Mirrors
+                // the Smashable swept design for the same reason.
+                Vector3 cur = transform.InverseTransformPoint(sb.transform.position);
+                Vector3 prev = _prev.TryGetValue(sb, out var p) ? p : cur;
+                _prev[sb] = cur;
+                bool hit = SegmentHitsBox(prev, cur, _center, _halfLocal);
+                if (!hit) { _inside.Remove(sb); continue; }
+                if (!_inside.Add(sb)) continue;   // still crossing — edge-trigger only
+                Fire();
             }
+        }
+
+        void Fire()
+        {
+            if (!string.IsNullOrEmpty(clipName)) target.Play(clipName);
+            else target.Play();
+            if (_opened) return;
+            _opened = true;
+            // Open the path independent of how far the baked animation actually travels: disable the
+            // closed door's blocking colliders. The trigger sits ahead of the door, so this clears
+            // before the rider arrives; the animation then plays purely for show. No deadlock.
+            foreach (var col in target.GetComponentsInChildren<Collider>())
+                col.enabled = false;
+            Plugin.Log.LogInfo($"[AnimDoor] trigger '{name}' fired -> opened '{target.name}'");
+        }
+
+        // Segment p0->p1 vs axis-aligned box (center, half) in the box's own local space. Slab
+        // method: clamp the [0,1] parametric interval against each axis' slab; empty => miss.
+        static bool SegmentHitsBox(Vector3 p0, Vector3 p1, Vector3 center, Vector3 half)
+        {
+            Vector3 d = p1 - p0;
+            float tmin = 0f, tmax = 1f;
+            for (int a = 0; a < 3; a++)
+            {
+                float o = p0[a] - center[a];
+                float di = d[a];
+                float mn = -half[a], mx = half[a];
+                if (Mathf.Abs(di) < 1e-8f)
+                {
+                    if (o < mn || o > mx) return false; // parallel to slab and outside it
+                }
+                else
+                {
+                    float t1 = (mn - o) / di, t2 = (mx - o) / di;
+                    if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
+                    if (t1 > tmin) tmin = t1;
+                    if (t2 < tmax) tmax = t2;
+                    if (tmin > tmax) return false;
+                }
+            }
+            return true;
         }
     }
 
