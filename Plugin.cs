@@ -1477,6 +1477,46 @@ namespace TrickyMaddnessLevelHook
             }
             if (smashWired > 0)
                 Log.LogInfo($"[Destructible] wired {smashWired} smashable(s) with {smashFrags} shard fragment(s)");
+
+            // Atmospheric falling snow. Naming contract with SSXImporter.BuildLighting:
+            // an empty GO "SnowFX_<intensity>". We build a camera-follow ParticleSystem
+            // at runtime (SnowFall) — a bundle-baked system would be engine-module-stripped
+            // and, world-simulated, couldn't stay wrapped around the chase cam. One system
+            // total (there's only ever one marker); intensity scales emission + cap.
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("SnowFX_")) continue;
+                    if (SnowFall.Active) break;
+                    float si;
+                    if (!float.TryParse(t.name.Substring("SnowFX_".Length), NumberStyles.Float,
+                                        CultureInfo.InvariantCulture, out si)) si = 1f;
+                    SnowFall.Spawn(si);
+                    Log.LogInfo($"[SnowFall] camera-follow snow spawned (intensity {si:F2})");
+                }
+                if (SnowFall.Active) break;
+            }
+
+            // Post-process bloom. Naming contract: "Bloom_<intensity>_<threshold>". PostFX
+            // creates a global URP Volume with a Bloom override and flips the render
+            // camera's post-processing on (feature: PostFX). One volume total.
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("Bloom_")) continue;
+                    if (PostFX.Active) break;
+                    string[] seg = t.name.Split('_');
+                    float bi = 0.7f, bt = 0.9f;
+                    if (seg.Length >= 2) float.TryParse(seg[1], NumberStyles.Float, CultureInfo.InvariantCulture, out bi);
+                    if (seg.Length >= 3) float.TryParse(seg[2], NumberStyles.Float, CultureInfo.InvariantCulture, out bt);
+                    PostFX.Enable(bi, bt);
+                    Log.LogInfo($"[PostFX] bloom enabled (intensity {bi:F2}, threshold {bt:F2})");
+                }
+                if (PostFX.Active) break;
+            }
+
             // NB: the open-top sky-fill is started from OnSceneLoaded (not here) —
             // SolidColorSky captures the ACTIVE scene name, which isn't the custom scene
             // yet at LoadLevelManager time, so starting it here exits immediately.
@@ -2397,6 +2437,190 @@ namespace TrickyMaddnessLevelHook
             }
             transform.position = _cam.position;
         }
+    }
+
+    // Camera-follow atmospheric snowfall. The importer bakes an empty "SnowFX_<intensity>"
+    // marker; we build the ParticleSystem here at runtime because (a) a bundle-baked
+    // ParticleSystem is silently stripped unless the module is in the import project, and
+    // (b) it must stay wrapped around the chase cam. Simulated in WORLD space so flakes
+    // fall past a turning camera naturally (a camera-parented/local system would rotate the
+    // whole snowfield with the view); the emitter box just re-centres on the camera each
+    // LateUpdate so there is always fresh snow around the rider even at 190 mph. Geometry
+    // is fixed and playtest-tuned; intensity scales only emission rate + particle cap.
+    public class SnowFall : MonoBehaviour
+    {
+        public static bool Active;
+        Transform _cam;
+
+        public static void Spawn(float intensity)
+        {
+            var go = new GameObject("HookSnowFall");
+            go.AddComponent<SnowFall>().Build(Mathf.Clamp(intensity, 0.05f, 8f));
+            Active = true;
+        }
+
+        void Build(float intensity)
+        {
+            var ps = gameObject.AddComponent<ParticleSystem>();
+            ps.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+
+            var main = ps.main;
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(4f, 6.5f);  // desync the fall
+            main.startSpeed = 0f;                    // motion comes from velocityOverLifetime
+            // Wide size spread so flakes read as near/far, not one uniform grade — some fine
+            // spindrift (0.05), a few fatter foreground flakes (0.55; 0.8 read as dust bunnies).
+            main.startSize = new ParticleSystem.MinMaxCurve(0.05f, 0.55f);
+            main.startColor = new Color(0.93f, 0.96f, 1f, 0.85f);
+            main.maxParticles = Mathf.CeilToInt(3400 * intensity);
+            main.gravityModifier = 0f;
+            main.playOnAwake = false;
+
+            var emission = ps.emission;
+            emission.rateOverTime = 650f * intensity;   // ~2x the first pass
+
+            var shape = ps.shape;
+            shape.enabled = true;
+            shape.shapeType = ParticleSystemShapeType.Box;
+            shape.scale = new Vector3(70f, 45f, 70f); // band around the camera (world units)
+
+            var vel = ps.velocityOverLifetime;
+            vel.enabled = true;
+            vel.space = ParticleSystemSimulationSpace.World;
+            vel.x = new ParticleSystem.MinMaxCurve(-1.5f, 1.5f);  // drift
+            vel.y = new ParticleSystem.MinMaxCurve(-7f, -4f);     // fall
+            vel.z = new ParticleSystem.MinMaxCurve(-1.5f, 1.5f);
+
+            // Non-uniform density: soft low-frequency turbulence swirls flakes into clumps
+            // and gaps instead of an even rain grid — the "make it not so uniform" fix.
+            var noise = ps.noise;
+            noise.enabled = true;
+            noise.strength = 1.6f;      // world-unit drift amplitude
+            noise.frequency = 0.22f;    // large soft swirls, not jitter
+            noise.scrollSpeed = 0.35f;
+            noise.damping = true;
+            noise.quality = ParticleSystemNoiseQuality.Medium;
+
+            var pr = GetComponent<ParticleSystemRenderer>();
+            pr.renderMode = ParticleSystemRenderMode.Billboard;
+            pr.alignment = ParticleSystemRenderSpace.View;
+            pr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            pr.receiveShadows = false;
+            pr.material = FlakeMaterial();
+
+            ps.Play();
+        }
+
+        void LateUpdate()
+        {
+            if (_cam == null)
+            {
+                var c = Camera.main;
+                if (c == null) return;
+                _cam = c.transform;
+            }
+            // Centre the emission band on the camera; world-sim keeps the falling motion.
+            transform.position = _cam.position;
+        }
+
+        void OnDestroy() { Active = false; }
+
+        static Material _flakeMat;
+        static Material FlakeMaterial()
+        {
+            if (_flakeMat != null) return _flakeMat;
+            var sh = Shader.Find("Universal Render Pipeline/Particles/Unlit")
+                     ?? Shader.Find("Universal Render Pipeline/Unlit");
+            var m = new Material(sh) { name = "HookSnowFlake" };
+            m.SetTexture("_BaseMap", FlakeSprite());
+            m.SetColor("_BaseColor", Color.white);
+            // Transparent alpha-blend (the URP incantation ApplyTexMode uses on the importer side).
+            m.SetFloat("_Surface", 1f);
+            m.SetFloat("_Blend", 0f);
+            m.SetFloat("_SrcBlend", (float)UnityEngine.Rendering.BlendMode.SrcAlpha);
+            m.SetFloat("_DstBlend", (float)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+            m.SetFloat("_ZWrite", 0f);
+            m.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
+            m.DisableKeyword("_ALPHATEST_ON");
+            m.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;
+            _flakeMat = m;
+            return m;
+        }
+
+        static Texture2D _flakeTex;
+        static Texture2D FlakeSprite()
+        {
+            if (_flakeTex != null) return _flakeTex;
+            const int N = 32;
+            var t = new Texture2D(N, N, TextureFormat.RGBA32, false) { name = "HookSnowFlakeTex" };
+            float c = (N - 1) / 2f;
+            for (int y = 0; y < N; y++)
+                for (int x = 0; x < N; x++)
+                {
+                    float d = Mathf.Sqrt((x - c) * (x - c) + (y - c) * (y - c)) / c;
+                    float a = Mathf.Clamp01(1f - d);
+                    a *= a;   // soft round falloff, no hard rim
+                    t.SetPixel(x, y, new Color(1f, 1f, 1f, a));
+                }
+            t.Apply();
+            t.wrapMode = TextureWrapMode.Clamp;
+            _flakeTex = t;
+            return t;
+        }
+    }
+
+    // URP post-process bloom. The importer bakes an empty "Bloom_<intensity>_<threshold>"
+    // marker; we create a runtime global Volume carrying a Bloom override and flip the
+    // render camera's post-processing on in beginCameraRendering (the game camera is null
+    // via Camera.main during load, same reason SkydomeFollow uses the pipeline-supplied
+    // camera). If the game's URP renderer has post-processing disabled at the feature level
+    // this is inert — verified by playtest, not assertable here.
+    public class PostFX : MonoBehaviour
+    {
+        public static bool Active;
+        float _intensity = 0.7f, _threshold = 0.9f;
+
+        public static void Enable(float intensity, float threshold)
+        {
+            if (Active) return;
+            var go = new GameObject("HookPostFX");
+            var fx = go.AddComponent<PostFX>();
+            fx._intensity = Mathf.Max(0f, intensity);
+            fx._threshold = Mathf.Max(0f, threshold);
+            fx.Build();
+            Active = true;
+        }
+
+        void Build()
+        {
+            var vol = gameObject.AddComponent<UnityEngine.Rendering.Volume>();
+            vol.isGlobal = true;
+            vol.priority = 100f;   // win over any game volume
+            var profile = ScriptableObject.CreateInstance<UnityEngine.Rendering.VolumeProfile>();
+            vol.sharedProfile = profile;
+
+            var bloom = profile.Add<UnityEngine.Rendering.Universal.Bloom>(true);
+            bloom.intensity.Override(_intensity);
+            bloom.threshold.Override(_threshold);
+            bloom.scatter.Override(0.72f);
+            bloom.tint.Override(new Color(0.9f, 0.95f, 1f));
+
+            UnityEngine.Rendering.RenderPipelineManager.beginCameraRendering += OnBeginCamera;
+        }
+
+        void OnBeginCamera(UnityEngine.Rendering.ScriptableRenderContext ctx, Camera cam)
+        {
+            if (cam == null || !cam.CompareTag("MainCamera")) return;
+            var data = cam.GetComponent<UnityEngine.Rendering.Universal.UniversalAdditionalCameraData>();
+            if (data != null && !data.renderPostProcessing)
+                data.renderPostProcessing = true;
+        }
+
+        void OnDisable()
+        {
+            UnityEngine.Rendering.RenderPipelineManager.beginCameraRendering -= OnBeginCamera;
+        }
+        void OnDestroy() { Active = false; }
     }
 
     // A wind push volume. Attached by the Hook's scene scan to every "Wind_<strength>" GO
