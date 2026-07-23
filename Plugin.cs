@@ -44,6 +44,7 @@ namespace TrickyMaddnessLevelHook
         // jump is the point; heavier gravity would shrink the arcs right back.
         // Inert at scale 1 and on built-in levels regardless of the flag.
         internal static ConfigEntry<bool> scaleGravityWithMap;
+        internal static ConfigEntry<float> startLaunchSpeedScale;
         // Fine-tune multiplier on the skydome's auto-fit (feature 13). SkydomeFollow
         // sizes the dome to ~95% of the camera far-clip plane each frame so it envelops
         // the whole visible course; this scales that target (1 = the fit). Tunable, no
@@ -106,6 +107,23 @@ namespace TrickyMaddnessLevelHook
         // absent. Nothing keys behavior off it — it exists only to answer
         // "where is this level from?" from inside the running game.
         internal static string BundleSource = DefaultSource;
+
+        // How LoadLevelManager seats the start gate + respawn markers onto the
+        // terrain, from the optional "spawnsnap <both|raise|off>" header in the
+        // active map's .aipaths.txt sidecar (gen_aipaths.py --spawnsnap):
+        //   Both  (default) — seat exactly on the surface + Clearance regardless
+        //          of the authored Y. Kills BOTH failure modes at once: an
+        //          authored-too-high marker (immediate drop) is lowered, an
+        //          embedded one (rider sinks into space) is raised.
+        //   Raise — only ever lift a marker out of the ground, never lower it;
+        //          a clean authored Y is untouched (the original, conservative
+        //          behavior — zero regression risk to a hand-tuned start).
+        //   Off   — leave every marker exactly as authored (gari's hand-placed
+        //          start is sensitive; opt it out via its sidecar).
+        // Custom-maps-only by construction: the markers only exist in rebuilt
+        // bundles, and the header is re-read on every custom load.
+        internal enum SpawnSnap { Both, Raise, Off }
+        internal static SpawnSnap SpawnSnapMode = SpawnSnap.Both;
 
         public static List<string> TrackNames = new List<string>();
         public static List<string> Paths = new List<string>();
@@ -176,6 +194,15 @@ namespace TrickyMaddnessLevelHook
                 "toward original proportions. Off by default — scaled-up maps are " +
                 "meant to keep stock gravity so jumps cover proportionally less " +
                 "ground. No effect on built-in levels or unscaled maps.");
+            startLaunchSpeedScale = Config.Bind("Gameplay", "StartLaunchSpeedScale", 0.7f,
+                "Custom-map start-launch fix (see StartLaunchRedirect): the game " +
+                "kicks every rider straight DOWN at the countdown's end and lets the " +
+                "ground redirect it. On custom maps whose start sits on a sideways " +
+                "slope that flings the rider off-line, the Hook re-steers the launch " +
+                "down-course; this scales the launch speed so it doesn't come out " +
+                "hot (the sideways projection preserves nearly the full kick, which a " +
+                "gentle down-course start would not). 1.0 = keep the full speed. " +
+                "Human rider only; no effect on built-in levels.");
             skydomeScale = Config.Bind("Skydome", "Scale", 1f,
                 "Fine-tune multiplier on the skydome's automatic fit. The dome is " +
                 "auto-sized each frame so its radius is ~90% of the camera's far-clip " +
@@ -856,6 +883,88 @@ namespace TrickyMaddnessLevelHook
             }
         }
 
+        // Rideable-ground layers a spawn marker may sit over: Default(0)/Ice(6)/
+        // Rock(7)/Metal(14) — the surfaces Snowboarder treats as ground (Wall(8)
+        // is bonk-not-ground, Water(4) is unreferenced; neither is ever a spawn
+        // floor). Broader than the original 0|6 so a start over rock/metal snaps.
+        const int SpawnGroundMask = (1 << 0) | (1 << 6) | (1 << 7) | (1 << 14);
+
+        // Rider capsule geometry, measured ONCE from the prefab, used to seat a
+        // marker so the capsule rests TANGENT to the surface without penetrating
+        // it — the key to a clean start on a banked gate. A flat "feet on the
+        // vertical surface point" seat sinks the capsule's uphill side into a
+        // sloped surface; PhysX then ejects the rider along the surface normal
+        // (mostly sideways on a steep bank) = the "shooting off to the side" bug.
+        // radius: capsule radius. skin: CC skinWidth. bottomSphereLocalY: the
+        // vertical offset, in the rider transform's local space, of the bottom
+        // hemisphere's CENTER above the transform origin (the game seats the rider
+        // transform on the marker). ok=false => probe failed, safe fallback used.
+        struct RiderCapsule { public float radius, height, centerY, skin, bottomSphereLocalY; public bool ok; }
+        static RiderCapsule _capsule;
+        static bool _capsuleProbed;
+        static RiderCapsule Capsule()
+        {
+            if (_capsuleProbed) return _capsule;
+            _capsuleProbed = true;
+            try
+            {
+                var rider = Resources.Load<GameObject>("Controllers/snowboarder");
+                var cc = rider != null ? rider.GetComponentInChildren<CharacterController>(true) : null;
+                if (cc != null)
+                {
+                    float r = Mathf.Max(0.01f, cc.radius);
+                    float h = Mathf.Max(2f * r, cc.height); // Unity clamps CC height to >= 2*radius
+                    _capsule = new RiderCapsule
+                    {
+                        radius = r,
+                        height = h,
+                        centerY = cc.center.y,
+                        skin = cc.skinWidth,
+                        bottomSphereLocalY = cc.center.y - (h * 0.5f - r),
+                        ok = true,
+                    };
+                    Log.LogInfo($"[Spawn] rider capsule radius={r:F2} height={h:F2} center.y={cc.center.y:F2} skin={cc.skinWidth:F3}");
+                    return _capsule;
+                }
+                Log.LogWarning("[Spawn] rider prefab 'Controllers/snowboarder' CharacterController not found; using fallback capsule");
+            }
+            catch (Exception e) { Log.LogWarning($"[Spawn] capsule probe failed ({e.Message}); using fallback capsule"); }
+            _capsule = new RiderCapsule { radius = 0.3f, height = 0.9f, centerY = 0f, skin = 0.01f, bottomSphereLocalY = 0f, ok = false };
+            return _capsule;
+        }
+
+        // Seats one spawn/respawn marker on the terrain below it. Casts down from
+        // just above the authored point (bounded, so it finds the nearby surface,
+        // not a distant ceiling under an overhang). Seats the capsule tangent to
+        // the hit surface using its NORMAL: the bottom sphere sits radius+skin
+        // clear along the normal, which needs (radius+skin)/cos(slope) of vertical
+        // lift — more on a bank, so the uphill side never penetrates. In Both mode
+        // the marker moves there whether that raises OR lowers it; Raise only ever
+        // moves up. Caller gates out Off mode and syncs transforms once per batch.
+        static void SnapMarkerToGround(Transform t, string label)
+        {
+            Vector3 p = t.position;
+            if (!Physics.Raycast(p + Vector3.up * 20f, Vector3.down, out var hit, 120f, SpawnGroundMask, QueryTriggerInteraction.Ignore))
+            {
+                Log.LogWarning($"[Spawn] no ground under {label} at {p} on layers 0|6|7|14 — left as authored");
+                return;
+            }
+            var cap = Capsule();
+            // cos of the slope under the marker; clamp so a near-vertical face (a
+            // bad ray hit) can't demand an absurd lift.
+            float cosSlope = Mathf.Clamp(hit.normal.y, 0.2f, 1f);
+            float clearance = (cap.radius + cap.skin + 0.02f) / cosSlope - cap.bottomSphereLocalY;
+            if (clearance < 0.02f) clearance = 0.02f;
+            float target = hit.point.y + clearance;
+            float newY = Plugin.SpawnSnapMode == Plugin.SpawnSnap.Raise ? Mathf.Max(p.y, target) : target;
+            if (Mathf.Abs(newY - p.y) > 0.01f)
+            {
+                t.position = new Vector3(p.x, newY, p.z);
+                Log.LogInfo($"[Spawn] {label} snapped {p.y:F2} -> {newY:F2} (terrain y={hit.point.y:F2}, {(newY > p.y ? "+" : "")}{newY - p.y:F2}, slope {Mathf.Acos(cosSlope) * Mathf.Rad2Deg:F0}deg, clearance {clearance:F2})");
+            }
+            else Log.LogInfo($"[Spawn] {label} already seated (y={p.y:F2}, terrain y={hit.point.y:F2}, slope {Mathf.Acos(cosSlope) * Mathf.Rad2Deg:F0}deg)");
+        }
+
         public static void LoadLevelManager()
         {
             //Find Main Starting Objects
@@ -864,35 +973,26 @@ namespace TrickyMaddnessLevelHook
             var MakerSpawnPoint = FindAnyObjectByType<MakerSpawnPoint>();
             var MakerRespawnPoint = FindAnyObjectByType<MakerRespawnPoints>();
 
-            // --- Spawn ground-snap ------------------------------------------------
+            // --- Spawn / respawn ground-snap -------------------------------------
             // The game seats the rider's CharacterController CENTER on the
             // startingGate transform with NO ground-check for the START (respawns
-            // get a 0.5 m down-probe; the start does not). SSX3 peak runs (B/D) are
-            // stitched from peak-cap + race-body + connector regions, so the authored
-            // start Y can land at/below the merged terrain surface -> the capsule
-            // straddles the floor, PhysX depenetrates it DOWNWARD, and the rider drops
-            // straight through. Cast onto the terrain (layer 0 ground, layer 6 ice)
-            // and RAISE the start so the capsule clears the surface. max() only ever
-            // raises, so a course that already spawns clean (gari, SSX3 E) is a no-op;
-            // gari terrain sits on its own mapped layers, so the mask usually misses
-            // it entirely and leaves the sensitive gari start exactly as authored.
-            if (MakerSpawnPoint != null)
+            // get only a 0.5 m down-probe). Two authoring failure modes result: an
+            // authored Y BELOW the terrain (the capsule straddles the floor, PhysX
+            // depenetrates DOWNWARD, rider drops through — e.g. SSX3 peak runs B/D
+            // stitched from peak-cap + race-body regions), and an authored Y ABOVE
+            // it (an immediate drop the instant the run starts). SnapMarkerToGround
+            // casts onto the terrain and, per the map's spawnsnap mode, seats each
+            // marker exactly on the surface (Both) or only lifts it clear (Raise);
+            // Off leaves everything authored (gari's hand-tuned start). This makes
+            // XZ the only coordinate a map author has to get right — Y is computed.
+            if (Plugin.SpawnSnapMode != Plugin.SpawnSnap.Off)
             {
-                const int TerrainMask = (1 << 0) | (1 << 6);
-                const float Clearance = 2f; // > half a rider capsule; a small drop is harmless, an embed is fatal
                 Physics.SyncTransforms();
-                Vector3 sp = MakerSpawnPoint.transform.position;
-                if (Physics.Raycast(sp + Vector3.up * 20f, Vector3.down, out var groundHit, 120f, TerrainMask, QueryTriggerInteraction.Ignore))
-                {
-                    float lifted = Mathf.Max(sp.y, groundHit.point.y + Clearance);
-                    if (lifted - sp.y > 0.01f)
-                    {
-                        MakerSpawnPoint.transform.position = new Vector3(sp.x, lifted, sp.z);
-                        Log.LogInfo($"[Spawn] ground-snapped start {sp.y:F2} -> {lifted:F2} (terrain y={groundHit.point.y:F2}, +{lifted - sp.y:F2})");
-                    }
-                    else Log.LogInfo($"[Spawn] start already clears terrain (start y={sp.y:F2}, terrain y={groundHit.point.y:F2})");
-                }
-                else Log.LogWarning($"[Spawn] no terrain under start {sp} on layers 0|6 — left as authored");
+                if (MakerSpawnPoint != null)
+                    SnapMarkerToGround(MakerSpawnPoint.transform, "start");
+                if (MakerRespawnPoint != null)
+                    foreach (Transform rp in MakerRespawnPoint.transform)
+                        SnapMarkerToGround(rp, rp.name);
             }
             //Find AI Paths Object
 
@@ -916,6 +1016,21 @@ namespace TrickyMaddnessLevelHook
             GameObject StartingGateObject = Instantiate(StartingGate);
             StartingGateObject.transform.position = MakerSpawnPoint.transform.TransformPoint(new Vector3(-0.5f,0,0.5f));
             StartingGateObject.transform.rotation = MakerSpawnPoint.transform.rotation;
+
+            // Custom-map start-launch fix: steer the human's launch down-course for
+            // the first fraction of a second so a sideways start slope can't fling it
+            // off the line, and trim the whole field's launch speed evenly (the
+            // game's countdown kick is purely vertical — see StartLaunchRedirect).
+            // Spawn facing is horizontal by construction (LookRotation, y-zeroed).
+            if (MakerSpawnPoint != null)
+            {
+                Vector3 courseFwd = MakerSpawnPoint.transform.forward; courseFwd.y = 0f;
+                if (courseFwd.sqrMagnitude > 1e-4f)
+                {
+                    var rd = new GameObject("StartLaunchRedirect").AddComponent<StartLaunchRedirect>();
+                    rd.CourseForward = courseFwd.normalized;
+                }
+            }
 
             //Insert Level Manager
             var LevelManagerObject = Resources.Load<GameObject>("game/levelmanager");
@@ -1858,6 +1973,42 @@ namespace TrickyMaddnessLevelHook
             }
         }
 
+        // Reads the optional "spawnsnap <both|raise|off>" header from a map's
+        // .aipaths.txt sidecar. Returns Both (seat markers on the surface, both
+        // ways) for a missing sidecar or no spawnsnap line — the desired default
+        // for every rebuilt map. Only the three known modes are honored; an
+        // unrecognized value falls back to Both with a warning.
+        internal static SpawnSnap ReadSpawnSnap(string bundlePath)
+        {
+            try
+            {
+                string sidecarPath = Path.ChangeExtension(bundlePath, ".aipaths.txt");
+                if (!File.Exists(sidecarPath)) return SpawnSnap.Both;
+                foreach (var raw in File.ReadAllLines(sidecarPath))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("#")) continue;
+                    var t = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (t.Length != 2 || t[0] != "spawnsnap") continue;
+                    switch (t[1].ToLowerInvariant())
+                    {
+                        case "both": return SpawnSnap.Both;
+                        case "raise": return SpawnSnap.Raise;
+                        case "off": return SpawnSnap.Off;
+                        default:
+                            Log.LogWarning($"[Spawn] sidecar {Path.GetFileName(sidecarPath)} declares spawnsnap '{t[1]}' (expected both/raise/off); using both");
+                            return SpawnSnap.Both;
+                    }
+                }
+                return SpawnSnap.Both;
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"[Spawn] failed reading spawnsnap sidecar for {bundlePath}: {e}");
+                return SpawnSnap.Both;
+            }
+        }
+
         // Gravity for a world WorldScale times bigger. Called (via the transpilers
         // below) everywhere Snowboarder/Caster.Cast used their inlined 20f/17f
         // gravity constants. Returns the input untouched when the map is unscaled
@@ -2048,6 +2199,12 @@ namespace TrickyMaddnessLevelHook
                 // may have changed on disk. Informational: nothing keys off it.
                 Plugin.BundleSource = Plugin.ReadBundleSource(path);
                 Plugin.Log.LogInfo($"[Source] map '{levelEntry.name}' provenance: {Plugin.BundleSource}");
+
+                // Spawn/respawn ground-snap mode from the same sidecar (Both when
+                // absent). Read on reuse too — the sidecar may have changed on disk.
+                Plugin.SpawnSnapMode = Plugin.ReadSpawnSnap(path);
+                if (Plugin.SpawnSnapMode != Plugin.SpawnSnap.Both)
+                    Plugin.Log.LogInfo($"[Spawn] map declares spawnsnap '{Plugin.SpawnSnapMode.ToString().ToLowerInvariant()}'");
 
                 // Derive the bundle-internal scene name from LoadedTrack. NOT Path.*:
                 // on macOS '\' is an ordinary filename character, not a separator.
@@ -2734,6 +2891,107 @@ namespace TrickyMaddnessLevelHook
                 v += WorldDir * Strength * dt;
                 t.SetValue(v);
             }
+        }
+    }
+
+    // Custom-map start-launch fix. The game launches every rider with a purely
+    // VERTICAL kick — Snowboarder.UpdateStarting sets velocity = Vector3.up * -45
+    // at the countdown's end — and the ground step then projects that onto the
+    // terrain. On a stock course the start pad's fall-line points down-course, so
+    // the projection sends the rider down-course. Custom-map starts often sit on
+    // terrain that slopes SIDEWAYS relative to the intended line, so projecting a
+    // vertical vector onto a sideways slope yields a sideways fall-line and the
+    // rider shoots off left/right (and which side is random — it depends where in
+    // the start line-up the rider lands).
+    //
+    // Two corrections, applied per rider from the frame it's released:
+    //   * HUMAN: for ~0.3 s, rotate the horizontal velocity to the spawn facing
+    //     (the authored down-course direction). Once the velocity carries a strong
+    //     horizontal down-course term the ground projection preserves it, so the
+    //     sideways fall-line never takes over. AI keep their own direction — they
+    //     steer their assigned path and would fight an imposed heading.
+    //   * ALL riders: a ONE-TIME horizontal speed trim by StartLaunchSpeedScale on
+    //     the launch frame. The sideways projection preserves nearly the full kick,
+    //     so the line-up comes out hot; trimming everyone equally keeps the human
+    //     and the COM on even footing (trimming only the human would hand the COM a
+    //     head start). Speed is scaled ONCE — re-scaling every frame would compound
+    //     into a decay to zero; the game's drag/accel governs speed thereafter.
+    public class StartLaunchRedirect : MonoBehaviour
+    {
+        public Vector3 CourseForward = Vector3.forward; // horizontal, normalized, down-course
+
+        class Rider { public Traverse vel; public Vector3 startPos; public bool isHuman, released; public int active; }
+        readonly Dictionary<Snowboarder, Rider> _riders = new Dictionary<Snowboarder, Rider>();
+        bool _found;
+        int _life;
+        const int MaxLife = 1800;    // hard lifetime cap (~30 s) — never leak
+        const int HumanFrames = 20;  // ~0.33 s of down-course steering off the line
+
+        void FixedUpdate()
+        {
+            if (++_life >= MaxLife) { Destroy(gameObject); return; }
+            if (!_found)
+            {
+                var all = UnityEngine.Object.FindObjectsOfType<Snowboarder>();
+                if (all.Length == 0) return; // riders not spawned yet
+                foreach (var sb in all)
+                {
+                    // Human vs AI: both are Snowboarder MonoBehaviours; the AI's
+                    // private 'snowboardController' is an AISnowboarder, human's isn't.
+                    var ctrl = Traverse.Create(sb).Field("snowboardController").GetValue();
+                    _riders[sb] = new Rider {
+                        vel = Traverse.Create(sb).Field("velocity"),
+                        startPos = sb.transform.position,
+                        isHuman = !(ctrl is AISnowboarder),
+                    };
+                }
+                _found = true;
+            }
+
+            bool pending = false;
+            foreach (var kv in _riders)
+            {
+                var sb = kv.Key; var r = kv.Value;
+                if (sb == null) continue;
+                Vector3 v = r.vel.GetValue<Vector3>();
+                if (!r.released)
+                {
+                    // Release = the frame the rider first moves or gains velocity.
+                    if (v.magnitude > 0.05f || (sb.transform.position - r.startPos).magnitude > 0.05f)
+                        r.released = true;
+                    else { pending = true; continue; }
+                }
+                float hspeed = new Vector2(v.x, v.z).magnitude;
+                if (r.isHuman)
+                {
+                    if (r.active < HumanFrames)
+                    {
+                        if (hspeed > 0.01f && CourseForward.sqrMagnitude > 1e-4f)
+                        {
+                            if (r.active == 0)
+                            {
+                                hspeed *= Plugin.startLaunchSpeedScale.Value;
+                                Plugin.Log.LogInfo($"[StartLaunch] human launch down-course {CourseForward} x{Plugin.startLaunchSpeedScale.Value} (was {new Vector3(v.x,0,v.z)})");
+                            }
+                            Vector3 nv = CourseForward * hspeed; nv.y = v.y;
+                            r.vel.SetValue(nv);
+                        }
+                        r.active++;
+                        pending = true;
+                    }
+                }
+                else if (r.active == 0)
+                {
+                    // AI: one-time speed trim, direction preserved.
+                    if (hspeed > 0.01f)
+                    {
+                        float k = Plugin.startLaunchSpeedScale.Value;
+                        r.vel.SetValue(new Vector3(v.x * k, v.y, v.z * k));
+                    }
+                    r.active++;
+                }
+            }
+            if (_found && !pending) { Plugin.Log.LogInfo("[StartLaunch] done"); Destroy(gameObject); }
         }
     }
 
