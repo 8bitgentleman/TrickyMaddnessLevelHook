@@ -30,5 +30,10 @@
     <Reference Include="Unity.TextMeshPro">
       <HintPath>D:\SteamLibrary\steamapps\common\Tricky Madness\Tricky Madness_Data\Managed\Unity.TextMeshPro.dll</HintPath>
     </Reference>
+    <!-- uGUI is not an engine module, so it is not in the UnityEngine.Modules
+         package — UnityEngine.UI.dll ships separately in the game's Managed dir. -->
+    <Reference Include="UnityEngine.UI">
+      <HintPath>D:\SteamLibrary\steamapps\common\Tricky Madness\Tricky Madness_Data\Managed\UnityEngine.UI.dll</HintPath>
+    </Reference>
   </ItemGroup>
 </Project>

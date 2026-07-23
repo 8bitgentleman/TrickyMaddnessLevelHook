@@ -6,6 +6,7 @@ using System.IO;
 using TMPro;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using UnityEngine.UI;
 
 namespace TrickyMaddnessLevelHook
 {
@@ -303,6 +304,68 @@ namespace TrickyMaddnessLevelHook
                     Plugin.LoadedAssetBundle = "";
                     Plugin.myLoadedAssetBundle.Unload(true);
                 }
+            }
+        }
+    }
+
+    // Custom thumbnails. The game sets each level's menu thumbnail via
+    // Resources.Load<Sprite>(thumbnailPath), which can only read sprites baked into
+    // the game/bundle — not a loose PNG on disk — and it runs before the map bundle
+    // is even loaded. So instead, after the menu is built, we override the thumbnail
+    // Image for any custom ("$"-marked) level with a PNG dropped next to its .asset
+    // (e.g. Maps/MyMap.png), loading the bytes ourselves via Texture2D.LoadImage.
+    [HarmonyPatch(typeof(LevelSelectMenu), "Populate")]
+    public class LevelSelectMenu_Populate
+    {
+        // Cache so we don't re-read the file / leak a texture every time the menu opens.
+        private static readonly Dictionary<string, Sprite> cache = new Dictionary<string, Sprite>();
+
+        [HarmonyPostfix]
+        public static void Postfix(LevelSelectMenu __instance)
+        {
+            var entries = Traverse.Create(__instance).Field("levelSelectEntries")
+                .GetValue() as List<LevelSelectEntry>;
+            if (entries == null) return;
+
+            int count = LevelEntries.GetLevelCount();
+            for (int i = 0; i < entries.Count && i < count; i++)
+            {
+                var entry = LevelEntries.GetEntry(i);
+                if (string.IsNullOrEmpty(entry.sceneName) || !entry.sceneName.StartsWith("$"))
+                    continue; // built-in level, leave its Resources thumbnail alone
+
+                string assetPath = entry.sceneName.TrimStart('$');
+                string pngPath = Path.ChangeExtension(assetPath, ".png");
+
+                var sprite = LoadSprite(pngPath);
+                if (sprite == null) continue;
+
+                var img = entries[i].thumbnail;
+                if (img == null) continue;
+                img.sprite = sprite;
+                img.preserveAspect = true; // never distort whatever aspect the user provides
+            }
+        }
+
+        private static Sprite LoadSprite(string pngPath)
+        {
+            Sprite cached;
+            if (cache.TryGetValue(pngPath, out cached)) return cached;
+            cache[pngPath] = null; // remember misses too, so we don't retry disk every menu open
+            if (!File.Exists(pngPath)) return null;
+            try
+            {
+                var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                if (!tex.LoadImage(File.ReadAllBytes(pngPath))) return null;
+                var sprite = Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height),
+                    new Vector2(0.5f, 0.5f), 100f);
+                cache[pngPath] = sprite;
+                return sprite;
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[LevelHook] thumbnail load failed for " + pngPath + ": " + e.Message);
+                return null;
             }
         }
     }
