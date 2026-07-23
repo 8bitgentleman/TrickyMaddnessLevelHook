@@ -22,24 +22,46 @@ namespace TrickyMaddnessLevelHook
 
         public static List<string> TrackNames = new List<string>();
         public static List<string> Paths = new List<string>();
+        public static string MapsDir;
         private void Awake()
         {
             // Plugin startup logic
             Logger.LogInfo($"Plugin {PluginInfo.PLUGIN_GUID} is loaded!");
-            if (!Directory.Exists(Directory.GetCurrentDirectory() + "\\Maps\\"))
+            MapsDir = ResolveMapsDir();
+            Logger.LogInfo($"Maps directory resolved to: {MapsDir}");
+            if (!Directory.Exists(MapsDir))
             {
-                Directory.CreateDirectory(Directory.GetCurrentDirectory() + "\\Maps\\");
+                Directory.CreateDirectory(MapsDir);
             }
             AddTracks();
             DoPatching();
         }
+
+        // GameRootPath points at the executable's folder. On macOS that is
+        // TrickyMadness.app/Contents/MacOS; walk up to the folder that holds the
+        // .app (next to run_bepinex.sh) so Maps sits where it does on Windows.
+        private static string ResolveMapsDir()
+        {
+            string root = BepInEx.Paths.GameRootPath;
+            int idx = root.IndexOf(".app" + Path.DirectorySeparatorChar + "Contents",
+                StringComparison.OrdinalIgnoreCase);
+            if (idx < 0)
+                idx = root.IndexOf(".app/Contents", StringComparison.OrdinalIgnoreCase);
+            if (idx >= 0)
+            {
+                int slash = root.LastIndexOfAny(new[] { '/', '\\' }, idx);
+                if (slash > 0) root = root.Substring(0, slash);
+            }
+            return Path.Combine(root, "Maps");
+        }
+
         public void AddTracks()
         {
-            var List = Directory.GetFiles(Directory.GetCurrentDirectory() + "\\Maps\\", "*.asset");
+            var List = Directory.GetFiles(MapsDir, "*.asset");
             for (int i = 0; i < List.Length; i++)
             {
                 Paths.Add(List[i]);
-                TrackNames.Add(Path.GetFileName(List[i]).Split(".")[0]);
+                TrackNames.Add(Path.GetFileNameWithoutExtension(List[i]));
             }
         }
 
