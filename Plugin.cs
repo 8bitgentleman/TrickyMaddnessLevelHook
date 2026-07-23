@@ -1,4 +1,5 @@
 ﻿using BepInEx;
+using BepInEx.Logging;
 using HarmonyLib;
 using System;
 using System.Collections.Generic;
@@ -15,6 +16,9 @@ namespace TrickyMaddnessLevelHook
         public static Harmony harmony;
         public static MenuManager menuManager;
 
+        //Static handle on the BepInEx logger so the patch classes can log too
+        public static ManualLogSource Log;
+
         public static AssetBundle myLoadedAssetBundle;
         public static string LoadedAssetBundle = "";
         public static string LoadedTrack;
@@ -25,6 +29,7 @@ namespace TrickyMaddnessLevelHook
         private void Awake()
         {
             // Plugin startup logic
+            Log = Logger;
             Logger.LogInfo($"Plugin {PluginInfo.PLUGIN_GUID} is loaded!");
             if (!Directory.Exists(Directory.GetCurrentDirectory() + "\\Maps\\"))
             {
@@ -231,40 +236,90 @@ namespace TrickyMaddnessLevelHook
     [HarmonyPatch(typeof(MenuManager), "LoadScene", new System.Type[] { typeof(LevelEntry) })]
     public class MenuManager_LoadScene
     {
+        // Returning false skips MenuManager.LoadScene entirely — the clean no-op
+        // abort for any failure: the menu simply stays up instead of loading a
+        // black screen. Every abort path logs why first. State (myLoadedAssetBundle,
+        // LoadedAssetBundle, LoadedTrack) is only committed AFTER a bundle has been
+        // confirmed loaded with at least one scene, so a failed load can never
+        // leave a null handle behind for a later selection to NRE on.
         [HarmonyPrefix]
-        public static void Prefix(ref LevelEntry levelEntry)
+        public static bool Prefix(ref LevelEntry levelEntry)
         {
-            if(levelEntry.sceneName.Contains("$"))
+            //Built-in level (a null sceneName is not ours either)
+            if (levelEntry.sceneName == null || !levelEntry.sceneName.Contains("$"))
             {
-                levelEntry.sceneName = levelEntry.sceneName.TrimStart('$');
-
-                if (Plugin.LoadedAssetBundle == "")
-                {
-                    Plugin.myLoadedAssetBundle = AssetBundle.LoadFromFile(levelEntry.sceneName);
-                    Plugin.LoadedAssetBundle = levelEntry.sceneName;
-                }
-                else if (Plugin.LoadedAssetBundle != levelEntry.sceneName)
+                //No custom bundle should stay loaded. Drive the unload off the
+                //handle, not off LoadedAssetBundle — the two can be out of sync.
+                Plugin.LoadedAssetBundle = "";
+                Plugin.LoadedTrack = null;
+                if (Plugin.myLoadedAssetBundle != null)
                 {
                     Plugin.myLoadedAssetBundle.Unload(true);
-                    Plugin.myLoadedAssetBundle = AssetBundle.LoadFromFile(levelEntry.sceneName);
-                    Plugin.LoadedAssetBundle = levelEntry.sceneName;
+                    Plugin.myLoadedAssetBundle = null;
+                }
+                return true;
+            }
+
+            try
+            {
+                string path = levelEntry.sceneName.TrimStart('$');
+                Plugin.Log.LogInfo($"LoadScene prefix: loading custom map bundle '{levelEntry.name}' from {path}");
+
+                if (Plugin.LoadedAssetBundle == path && Plugin.myLoadedAssetBundle != null)
+                {
+                    //Same map re-selected and its bundle is still loaded: reuse it.
+                    Plugin.Log.LogInfo($"LoadScene prefix: reusing already-loaded bundle {path}");
+                }
+                else
+                {
+                    //Switching maps: drop the old bundle and clear its state first,
+                    //so an abort below leaves no stale path pointing at a dead handle.
+                    if (Plugin.myLoadedAssetBundle != null)
+                    {
+                        Plugin.myLoadedAssetBundle.Unload(true);
+                        Plugin.myLoadedAssetBundle = null;
+                        Plugin.Log.LogInfo("LoadScene prefix: unloaded previous custom bundle");
+                    }
+                    Plugin.LoadedAssetBundle = "";
+                    Plugin.LoadedTrack = null;
+
+                    //Null means the file is missing/corrupt, built for another Unity
+                    //version, or already loaded elsewhere.
+                    var bundle = AssetBundle.LoadFromFile(path);
+                    if (bundle == null)
+                    {
+                        Plugin.Log.LogError($"LoadScene prefix: bundle load failed (file missing/corrupt or already loaded): {path}");
+                        return false;
+                    }
+
+                    //A bundle with no scene is unusable — unload and abort.
+                    string[] scenePath = bundle.GetAllScenePaths();
+                    if (scenePath == null || scenePath.Length == 0)
+                    {
+                        Plugin.Log.LogError($"LoadScene prefix: bundle has no scene paths, unusable: {path}");
+                        bundle.Unload(true);
+                        return false;
+                    }
+
+                    //Commit only now that the load is known good.
+                    Plugin.myLoadedAssetBundle = bundle;
+                    Plugin.LoadedAssetBundle = path;
+                    Plugin.LoadedTrack = scenePath[0];
                 }
 
-                //Load Level
-                string[] scenePath = Plugin.myLoadedAssetBundle.GetAllScenePaths();
-                Plugin.LoadedTrack = scenePath[0];
-
-                var TempSplitName = scenePath[0].Split('\\', '/');
+                //Derive the bundle-internal scene name from LoadedTrack. NOT Path.*:
+                //on macOS '\' is an ordinary filename character, not a separator.
+                var TempSplitName = Plugin.LoadedTrack.Split('\\', '/');
                 string Name = TempSplitName[TempSplitName.Length - 1];
                 levelEntry.sceneName = Name.Split('.')[0];
+                return true;
             }
-            else
+            catch (Exception e)
             {
-                if (Plugin.LoadedAssetBundle != "")
-                {
-                    Plugin.LoadedAssetBundle = "";
-                    Plugin.myLoadedAssetBundle.Unload(true);
-                }
+                //Never let a prefix throw: that leaves the menu in a broken state
+                //instead of simply declining the selection.
+                Plugin.Log.LogError($"LoadScene prefix: exception loading custom map: {e}");
+                return false;
             }
         }
     }
