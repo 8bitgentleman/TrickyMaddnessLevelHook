@@ -1063,19 +1063,7 @@ namespace TrickyMaddnessLevelHook
             {
                 var NewRail = RailObjects[i].gameObject.AddComponent<RailInvis>();
 
-                var Segments = RailObjects[i].GetSegments();
-                List<Rail.Segment> NewSegments = new List<Rail.Segment>();
-
-                for (int j = 0; j < Segments.Count; j++)
-                {
-                    Rail.Segment NewSegment = new Rail.Segment(Vector3.zero, Vector3.up);
-
-                    NewSegment.position = Segments[j].Point;
-                    NewSegment.rotation = Segments[j].Rotation;
-                    NewSegment.distance = Segments[j].Distance;
-
-                    NewSegments.Add(NewSegment);
-                }
+                List<Rail.Segment> NewSegments = BuildRailSegments(RailObjects[i]);
 
                 Enum.TryParse(RailObjects[i].Materials.ToString(), out Rail.RailMaterial material1);
 
@@ -1465,6 +1453,43 @@ namespace TrickyMaddnessLevelHook
             if (adDoors > 0 || adTrig > 0 || adSkip > 0)
                 Log.LogInfo($"[AnimDoor] attached {adTrig} trigger(s) driving {adDoors} door(s), skipped {adSkip}");
 
+            // MovingSurface (feature: gameplay.movingColliders). Same relay as AnimDoor with one
+            // difference that is the whole point of the feature: keepColliders. A door disables its
+            // colliders on fire so a non-convex mesh never moves while colliding; a rideable kicker
+            // must keep them and let the animation drag the collider. Naming contract with
+            // SSXImporter.BuildMovingSurfaces:
+            //   MoveSurf_<idx>              — mover GO (legacy Animation, layer 0, live colliders).
+            //   MoveSurfTrig_<idx>_<trig>   — trigger box relaying into it.
+            int msSurf = 0, msTrig = 0, msSkip = 0;
+            var moveSurfByIdx = new Dictionary<string, Animation>();
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("MoveSurf_")) continue;
+                    var anim = t.GetComponent<Animation>();
+                    if (anim == null) continue;   // static mover (no animated part) — nothing to drive
+                    moveSurfByIdx[t.name.Substring("MoveSurf_".Length)] = anim;
+                    msSurf++;
+                }
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("MoveSurfTrig_")) continue;
+                    var trigGO = t.gameObject;
+                    if (trigGO.GetComponent<AnimDoorTrigger>() != null) continue;   // already attached
+                    // name = MoveSurfTrig_<surfIdx>_<trigIdx>; the mover idx is segment [1].
+                    var segs = t.name.Split('_');
+                    if (segs.Length < 3 || !moveSurfByIdx.TryGetValue(segs[1], out var surfAnim))
+                    { msSkip++; Log.LogDebug($"[MoveSurf] trigger '{t.name}' has no matching MoveSurf_ — skipped"); continue; }
+                    var rel = trigGO.AddComponent<AnimDoorTrigger>();
+                    rel.target = surfAnim;
+                    rel.clipName = "MoveSurf_" + segs[1];
+                    rel.keepColliders = true;   // the collider MOVES — that is the feature
+                    msTrig++;
+                }
+            if (msSurf > 0 || msTrig > 0 || msSkip > 0)
+                Log.LogInfo($"[MoveSurf] attached {msTrig} trigger(s) driving {msSurf} mover(s), skipped {msSkip}");
+
             // Per-level sky-fill override. Naming contract with SSXImporter.BuildLighting:
             // an empty marker GO named "SkyFill_<RRGGBB>" (from Overrides.json
             // lighting.skyFillColor). MUST be read before the SkydomeFollow attach below —
@@ -1665,6 +1690,67 @@ namespace TrickyMaddnessLevelHook
                     if (tr.name == instName || tr.name.EndsWith(suffix, StringComparison.Ordinal))
                         return tr.gameObject;
             return null;
+        }
+
+        // Builds the game-side segment polyline for a Maker rail.
+        //
+        // ⚠️ Do NOT go back to MakerRails.GetSegments(). Its GenerateSegments() loops
+        // from index 1 and stores TempList[i] as the segment position, so a rail's
+        // FIRST point never becomes a segment: the polyline — and the collider we
+        // build from it — starts at P1, leaving the whole P0→P1 span dead. That span
+        // is the ENTRY end of the rail, so you ride through the visible rail model
+        // and nothing grabs. Measured across the shipped ports: a median 3–13 m of
+        // ungrindable lead-in on EVERY rail (worst single case 187 m on Pipedream),
+        // 6–19% of total rail length. It's the reason a small jump onto the middle
+        // of a rail works when riding on from the end doesn't.
+        //
+        // So: read the PointList directly and emit one segment per point, P0 included.
+        // Point positions are read as localPosition exactly as MakerRails does, so
+        // every segment from P1 on is bit-identical to the old path; the only change
+        // is the prepended P0 (and `distance` becoming true cumulative arc length,
+        // which the old path lagged by one span — Snowboarder.railDistance only ever
+        // compares it frame-to-frame, so the absolute origin is free).
+        private static List<Rail.Segment> BuildRailSegments(MakerRails rail)
+        {
+            var segments = new List<Rail.Segment>();
+            var list = rail.PointList == null ? null : rail.PointList.transform;
+            if (list == null || list.childCount < 2)
+            {
+                // No usable PointList — fall back to whatever the Maker component has.
+                foreach (var s in rail.GetSegments())
+                {
+                    var fb = new Rail.Segment(Vector3.zero, Vector3.up);
+                    fb.position = s.Point;
+                    fb.rotation = s.Rotation;
+                    fb.distance = s.Distance;
+                    segments.Add(fb);
+                }
+                return segments;
+            }
+
+            var points = new List<Vector3>(list.childCount);
+            for (int i = 0; i < list.childCount; i++)
+                points.Add(list.GetChild(i).localPosition);
+
+            float distance = 0f;
+            Quaternion rotation = Quaternion.identity;
+            for (int i = 0; i < points.Count; i++)
+            {
+                // Segment i faces along the span that ARRIVES at it (P0 borrows P1's,
+                // being the one span it starts rather than ends).
+                Vector3 dir = i == 0 ? points[1] - points[0] : points[i] - points[i - 1];
+                if (dir.sqrMagnitude > 1e-8f)
+                    rotation = Quaternion.LookRotation(dir, Vector3.up); // else keep the last good one
+                if (i > 0)
+                    distance += (points[i] - points[i - 1]).magnitude;
+
+                var seg = new Rail.Segment(Vector3.zero, Vector3.up);
+                seg.position = points[i];
+                seg.rotation = rotation;
+                seg.distance = distance;
+                segments.Add(seg);
+            }
+            return segments;
         }
 
         // Builds a solid (non-convex) MeshCollider along the rail's segment line —
@@ -3195,6 +3281,10 @@ namespace TrickyMaddnessLevelHook
     {
         public Animation target;
         public string clipName;
+        // Doors clear the path by switching their colliders OFF on fire. A moving RIDEABLE
+        // surface (gameplay.movingColliders) must keep them so the animation drags the
+        // collider — that motion IS the feature. See ssx/MOVING_COLLIDER_FEASIBILITY.md.
+        public bool keepColliders;
 
         Vector3 _halfLocal = new Vector3(0.5f, 0.5f, 0.5f);
         Vector3 _center = Vector3.zero;   // box.center: model-bounds offset from the instance origin
@@ -3250,6 +3340,11 @@ namespace TrickyMaddnessLevelHook
             else target.Play();
             if (_opened) return;
             _opened = true;
+            if (keepColliders)
+            {
+                Plugin.Log.LogInfo($"[MoveSurf] trigger '{name}' fired -> moving '{target.name}'");
+                return;
+            }
             // Open the path independent of how far the baked animation actually travels: disable the
             // closed door's blocking colliders. The trigger sits ahead of the door, so this clears
             // before the rider arrives; the animation then plays purely for show. No deadlock.
