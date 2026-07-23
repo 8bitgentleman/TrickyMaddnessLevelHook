@@ -1,5 +1,6 @@
-﻿using BepInEx;
+using BepInEx;
 using BepInEx.Configuration;
+using BepInEx.Logging;
 using HarmonyLib;
 using System;
 using System.Collections.Generic;
@@ -18,6 +19,9 @@ namespace TrickyMaddnessLevelHook
         public static Harmony harmony;
         public static MenuManager menuManager;
 
+        //Static handle on the BepInEx logger so the patch classes can log too
+        public static ManualLogSource Log;
+
         public static AssetBundle myLoadedAssetBundle;
         public static string LoadedAssetBundle = "";
         public static string LoadedTrack;
@@ -30,7 +34,6 @@ namespace TrickyMaddnessLevelHook
 
         private void Awake()
         {
-            // Plugin startup logic
             Logger.LogInfo($"Plugin {PluginInfo.PLUGIN_GUID} is loaded!");
             levelSelectScroll = Config.Bind("UI", "LevelSelectScroll", true,
                 "Scroll the level-select card strip when more cards exist than fit " +
@@ -38,18 +41,37 @@ namespace TrickyMaddnessLevelHook
                 "the menu is left pixel-identical to vanilla. Set false to disable.");
             if (!Directory.Exists(Directory.GetCurrentDirectory() + "\\Maps\\"))
             {
-                Directory.CreateDirectory(Directory.GetCurrentDirectory() + "\\Maps\\");
+                Directory.CreateDirectory(MapsDir);
             }
             AddTracks();
             DoPatching();
         }
+
+        // GameRootPath points at the executable's folder. On macOS that is
+        // TrickyMadness.app/Contents/MacOS; walk up to the folder that holds the
+        // .app (next to run_bepinex.sh) so Maps sits where it does on Windows.
+        private static string ResolveMapsDir()
+        {
+            string root = BepInEx.Paths.GameRootPath;
+            int idx = root.IndexOf(".app" + Path.DirectorySeparatorChar + "Contents",
+                StringComparison.OrdinalIgnoreCase);
+            if (idx < 0)
+                idx = root.IndexOf(".app/Contents", StringComparison.OrdinalIgnoreCase);
+            if (idx >= 0)
+            {
+                int slash = root.LastIndexOfAny(new[] { '/', '\\' }, idx);
+                if (slash > 0) root = root.Substring(0, slash);
+            }
+            return Path.Combine(root, "Maps");
+        }
+
         public void AddTracks()
         {
-            var List = Directory.GetFiles(Directory.GetCurrentDirectory() + "\\Maps\\", "*.asset");
+            var List = Directory.GetFiles(MapsDir, "*.asset");
             for (int i = 0; i < List.Length; i++)
             {
                 Paths.Add(List[i]);
-                TrackNames.Add(Path.GetFileName(List[i]).Split(".")[0]);
+                TrackNames.Add(Path.GetFileNameWithoutExtension(List[i]));
             }
         }
 
@@ -177,9 +199,21 @@ namespace TrickyMaddnessLevelHook
             GameObject AIParent = new GameObject("AI Paths Parent");
             AIParent.transform.parent = levelManager.transform;
 
+            // MakerAIPath.m_points is a List of a user-defined [Serializable]
+            // nested class, and Unity fails to deserialize those for
+            // runtime-loaded (BepInEx) assemblies — on custom maps the list
+            // frequently comes back empty (engine limitation; lists of engine
+            // value types, like the race line's List<Vector3> below, are
+            // unaffected). The AI enumerates DIRECT children of pathsParent, so
+            // every AIPath must sit immediately under AIParent.
             var MakerAIPaths = FindObjectsByType(typeof(MakerAIPath), FindObjectsSortMode.None) as MakerAIPath[];
             for (int i = 0; i < MakerAIPaths.Length; i++)
             {
+                // An empty maker path would become an empty AIPath, which is what
+                // sends AI into the 1.5s respawn loop — skip it entirely.
+                if (MakerAIPaths[i].m_points == null || MakerAIPaths[i].m_points.Count == 0)
+                    continue;
+
                 //For all path object
                 var NewPath = MakerAIPaths[i].gameObject.AddComponent<AIPath>();
 
@@ -207,7 +241,11 @@ namespace TrickyMaddnessLevelHook
             {
                 var NewPath = MakerAIPathsDivider[i].gameObject.AddComponent<AIPathDivider>();
 
-                MakerAIPathsDivider[i].transform.parent = AIParent.transform;
+                // The game enumerates DIRECT children of dividersParent — parent
+                // dividers under the transform actually registered as
+                // dividersParent (they used to go under AIParent and were never
+                // found).
+                MakerAIPathsDivider[i].transform.parent = AIPDividerParent.transform;
 
                 NewPath.m_points = MakerAIPathsDivider[i].m_points;
             }
@@ -234,43 +272,97 @@ namespace TrickyMaddnessLevelHook
     }
 
 
-    [HarmonyPatch(typeof(MenuManager), "SelectLevel", new System.Type[] { typeof(LevelEntry) })]
-    public class MenuManager_SelectLevel
+    // The level-load entry point is MenuManager.LoadScene(LevelEntry), NOT
+    // SelectLevel. Retail MenuManager exposes SelectLevel(int index) — a different
+    // signature — so a patch aimed at SelectLevel(LevelEntry) silently never binds
+    // and every custom map loads to a black screen. Do not "fix" this back.
+    [HarmonyPatch(typeof(MenuManager), "LoadScene", new System.Type[] { typeof(LevelEntry) })]
+    public class MenuManager_LoadScene
     {
+        // Returning false skips MenuManager.LoadScene entirely — the clean no-op
+        // abort for any failure: the menu simply stays up instead of loading a
+        // black screen. Every abort path logs why first. State (myLoadedAssetBundle,
+        // LoadedAssetBundle, LoadedTrack) is only committed AFTER a bundle has been
+        // confirmed loaded with at least one scene, so a failed load can never
+        // leave a null handle behind for a later selection to NRE on.
         [HarmonyPrefix]
-        public static void Prefix(ref LevelEntry levelEntry)
+        public static bool Prefix(ref LevelEntry levelEntry)
         {
-            if(levelEntry.sceneName.Contains("$"))
+            //Built-in level (a null sceneName is not ours either)
+            if (levelEntry.sceneName == null || !levelEntry.sceneName.Contains("$"))
             {
-                levelEntry.sceneName = levelEntry.sceneName.TrimStart('$');
-
-                if (Plugin.LoadedAssetBundle == "")
-                {
-                    Plugin.myLoadedAssetBundle = AssetBundle.LoadFromFile(levelEntry.sceneName);
-                    Plugin.LoadedAssetBundle = levelEntry.sceneName;
-                }
-                else if (Plugin.LoadedAssetBundle != levelEntry.sceneName)
+                //No custom bundle should stay loaded. Drive the unload off the
+                //handle, not off LoadedAssetBundle — the two can be out of sync.
+                Plugin.LoadedAssetBundle = "";
+                Plugin.LoadedTrack = null;
+                if (Plugin.myLoadedAssetBundle != null)
                 {
                     Plugin.myLoadedAssetBundle.Unload(true);
-                    Plugin.myLoadedAssetBundle = AssetBundle.LoadFromFile(levelEntry.sceneName);
-                    Plugin.LoadedAssetBundle = levelEntry.sceneName;
+                    Plugin.myLoadedAssetBundle = null;
+                }
+                return true;
+            }
+
+            try
+            {
+                string path = levelEntry.sceneName.TrimStart('$');
+                Plugin.Log.LogInfo($"LoadScene prefix: loading custom map bundle '{levelEntry.name}' from {path}");
+
+                if (Plugin.LoadedAssetBundle == path && Plugin.myLoadedAssetBundle != null)
+                {
+                    //Same map re-selected and its bundle is still loaded: reuse it.
+                    Plugin.Log.LogInfo($"LoadScene prefix: reusing already-loaded bundle {path}");
+                }
+                else
+                {
+                    //Switching maps: drop the old bundle and clear its state first,
+                    //so an abort below leaves no stale path pointing at a dead handle.
+                    if (Plugin.myLoadedAssetBundle != null)
+                    {
+                        Plugin.myLoadedAssetBundle.Unload(true);
+                        Plugin.myLoadedAssetBundle = null;
+                        Plugin.Log.LogInfo("LoadScene prefix: unloaded previous custom bundle");
+                    }
+                    Plugin.LoadedAssetBundle = "";
+                    Plugin.LoadedTrack = null;
+
+                    //Null means the file is missing/corrupt, built for another Unity
+                    //version, or already loaded elsewhere.
+                    var bundle = AssetBundle.LoadFromFile(path);
+                    if (bundle == null)
+                    {
+                        Plugin.Log.LogError($"LoadScene prefix: bundle load failed (file missing/corrupt or already loaded): {path}");
+                        return false;
+                    }
+
+                    //A bundle with no scene is unusable — unload and abort.
+                    string[] scenePath = bundle.GetAllScenePaths();
+                    if (scenePath == null || scenePath.Length == 0)
+                    {
+                        Plugin.Log.LogError($"LoadScene prefix: bundle has no scene paths, unusable: {path}");
+                        bundle.Unload(true);
+                        return false;
+                    }
+
+                    //Commit only now that the load is known good.
+                    Plugin.myLoadedAssetBundle = bundle;
+                    Plugin.LoadedAssetBundle = path;
+                    Plugin.LoadedTrack = scenePath[0];
                 }
 
-                //Load Level
-                string[] scenePath = Plugin.myLoadedAssetBundle.GetAllScenePaths();
-                Plugin.LoadedTrack = scenePath[0];
-
-                var TempSplitName = scenePath[0].Split('\\', '/');
+                //Derive the bundle-internal scene name from LoadedTrack. NOT Path.*:
+                //on macOS '\' is an ordinary filename character, not a separator.
+                var TempSplitName = Plugin.LoadedTrack.Split('\\', '/');
                 string Name = TempSplitName[TempSplitName.Length - 1];
                 levelEntry.sceneName = Name.Split('.')[0];
+                return true;
             }
-            else
+            catch (Exception e)
             {
-                if (Plugin.LoadedAssetBundle != "")
-                {
-                    Plugin.LoadedAssetBundle = "";
-                    Plugin.myLoadedAssetBundle.Unload(true);
-                }
+                //Never let a prefix throw: that leaves the menu in a broken state
+                //instead of simply declining the selection.
+                Plugin.Log.LogError($"LoadScene prefix: exception loading custom map: {e}");
+                return false;
             }
         }
     }
