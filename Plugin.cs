@@ -224,8 +224,12 @@ namespace TrickyMaddnessLevelHook
     }
 
 
-    [HarmonyPatch(typeof(MenuManager), "SelectLevel", new System.Type[] { typeof(LevelEntry) })]
-    public class MenuManager_SelectLevel
+    // The level-load entry point is MenuManager.LoadScene(LevelEntry), NOT
+    // SelectLevel. Retail MenuManager exposes SelectLevel(int index) — a different
+    // signature — so a patch aimed at SelectLevel(LevelEntry) silently never binds
+    // and every custom map loads to a black screen. Do not "fix" this back.
+    [HarmonyPatch(typeof(MenuManager), "LoadScene", new System.Type[] { typeof(LevelEntry) })]
+    public class MenuManager_LoadScene
     {
         [HarmonyPrefix]
         public static void Prefix(ref LevelEntry levelEntry)
