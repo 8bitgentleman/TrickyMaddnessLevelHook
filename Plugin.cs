@@ -92,6 +92,21 @@ namespace TrickyMaddnessLevelHook
         // where a Windows bundle genuinely is foreign. Reset to null on non-custom loads.
         internal static string BundleNativePlatform;
 
+        // The default this Hook uses whenever a level declares no provenance —
+        // OG Tricky Madness. Built-in courses and any sidecar-less drop-in ARE
+        // the game's own content by construction, so absence == this value.
+        internal const string DefaultSource = "tricky_madness";
+
+        // Provenance of the active custom map, from the optional "source <slug>"
+        // header in its .aipaths.txt sidecar (gen_aipaths.py --source). Purely
+        // informational — logged so a bug report / log tells you which game a
+        // loaded map came from. Slugs in use: "ssx_tricky" (SSX Tricky ports +
+        // community customs) and "ssx3" (SSX 3 ports). Defaults to DefaultSource
+        // ("tricky_madness") on every non-custom load and whenever the header is
+        // absent. Nothing keys behavior off it — it exists only to answer
+        // "where is this level from?" from inside the running game.
+        internal static string BundleSource = DefaultSource;
+
         public static List<string> TrackNames = new List<string>();
         public static List<string> Paths = new List<string>();
 
@@ -1654,6 +1669,7 @@ namespace TrickyMaddnessLevelHook
                     if (line.Length == 0 || line.StartsWith("#")) continue;
                     if (line.StartsWith("scale")) continue; // world-scale header, read at load time (ReadWorldScale)
                     if (line.StartsWith("platform")) continue; // native-platform header, read at load time (ReadBundleNativePlatform)
+                    if (line.StartsWith("source")) continue; // provenance header, read at load time (ReadBundleSource)
                     if (line == "path")
                     {
                         cur = new List<AIPath.Point>();
@@ -1814,6 +1830,34 @@ namespace TrickyMaddnessLevelHook
             }
         }
 
+        // Reads the optional "source <slug>" header from a map's .aipaths.txt
+        // sidecar. Returns DefaultSource ("tricky_madness") for a missing sidecar
+        // or no source line — absence means OG content (built-in levels and any
+        // sidecar-less drop-in). The slug is lowercased; it's informational only,
+        // so an unrecognized value is kept as-is rather than rejected.
+        internal static string ReadBundleSource(string bundlePath)
+        {
+            try
+            {
+                string sidecarPath = Path.ChangeExtension(bundlePath, ".aipaths.txt");
+                if (!File.Exists(sidecarPath)) return DefaultSource;
+                foreach (var raw in File.ReadAllLines(sidecarPath))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("#")) continue;
+                    var t = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (t.Length != 2 || t[0] != "source") continue;
+                    return t[1].ToLowerInvariant();
+                }
+                return DefaultSource;
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"[Source] failed reading source sidecar for {bundlePath}: {e}");
+                return DefaultSource;
+            }
+        }
+
         // Gravity for a world WorldScale times bigger. Called (via the transpilers
         // below) everywhere Snowboarder/Caster.Cast used their inlined 20f/17f
         // gravity constants. Returns the input untouched when the map is unscaled
@@ -1906,6 +1950,7 @@ namespace TrickyMaddnessLevelHook
                 Plugin.WorldScale = 1f;
                 Plugin.MapGravityMultiplier = 1f;
                 Plugin.BundleNativePlatform = null;
+                Plugin.BundleSource = Plugin.DefaultSource;
                 return true;
             }
 
@@ -1997,6 +2042,12 @@ namespace TrickyMaddnessLevelHook
                 Plugin.BundleNativePlatform = Plugin.ReadBundleNativePlatform(path);
                 if (Plugin.BundleNativePlatform != null)
                     Plugin.Log.LogInfo($"[ShaderRemap] map declares native platform '{Plugin.BundleNativePlatform}'; its own shaders are trusted (not remapped) when running on that backend");
+
+                // Provenance declaration from the same sidecar (defaults to
+                // "tricky_madness" when absent). Read on reuse too — the sidecar
+                // may have changed on disk. Informational: nothing keys off it.
+                Plugin.BundleSource = Plugin.ReadBundleSource(path);
+                Plugin.Log.LogInfo($"[Source] map '{levelEntry.name}' provenance: {Plugin.BundleSource}");
 
                 // Derive the bundle-internal scene name from LoadedTrack. NOT Path.*:
                 // on macOS '\' is an ordinary filename character, not a separator.

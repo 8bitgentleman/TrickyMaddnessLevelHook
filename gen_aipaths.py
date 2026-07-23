@@ -20,15 +20,23 @@ Sidecar format (one token line per point, invariant-culture floats):
                           bundles are Mac-built, so Mac ports want "platform mac"
                           — WITHOUT it every URP/Unlit material (emissive glow,
                           lightmap-overlay decal) collapses to the Lit fallback.
+    source <slug>      <- optional provenance slug: which game this map's content
+                          came from. Purely informational (logged by the Hook so a
+                          bug report tells you the origin). Slugs in use:
+                          "ssx_tricky" (SSX Tricky ports + community customs),
+                          "ssx3" (SSX 3 ports). Absent == "tricky_madness": the
+                          Hook defaults sidecar-less / header-less maps to OG,
+                          which is what the game's own built-in courses are.
     path               <- starts a new path
     <x> <z> <0|1>      <- world XZ position + windup flag
 
 Usage:
     python3 gen_aipaths.py [--scale <f>] [--gravity <f>] \
-        [--platform <mac|windows>] <map1.asset> [map2.asset ...]
+        [--platform <mac|windows>] [--source <slug>] <map1.asset> [map2.asset ...]
 
---scale/--gravity/--platform apply to every asset listed in the same invocation.
+--scale/--gravity/--platform/--source apply to every asset in the same invocation.
 """
+import re
 import sys
 import os
 
@@ -92,6 +100,7 @@ def main(argv):
     scale = None
     gravity = None
     platform = None
+    source = None
     while args and args[0].startswith("--"):
         flag = args[0]
         if len(args) < 2:
@@ -122,6 +131,14 @@ def main(argv):
                       file=sys.stderr)
                 return 2
             platform = val
+        elif flag == "--source":
+            # A machine-clean slug so it stays a single header token (the Hook
+            # splits on whitespace): lowercase letters/digits/underscore only.
+            if not re.fullmatch(r"[a-z0-9_]+", val):
+                print("--source must be a lowercase slug [a-z0-9_], got %r"
+                      % val, file=sys.stderr)
+                return 2
+            source = val
         else:
             print("unknown flag %r" % flag, file=sys.stderr)
             return 2
@@ -145,6 +162,8 @@ def main(argv):
                 f.write("gravity %r\n" % gravity)
             if platform is not None:
                 f.write("platform %s\n" % platform)
+            if source is not None:
+                f.write("source %s\n" % source)
             for pts in paths:
                 f.write("path\n")
                 for x, z, w in pts:
