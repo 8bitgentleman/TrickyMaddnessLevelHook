@@ -20,6 +20,12 @@ Sidecar format (one token line per point, invariant-culture floats):
                           bundles are Mac-built, so Mac ports want "platform mac"
                           — WITHOUT it every URP/Unlit material (emissive glow,
                           lightmap-overlay decal) collapses to the Lit fallback.
+    spawnsnap <mode>   <- optional spawn/respawn ground-snap mode: "both"
+                          (default when absent — seat markers exactly on the
+                          terrain, raising OR lowering; kills both the immediate
+                          drop and the sink-through), "raise" (only lift markers
+                          clear of the ground, never lower), or "off" (leave every
+                          marker as authored — for a hand-tuned start like gari).
     source <slug>      <- optional provenance slug: which game this map's content
                           came from. Purely informational (logged by the Hook so a
                           bug report tells you the origin). Slugs in use:
@@ -32,9 +38,10 @@ Sidecar format (one token line per point, invariant-culture floats):
 
 Usage:
     python3 gen_aipaths.py [--scale <f>] [--gravity <f>] \
-        [--platform <mac|windows>] [--source <slug>] <map1.asset> [map2.asset ...]
+        [--platform <mac|windows>] [--source <slug>] \
+        [--spawnsnap <both|raise|off>] <map1.asset> [map2.asset ...]
 
---scale/--gravity/--platform/--source apply to every asset in the same invocation.
+All flags apply to every asset in the same invocation.
 """
 import re
 import sys
@@ -101,6 +108,7 @@ def main(argv):
     gravity = None
     platform = None
     source = None
+    spawnsnap = None
     while args and args[0].startswith("--"):
         flag = args[0]
         if len(args) < 2:
@@ -139,6 +147,12 @@ def main(argv):
                       % val, file=sys.stderr)
                 return 2
             source = val
+        elif flag == "--spawnsnap":
+            if val not in ("both", "raise", "off"):
+                print("--spawnsnap must be 'both', 'raise', or 'off', got %r"
+                      % val, file=sys.stderr)
+                return 2
+            spawnsnap = val
         else:
             print("unknown flag %r" % flag, file=sys.stderr)
             return 2
@@ -164,6 +178,8 @@ def main(argv):
                 f.write("platform %s\n" % platform)
             if source is not None:
                 f.write("source %s\n" % source)
+            if spawnsnap is not None:
+                f.write("spawnsnap %s\n" % spawnsnap)
             for pts in paths:
                 f.write("path\n")
                 for x, z, w in pts:
