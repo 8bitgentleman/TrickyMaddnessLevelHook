@@ -14,12 +14,15 @@ Sidecar format (one token line per point, invariant-culture floats):
     gravity <f>        <- optional per-map gravity multiplier (Hook feature 8).
                           Independent of scale: >1 = heavier, <1 = lighter,
                           applied at any world scale. Absent = 1.0 (stock).
-    platform <p>       <- optional native-GPU platform: "mac" or "windows".
-                          Tells the Hook the bundle's own shaders are native to
-                          that backend so it trusts them (no shader remap). Our
-                          bundles are Mac-built, so Mac ports want "platform mac"
-                          — WITHOUT it every URP/Unlit material (emissive glow,
-                          lightmap-overlay decal) collapses to the Lit fallback.
+    platform <p>       <- native-GPU platform: "mac" or "windows". Tells the Hook
+                          the bundle's own shaders are native to that backend so
+                          it trusts them (no shader remap). WITHOUT it every
+                          URP/Unlit material (emissive glow, lightmap-overlay
+                          decal) collapses to the Lit fallback. AUTO-DETECTED
+                          from the bundle's own build target, so a bare regen
+                          can no longer silently drop it (that is how Alaska 2x
+                          and Ssx3 A-D shipped headerless); --platform overrides
+                          the detection, --platform none suppresses the header.
     spawnsnap <mode>   <- optional spawn/respawn ground-snap mode: "both"
                           (default when absent — seat markers exactly on the
                           terrain, raising OR lowering; kills both the immediate
@@ -38,7 +41,7 @@ Sidecar format (one token line per point, invariant-culture floats):
 
 Usage:
     python3 gen_aipaths.py [--scale <f>] [--gravity <f>] \
-        [--platform <mac|windows>] [--source <slug>] \
+        [--platform <mac|windows|none>] [--source <slug>] \
         [--spawnsnap <both|raise|off>] <map1.asset> [map2.asset ...]
 
 All flags apply to every asset in the same invocation.
@@ -83,6 +86,23 @@ def is_maker_ai_path(obj, tree):
     return "windup" in node_field_names(obj)
 
 
+# Unity BuildTarget -> the Hook's "platform" header. A bundle knows what it was
+# built for (SerializedFile m_TargetPlatform), so nobody has to remember the flag.
+BUILD_TARGETS = {2: "mac", 4: "mac", 27: "mac", 5: "windows", 19: "windows"}
+
+
+def detect_platform(env):
+    """The bundle's own build target, or None if it is not one we know."""
+    found = set()
+    for f in env.files.values():
+        for sub in getattr(f, "files", {}).values():
+            tp = getattr(sub, "target_platform", None)
+            if tp is not None:
+                found.add(BUILD_TARGETS.get(int(tp)))
+    found.discard(None)
+    return found.pop() if len(found) == 1 else None
+
+
 def extract(asset_path):
     env = UnityPy.load(asset_path)
     paths = []
@@ -99,7 +119,7 @@ def extract(asset_path):
                for p in tree["m_points"]]
         if len(pts) >= 2:  # the Hook drops <2-point paths; don't emit them
             paths.append(pts)
-    return paths
+    return paths, detect_platform(env)
 
 
 def main(argv):
@@ -134,9 +154,9 @@ def main(argv):
                 print("--gravity must be > 0, got %r" % val, file=sys.stderr)
                 return 2
         elif flag == "--platform":
-            if val not in ("mac", "windows"):
-                print("--platform must be 'mac' or 'windows', got %r" % val,
-                      file=sys.stderr)
+            if val not in ("mac", "windows", "none"):
+                print("--platform must be 'mac', 'windows' or 'none', got %r"
+                      % val, file=sys.stderr)
                 return 2
             platform = val
         elif flag == "--source":
@@ -160,7 +180,16 @@ def main(argv):
         print(__doc__)
         return 2
     for asset_path in args:
-        paths = extract(asset_path)
+        paths, detected = extract(asset_path)
+        plat = platform or detected
+        if plat is None:
+            print("%s: WARNING unknown build target, writing no 'platform' "
+                  "header (Unlit materials will fall back to Lit)"
+                  % os.path.basename(asset_path), file=sys.stderr)
+        elif platform and detected and platform != detected:
+            print("%s: WARNING --platform %s overrides the bundle's own %s "
+                  "build target" % (os.path.basename(asset_path), platform,
+                                    detected), file=sys.stderr)
         out_path = os.path.splitext(asset_path)[0] + ".aipaths.txt"
         if not paths:
             print(f"{os.path.basename(asset_path)}: no usable AI paths found, "
@@ -174,8 +203,8 @@ def main(argv):
                 f.write("scale %r\n" % scale)
             if gravity is not None:
                 f.write("gravity %r\n" % gravity)
-            if platform is not None:
-                f.write("platform %s\n" % platform)
+            if plat is not None and plat != "none":
+                f.write("platform %s\n" % plat)
             if source is not None:
                 f.write("source %s\n" % source)
             if spawnsnap is not None:
