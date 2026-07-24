@@ -29,6 +29,13 @@ Sidecar format (one token line per point, invariant-culture floats):
                           drop and the sink-through), "raise" (only lift markers
                           clear of the ground, never lower), or "off" (leave every
                           marker as authored — for a hand-tuned start like gari).
+    mapversion <v>     <- optional release version of THIS map build (e.g. "1.0",
+                          "1.2.0"). Purely informational, like source: the Hook
+                          logs it, so a bug report's log says exactly which build
+                          of a course the player has without you asking. Absent ==
+                          unversioned (every map shipped before this existed).
+                          NOT the sidecar format version and NOT the Hook's own
+                          PLUGIN_VERSION — those are separate things.
     source <slug>      <- optional provenance slug: which game this map's content
                           came from. Purely informational (logged by the Hook so a
                           bug report tells you the origin). Slugs in use:
@@ -42,7 +49,8 @@ Sidecar format (one token line per point, invariant-culture floats):
 Usage:
     python3 gen_aipaths.py [--scale <f>] [--gravity <f>] \
         [--platform <mac|windows|none>] [--source <slug>] \
-        [--spawnsnap <both|raise|off>] <map1.asset> [map2.asset ...]
+        [--spawnsnap <both|raise|off>] [--mapversion <v>] \
+        <map1.asset> [map2.asset ...]
 
 All flags apply to every asset in the same invocation.
 """
@@ -129,6 +137,7 @@ def main(argv):
     platform = None
     source = None
     spawnsnap = None
+    mapversion = None
     while args and args[0].startswith("--"):
         flag = args[0]
         if len(args) < 2:
@@ -173,6 +182,14 @@ def main(argv):
                       % val, file=sys.stderr)
                 return 2
             spawnsnap = val
+        elif flag == "--mapversion":
+            # Single header token (the Hook splits on whitespace), and loose
+            # enough for whatever the release is called: "1.0", "1.2.0-rc1".
+            if not re.fullmatch(r"[A-Za-z0-9._+-]{1,32}", val):
+                print("--mapversion must be [A-Za-z0-9._+-], max 32 chars, "
+                      "got %r" % val, file=sys.stderr)
+                return 2
+            mapversion = val
         else:
             print("unknown flag %r" % flag, file=sys.stderr)
             return 2
@@ -209,6 +226,8 @@ def main(argv):
                 f.write("source %s\n" % source)
             if spawnsnap is not None:
                 f.write("spawnsnap %s\n" % spawnsnap)
+            if mapversion is not None:
+                f.write("mapversion %s\n" % mapversion)
             for pts in paths:
                 f.write("path\n")
                 for x, z, w in pts:

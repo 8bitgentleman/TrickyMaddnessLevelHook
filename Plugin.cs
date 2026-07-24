@@ -108,6 +108,14 @@ namespace TrickyMaddnessLevelHook
         // "where is this level from?" from inside the running game.
         internal static string BundleSource = DefaultSource;
 
+        // Release version of the active custom map, from the optional
+        // "mapversion <v>" header in its .aipaths.txt sidecar (gen_aipaths.py
+        // --mapversion). Same deal as BundleSource: logged, never keyed off.
+        // It answers "which build of this course is the player running?" from a
+        // pasted log. Empty == unversioned, which every map shipped before this
+        // header existed is, and which built-in courses always are.
+        internal static string BundleMapVersion = "";
+
         // How LoadLevelManager seats the start gate + respawn markers onto the
         // terrain, from the optional "spawnsnap <both|raise|off>" header in the
         // active map's .aipaths.txt sidecar (gen_aipaths.py --spawnsnap):
@@ -1924,6 +1932,7 @@ namespace TrickyMaddnessLevelHook
                     if (line.StartsWith("scale")) continue; // world-scale header, read at load time (ReadWorldScale)
                     if (line.StartsWith("platform")) continue; // native-platform header, read at load time (ReadBundleNativePlatform)
                     if (line.StartsWith("source")) continue; // provenance header, read at load time (ReadBundleSource)
+                    if (line.StartsWith("mapversion")) continue; // map release version, read at load time (ReadBundleMapVersion)
                     if (line == "path")
                     {
                         cur = new List<AIPath.Point>();
@@ -2112,6 +2121,33 @@ namespace TrickyMaddnessLevelHook
             }
         }
 
+        // Reads the optional "mapversion <v>" header from a map's .aipaths.txt
+        // sidecar. Returns "" for a missing sidecar or no mapversion line —
+        // absence just means the map build predates the header (or nobody
+        // stamped it). Informational only, so the value is kept verbatim.
+        internal static string ReadBundleMapVersion(string bundlePath)
+        {
+            try
+            {
+                string sidecarPath = Path.ChangeExtension(bundlePath, ".aipaths.txt");
+                if (!File.Exists(sidecarPath)) return "";
+                foreach (var raw in File.ReadAllLines(sidecarPath))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("#")) continue;
+                    var t = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (t.Length != 2 || t[0] != "mapversion") continue;
+                    return t[1];
+                }
+                return "";
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"[Source] failed reading mapversion sidecar for {bundlePath}: {e}");
+                return "";
+            }
+        }
+
         // Reads the optional "spawnsnap <both|raise|off>" header from a map's
         // .aipaths.txt sidecar. Returns Both (seat markers on the surface, both
         // ways) for a missing sidecar or no spawnsnap line — the desired default
@@ -2241,6 +2277,7 @@ namespace TrickyMaddnessLevelHook
                 Plugin.MapGravityMultiplier = 1f;
                 Plugin.BundleNativePlatform = null;
                 Plugin.BundleSource = Plugin.DefaultSource;
+                Plugin.BundleMapVersion = "";
                 return true;
             }
 
@@ -2338,6 +2375,9 @@ namespace TrickyMaddnessLevelHook
                 // may have changed on disk. Informational: nothing keys off it.
                 Plugin.BundleSource = Plugin.ReadBundleSource(path);
                 Plugin.Log.LogInfo($"[Source] map '{levelEntry.name}' provenance: {Plugin.BundleSource}");
+                Plugin.BundleMapVersion = Plugin.ReadBundleMapVersion(path);
+                Plugin.Log.LogInfo($"[Source] map '{levelEntry.name}' version: "
+                    + (Plugin.BundleMapVersion.Length > 0 ? Plugin.BundleMapVersion : "(unversioned)"));
 
                 // Spawn/respawn ground-snap mode from the same sidecar (Both when
                 // absent). Read on reuse too — the sidecar may have changed on disk.
