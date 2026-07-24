@@ -1303,6 +1303,59 @@ namespace TrickyMaddnessLevelHook
             if (propsConverted > 0 || propsSkipped > 0)
                 Log.LogInfo($"[PhysProps] converted {propsConverted} crashable prop(s), skipped {propsSkipped}");
 
+            // Trick-multiplier pickups: hand the flakes to the GAME's own snowflake
+            // behaviour instead of the Maker's generic one.
+            //
+            // The map pipeline can only emit Maker components, so an imported flake
+            // ships with MakerSnowflake (tags the GO — that's all it does) plus a
+            // MakerObjectAnimation spinning it 60 deg/s about its LOCAL Y. The game's
+            // built-in courses instead carry `Snowflake`, which sets an ABSOLUTE
+            // world rotation of 3 rad/s (~172 deg/s) about Y — verified in level1,
+            // where every stock flake is: layer 2, tag Snowflake<n>, `Snowflake`, and
+            // a SPHERE trigger of radius 10 (its mesh is a 14.6 x 16.8 x 1.1 panel,
+            // so the sphere covers the flake's face AND stands ~10 units proud of it
+            // on either side).
+            //
+            // Two things follow, and both are why ported pickups feel off:
+            //   * spin is at the mercy of a Maker component we don't control (Molokai
+            //     ships a bundle structurally identical to maps that do spin, yet
+            //     doesn't) — the game's own component removes that variable, and
+            //     matches the built-in courses' speed while it's there.
+            //   * our trigger is the flake's own convex hull, i.e. ~2 units thick
+            //     along the panel normal. The rider crosses that in a single frame at
+            //     speed, so pickups get missed. Stock's grab depth is the radius, not
+            //     the panel: a sphere of max(10, largest extent) is never smaller than
+            //     stock's absolute grab and always encloses the (bigger, 2.5x-scaled)
+            //     ported flake, so its corners stay collectable.
+            int flakes = 0, flakeSpheres = 0;
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                foreach (var mf in sceneRoot.GetComponentsInChildren<MakerSnowflake>(true))
+                {
+                    var flakeGO = mf.gameObject;
+                    if (flakeGO.GetComponent<Snowflake>() != null) continue; // already converted
+                    var makerAnim = flakeGO.GetComponent<MakerObjectAnimation>();
+                    if (makerAnim != null) UnityEngine.Object.Destroy(makerAnim);
+                    flakeGO.AddComponent<Snowflake>();
+                    flakes++;
+
+                    // Swap the mesh-tight trigger for the stock sphere. Keep the mesh
+                    // collider only if there's no renderer to size a sphere from.
+                    var meshCol = flakeGO.GetComponent<MeshCollider>();
+                    var filter = flakeGO.GetComponent<MeshFilter>();
+                    if (filter == null || filter.sharedMesh == null) continue;
+                    var b = filter.sharedMesh.bounds;
+                    var sphere = flakeGO.AddComponent<SphereCollider>();
+                    sphere.isTrigger = true;
+                    sphere.center = b.center;
+                    sphere.radius = Mathf.Max(10f, Mathf.Max(b.extents.x, Mathf.Max(b.extents.y, b.extents.z)));
+                    if (meshCol != null) UnityEngine.Object.Destroy(meshCol);
+                    flakeSpheres++;
+                }
+            }
+            if (flakes > 0)
+                Log.LogInfo($"[Snowflakes] converted {flakes} pickup(s) to the game's Snowflake behaviour, {flakeSpheres} sphere trigger(s)");
+
             // Phase 4 custom items — Wind volumes. Naming contract with SSXImporter.BuildItems:
             // a GO named "Wind_<strength>" carries a BoxCollider (geometry only) and is oriented
             // so its forward (+Z) is the world push direction. We attach a WindVolume behavior
