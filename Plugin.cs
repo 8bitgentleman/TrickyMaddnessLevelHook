@@ -949,28 +949,41 @@ namespace TrickyMaddnessLevelHook
         // lift — more on a bank, so the uphill side never penetrates. In Both mode
         // the marker moves there whether that raises OR lowers it; Raise only ever
         // moves up. Caller gates out Off mode and syncs transforms once per batch.
+        // The cast + capsule-seating half of SnapMarkerToGround, split out so the
+        // race-line respawn markers below can reuse it. False = nothing on the
+        // ground layers within reach, which the callers treat differently: a
+        // spawn marker is left as authored, a race-line respawn is dropped.
+        static bool GroundSeat(Vector3 p, out float y, out float terrainY, out float cosSlope)
+        {
+            y = p.y; terrainY = p.y; cosSlope = 1f;
+            if (!Physics.Raycast(p + Vector3.up * 20f, Vector3.down, out var hit, 120f, SpawnGroundMask, QueryTriggerInteraction.Ignore))
+                return false;
+            var cap = Capsule();
+            // cos of the slope under the marker; clamp so a near-vertical face (a
+            // bad ray hit) can't demand an absurd lift.
+            cosSlope = Mathf.Clamp(hit.normal.y, 0.2f, 1f);
+            float clearance = (cap.radius + cap.skin + 0.02f) / cosSlope - cap.bottomSphereLocalY;
+            if (clearance < 0.02f) clearance = 0.02f;
+            terrainY = hit.point.y;
+            y = hit.point.y + clearance;
+            return true;
+        }
+
         static void SnapMarkerToGround(Transform t, string label)
         {
             Vector3 p = t.position;
-            if (!Physics.Raycast(p + Vector3.up * 20f, Vector3.down, out var hit, 120f, SpawnGroundMask, QueryTriggerInteraction.Ignore))
+            if (!GroundSeat(p, out float target, out float terrainY, out float cosSlope))
             {
                 Log.LogWarning($"[Spawn] no ground under {label} at {p} on layers 0|6|7|14 — left as authored");
                 return;
             }
-            var cap = Capsule();
-            // cos of the slope under the marker; clamp so a near-vertical face (a
-            // bad ray hit) can't demand an absurd lift.
-            float cosSlope = Mathf.Clamp(hit.normal.y, 0.2f, 1f);
-            float clearance = (cap.radius + cap.skin + 0.02f) / cosSlope - cap.bottomSphereLocalY;
-            if (clearance < 0.02f) clearance = 0.02f;
-            float target = hit.point.y + clearance;
             float newY = Plugin.SpawnSnapMode == Plugin.SpawnSnap.Raise ? Mathf.Max(p.y, target) : target;
             if (Mathf.Abs(newY - p.y) > 0.01f)
             {
                 t.position = new Vector3(p.x, newY, p.z);
-                Log.LogInfo($"[Spawn] {label} snapped {p.y:F2} -> {newY:F2} (terrain y={hit.point.y:F2}, {(newY > p.y ? "+" : "")}{newY - p.y:F2}, slope {Mathf.Acos(cosSlope) * Mathf.Rad2Deg:F0}deg, clearance {clearance:F2})");
+                Log.LogInfo($"[Spawn] {label} snapped {p.y:F2} -> {newY:F2} (terrain y={terrainY:F2}, {(newY > p.y ? "+" : "")}{newY - p.y:F2}, slope {Mathf.Acos(cosSlope) * Mathf.Rad2Deg:F0}deg, clearance {target - terrainY:F2})");
             }
-            else Log.LogInfo($"[Spawn] {label} already seated (y={p.y:F2}, terrain y={hit.point.y:F2}, slope {Mathf.Acos(cosSlope) * Mathf.Rad2Deg:F0}deg)");
+            else Log.LogInfo($"[Spawn] {label} already seated (y={p.y:F2}, terrain y={terrainY:F2}, slope {Mathf.Acos(cosSlope) * Mathf.Rad2Deg:F0}deg)");
         }
 
         public static void LoadLevelManager()
@@ -1219,24 +1232,59 @@ namespace TrickyMaddnessLevelHook
             // The game re-enumerates children live per respawn, so runtime-built
             // markers just work. Falls back to the maker parent if the race line is
             // too short to sample.
+            // ⚠️ Seat these on the snow, and DROP the ones with nothing under them.
+            // SnapMarkerToGround above only ever sees the MAKER markers, which this
+            // block then throws away — so before this, every race-line respawn was
+            // used exactly as authored. That is fine for an SSX/SSX3 race line
+            // (ground-following AI data) and wrong for one derived from a recorded
+            // human run: alps0101's ghost line has 53% of its points more than 5 m
+            // up and 13% more than 40 m, so half its respawns were into freefall.
+            // Dropping the unreachable ones beats snapping them, because what is
+            // under a big jump is not the course (one alps0101 point flies a ravine
+            // whose floor is 122 m down); the game picks the NEAREST marker and
+            // they sit ~25 m apart, so the neighbours cover the gap. Gated on
+            // spawnsnap so a map that opts out (gari) keeps its authored markers.
             if (TempRaceLine.m_points != null && TempRaceLine.m_points.Count >= 2)
             {
                 var respawnParent = new GameObject("Respawn Points (race line)");
                 respawnParent.transform.parent = levelManager.transform;
                 var rpts = TempRaceLine.m_points;
+                bool seat = Plugin.SpawnSnapMode != Plugin.SpawnSnap.Off;
+                int made = 0, moved = 0, dropped = 0;
                 for (int i = 0; i < rpts.Count; i++)
                 {
+                    Vector3 p = rpts[i].position;
+                    if (seat)
+                    {
+                        if (!GroundSeat(p, out float sy, out _, out _)) { dropped++; continue; }
+                        if (Plugin.SpawnSnapMode == Plugin.SpawnSnap.Raise) sy = Mathf.Max(p.y, sy);
+                        if (Mathf.Abs(sy - p.y) > 0.01f) moved++;
+                        p.y = sy;
+                    }
                     var go = new GameObject("Respawn " + i.ToString(CultureInfo.InvariantCulture));
                     go.transform.parent = respawnParent.transform;
-                    go.transform.position = rpts[i].position;
+                    go.transform.position = p;
                     Vector3 fwd = (i + 1 < rpts.Count)
                         ? rpts[i + 1].position - rpts[i].position
                         : rpts[i].position - rpts[i - 1].position;
+                    fwd.y = 0f;
                     if (fwd.sqrMagnitude > 1e-6f)
                         go.transform.rotation = Quaternion.LookRotation(fwd.normalized, Vector3.up);
+                    made++;
                 }
-                Traverse.Create(levelManager).Field("respawnPointsParent").SetValue(respawnParent.transform);
-                Log.LogInfo($"[Respawn] built {rpts.Count} race-line respawn marker(s), replacing maker branch-head markers");
+                // Every point airborne means the cast never found the terrain at all
+                // (bad ground layers, say) — keep the maker markers rather than hand
+                // the game an empty parent, which would strand a fallen rider.
+                if (made > 0)
+                {
+                    Traverse.Create(levelManager).Field("respawnPointsParent").SetValue(respawnParent.transform);
+                    Log.LogInfo($"[Respawn] built {made} race-line respawn marker(s) ({moved} seated on ground, {dropped} dropped as airborne), replacing maker branch-head markers");
+                }
+                else
+                {
+                    UnityEngine.Object.Destroy(respawnParent);
+                    Log.LogWarning($"[Respawn] all {rpts.Count} race-line points are airborne — keeping maker branch-head markers");
+                }
             }
 
             // Kill the "bouncy glass" (MECHANICS_DIAGNOSIS Bug 4). SSX glass panes
