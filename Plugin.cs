@@ -2666,9 +2666,12 @@ namespace TrickyMaddnessLevelHook
             // shippable state, so this is a warning and not an error — but it used to be
             // wholly silent, and the only way to discover it was to look at the menu and
             // notice a blank card. The cache above means each path logs at most once.
+            // ⚠️ Plugin.Log, NOT Debug.LogWarning: UnityEngine.Debug writes to Unity's
+            // Player.log, which is not the log anyone here reads. A first cut used Debug
+            // and the warnings fired correctly into a file nobody opens.
             if (!File.Exists(pngPath))
             {
-                Debug.LogWarning("[LevelHook] no menu thumbnail at " + pngPath
+                Plugin.Log.LogWarning("[Thumbnails] no menu thumbnail at " + pngPath
                     + " — this map's card will be blank. Expected a 1024x576 PNG named after the .asset.");
                 return null;
             }
@@ -2677,7 +2680,7 @@ namespace TrickyMaddnessLevelHook
                 var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
                 if (!tex.LoadImage(File.ReadAllBytes(pngPath)))
                 {
-                    Debug.LogWarning("[LevelHook] menu thumbnail at " + pngPath
+                    Plugin.Log.LogWarning("[Thumbnails] menu thumbnail at " + pngPath
                         + " exists but could not be decoded as an image; this map's card will be blank.");
                     return null;
                 }
@@ -2688,7 +2691,7 @@ namespace TrickyMaddnessLevelHook
             }
             catch (Exception e)
             {
-                Debug.LogWarning("[LevelHook] thumbnail load failed for " + pngPath + ": " + e.Message);
+                Plugin.Log.LogWarning("[Thumbnails] thumbnail load failed for " + pngPath + ": " + e.Message);
                 return null;
             }
         }
