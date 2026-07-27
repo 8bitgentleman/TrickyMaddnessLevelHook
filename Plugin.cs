@@ -1086,7 +1086,14 @@ namespace TrickyMaddnessLevelHook
 
                 List<Rail.Segment> NewSegments = BuildRailSegments(RailObjects[i]);
 
-                Enum.TryParse(RailObjects[i].Materials.ToString(), out Rail.RailMaterial material1);
+                // The bool is checked, not discarded: on a miss TryParse yields
+                // default(RailMaterial) silently, which is indistinguishable from an
+                // authored value and just changes the grind sound/FX for no visible reason.
+                Rail.RailMaterial material1;
+                if (!Enum.TryParse(RailObjects[i].Materials.ToString(), out material1))
+                    Log.LogWarning($"[Rails] '{RailObjects[i].gameObject.name}' declares material "
+                        + $"'{RailObjects[i].Materials}', which has no match in Rail.RailMaterial — "
+                        + $"using {material1} instead (grind sound/FX will be wrong on this rail).");
 
                 NewRail.material = material1;
 
@@ -1755,7 +1762,11 @@ namespace TrickyMaddnessLevelHook
                     if (SnowFall.Active) break;
                     float si;
                     if (!float.TryParse(t.name.Substring("SnowFX_".Length), NumberStyles.Float,
-                                        CultureInfo.InvariantCulture, out si)) si = 1f;
+                                        CultureInfo.InvariantCulture, out si))
+                    {
+                        si = 1f;
+                        Log.LogDebug($"[SnowFall] '{t.name}' has no parseable intensity -> default {si:F2}");
+                    }
                     SnowFall.Spawn(si);
                     Log.LogInfo($"[SnowFall] camera-follow snow spawned (intensity {si:F2})");
                 }
@@ -1772,9 +1783,21 @@ namespace TrickyMaddnessLevelHook
                     if (!t.name.StartsWith("Bloom_")) continue;
                     if (PostFX.Active) break;
                     string[] seg = t.name.Split('_');
-                    float bi = 0.7f, bt = 0.9f;
-                    if (seg.Length >= 2) float.TryParse(seg[1], NumberStyles.Float, CultureInfo.InvariantCulture, out bi);
-                    if (seg.Length >= 3) float.TryParse(seg[2], NumberStyles.Float, CultureInfo.InvariantCulture, out bt);
+                    float bi = 0.7f, bt = 0.9f, parsed;
+                    // ⚠️ Parse into a scratch float, NOT straight into bi/bt. TryParse
+                    // zeroes its out param on failure, so passing bi directly turned a
+                    // malformed "Bloom_x_y" into intensity 0 — bloom silently OFF — while
+                    // the log line below cheerfully reported the 0 as if authored.
+                    if (seg.Length >= 2)
+                    {
+                        if (float.TryParse(seg[1], NumberStyles.Float, CultureInfo.InvariantCulture, out parsed)) bi = parsed;
+                        else Log.LogDebug($"[PostFX] '{t.name}' has no parseable intensity -> default {bi:F2}");
+                    }
+                    if (seg.Length >= 3)
+                    {
+                        if (float.TryParse(seg[2], NumberStyles.Float, CultureInfo.InvariantCulture, out parsed)) bt = parsed;
+                        else Log.LogDebug($"[PostFX] '{t.name}' has no parseable threshold -> default {bt:F2}");
+                    }
                     PostFX.Enable(bi, bt);
                     Log.LogInfo($"[PostFX] bloom enabled (intensity {bi:F2}, threshold {bt:F2})");
                 }
@@ -1826,6 +1849,16 @@ namespace TrickyMaddnessLevelHook
             if (list == null || list.childCount < 2)
             {
                 // No usable PointList — fall back to whatever the Maker component has.
+                // ⚠️ This is the BAD path the comment above exists to prevent: it drops
+                // P0 and leaves an ungrindable lead-in. It is kept only so a rail with a
+                // malformed PointList still grinds *somewhere* rather than not at all,
+                // but it must never be silent — a rider reporting "this rail doesn't
+                // grab from the top" needs to find this line in the log rather than
+                // re-derive the whole P0 investigation. See CLAUDE.md §6.
+                Log.LogWarning($"[Rails] '{rail.gameObject.name}' has no usable PointList "
+                    + $"({(list == null ? "null" : list.childCount + " point(s), need 2")}) — "
+                    + "falling back to MakerRails.GetSegments(), which DROPS THE FIRST POINT "
+                    + "and leaves a dead ungrindable lead-in at the entry end of this rail.");
                 foreach (var s in rail.GetSegments())
                 {
                     var fb = new Rail.Segment(Vector3.zero, Vector3.up);
@@ -1973,6 +2006,7 @@ namespace TrickyMaddnessLevelHook
             {
                 var paths = new List<List<AIPath.Point>>();
                 List<AIPath.Point> cur = null;
+                int malformed = 0;
                 foreach (var raw in File.ReadAllLines(sidecarPath))
                 {
                     string line = raw.Trim();
@@ -1988,7 +2022,7 @@ namespace TrickyMaddnessLevelHook
                         continue;
                     }
                     var t = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                    if (t.Length < 3) continue;
+                    if (t.Length < 3) { malformed++; continue; }
                     if (cur == null)
                     {
                         cur = new List<AIPath.Point>();
@@ -2002,10 +2036,10 @@ namespace TrickyMaddnessLevelHook
                     cur.Add(p);
                 }
 
-                int built = 0, points = 0;
+                int built = 0, points = 0, tooShort = 0;
                 for (int i = 0; i < paths.Count; i++)
                 {
-                    if (paths[i].Count < 2) continue; // a path needs a direction
+                    if (paths[i].Count < 2) { tooShort++; continue; } // a path needs a direction
                     var go = new GameObject("AIPath (sidecar " + built.ToString(CultureInfo.InvariantCulture) + ")");
                     go.transform.parent = parent;
                     var path = go.AddComponent<AIPath>();
@@ -2015,6 +2049,15 @@ namespace TrickyMaddnessLevelHook
                     points += paths[i].Count;
                 }
                 Log.LogInfo($"[AIPaths] built {built} path(s) ({points} points) from sidecar {Path.GetFileName(sidecarPath)}");
+                // Both counters used to be invisible: the summary above reported only the
+                // survivors, so a truncated sidecar looked exactly like a short one. A
+                // path dropped here is a path the AI cannot run.
+                if (malformed > 0)
+                    Log.LogWarning($"[AIPaths] sidecar {Path.GetFileName(sidecarPath)}: {malformed} point line(s) "
+                        + "had fewer than 3 tokens and were dropped (expected 'x z windup').");
+                if (tooShort > 0)
+                    Log.LogWarning($"[AIPaths] sidecar {Path.GetFileName(sidecarPath)}: {tooShort} path(s) "
+                        + "had fewer than 2 points and were discarded entirely.");
                 return built;
             }
             catch (Exception e)
@@ -2049,6 +2092,27 @@ namespace TrickyMaddnessLevelHook
             return 1;
         }
 
+        // Shape check shared by the six one-key-per-line sidecar header readers below.
+        // True only for an exact "<key> <value>" line.
+        //
+        // The reason this is a function and not an inline comparison is the ELSE branch.
+        // A line whose first token IS the key but whose shape is wrong — a trailing
+        // comment ("scale 2.5 # doubled"), wrong case ("Scale 2.5"), a stray third token
+        // — used to be skipped in silence, completely indistinguishable from the header
+        // being absent. A map with NO sidecar and a map whose sidecar says `Scale 2.5`
+        // produced byte-identical logs and both silently rode at scale 1.0, with
+        // unscaled jump arcs and mis-sized rail colliders. An absent header is a normal,
+        // documented state and stays quiet; a header we ALMOST understood is a typo
+        // someone needs told about.
+        private static bool HeaderMatches(string[] t, string key, string sidecarName)
+        {
+            if (t.Length == 2 && t[0] == key) return true;
+            if (t.Length > 0 && string.Equals(t[0], key, StringComparison.OrdinalIgnoreCase))
+                Log.LogWarning($"[Sidecar] {sidecarName}: '{string.Join(" ", t)}' looks like the "
+                    + $"'{key}' header but is not exactly '{key} <value>' — IGNORED, using the default.");
+            return false;
+        }
+
         // Reads the optional "scale <f>" header line from a map's .aipaths.txt
         // sidecar (written by gen_aipaths.py --scale). Returns 1.0 for a missing
         // sidecar, no scale line, or a non-positive value — every path through
@@ -2064,7 +2128,7 @@ namespace TrickyMaddnessLevelHook
                     string line = raw.Trim();
                     if (line.Length == 0 || line.StartsWith("#")) continue;
                     var t = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                    if (t.Length != 2 || t[0] != "scale") continue;
+                    if (!HeaderMatches(t, "scale", Path.GetFileName(sidecarPath))) continue;
                     float s = float.Parse(t[1], CultureInfo.InvariantCulture);
                     if (s > 0f) return s;
                     Log.LogWarning($"[Gravity] sidecar {Path.GetFileName(sidecarPath)} declares scale {t[1]} (must be > 0); ignoring");
@@ -2094,7 +2158,7 @@ namespace TrickyMaddnessLevelHook
                     string line = raw.Trim();
                     if (line.Length == 0 || line.StartsWith("#")) continue;
                     var t = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                    if (t.Length != 2 || t[0] != "gravity") continue;
+                    if (!HeaderMatches(t, "gravity", Path.GetFileName(sidecarPath))) continue;
                     float g = float.Parse(t[1], CultureInfo.InvariantCulture);
                     if (g > 0f) return g;
                     Log.LogWarning($"[Gravity] sidecar {Path.GetFileName(sidecarPath)} declares gravity {t[1]} (must be > 0); ignoring");
@@ -2126,7 +2190,7 @@ namespace TrickyMaddnessLevelHook
                     string line = raw.Trim();
                     if (line.Length == 0 || line.StartsWith("#")) continue;
                     var t = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                    if (t.Length != 2 || t[0] != "platform") continue;
+                    if (!HeaderMatches(t, "platform", Path.GetFileName(sidecarPath))) continue;
                     string p = t[1].ToLowerInvariant();
                     if (p == "windows" || p == "mac") return p;
                     Log.LogWarning($"[ShaderRemap] sidecar {Path.GetFileName(sidecarPath)} declares platform '{t[1]}' (expected 'windows' or 'mac'); ignoring");
@@ -2157,7 +2221,7 @@ namespace TrickyMaddnessLevelHook
                     string line = raw.Trim();
                     if (line.Length == 0 || line.StartsWith("#")) continue;
                     var t = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                    if (t.Length != 2 || t[0] != "source") continue;
+                    if (!HeaderMatches(t, "source", Path.GetFileName(sidecarPath))) continue;
                     return t[1].ToLowerInvariant();
                 }
                 return DefaultSource;
@@ -2184,7 +2248,7 @@ namespace TrickyMaddnessLevelHook
                     string line = raw.Trim();
                     if (line.Length == 0 || line.StartsWith("#")) continue;
                     var t = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                    if (t.Length != 2 || t[0] != "mapversion") continue;
+                    if (!HeaderMatches(t, "mapversion", Path.GetFileName(sidecarPath))) continue;
                     return t[1];
                 }
                 return "";
@@ -2212,7 +2276,7 @@ namespace TrickyMaddnessLevelHook
                     string line = raw.Trim();
                     if (line.Length == 0 || line.StartsWith("#")) continue;
                     var t = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                    if (t.Length != 2 || t[0] != "spawnsnap") continue;
+                    if (!HeaderMatches(t, "spawnsnap", Path.GetFileName(sidecarPath))) continue;
                     switch (t[1].ToLowerInvariant())
                     {
                         case "both": return SpawnSnap.Both;
@@ -2598,11 +2662,25 @@ namespace TrickyMaddnessLevelHook
         {
             if (cache.TryGetValue(pngPath, out var cached)) return cached;
             cache[pngPath] = null; // remember misses too, so we don't retry disk every menu open
-            if (!File.Exists(pngPath)) return null;
+            // Both misses below are logged. A map with no thumbnail is a legitimate,
+            // shippable state, so this is a warning and not an error — but it used to be
+            // wholly silent, and the only way to discover it was to look at the menu and
+            // notice a blank card. The cache above means each path logs at most once.
+            if (!File.Exists(pngPath))
+            {
+                Debug.LogWarning("[LevelHook] no menu thumbnail at " + pngPath
+                    + " — this map's card will be blank. Expected a 1024x576 PNG named after the .asset.");
+                return null;
+            }
             try
             {
                 var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                if (!tex.LoadImage(File.ReadAllBytes(pngPath))) return null;
+                if (!tex.LoadImage(File.ReadAllBytes(pngPath)))
+                {
+                    Debug.LogWarning("[LevelHook] menu thumbnail at " + pngPath
+                        + " exists but could not be decoded as an image; this map's card will be blank.");
+                    return null;
+                }
                 var sprite = Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height),
                     new Vector2(0.5f, 0.5f), 100f);
                 cache[pngPath] = sprite;
