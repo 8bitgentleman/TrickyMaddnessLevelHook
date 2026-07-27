@@ -2520,6 +2520,24 @@ namespace TrickyMaddnessLevelHook
         }
     }
 
+    // SnowTrail (the board's ground-snapped ribbon decal) ground-snaps via a
+    // raycast that only hits Unity layer "Default" (IL-verified: SnowTrail.Start
+    // sets its static layerMask to just 1 << LayerMask.NameToLayer("Default")).
+    // Our rideable ground can legitimately be Default(0)/Ice(6)/Rock(7)/Metal(14)
+    // (see Snowboarder's own layer semantics), so on any SSX/SSX3/2012 terrain
+    // typed onto Ice/Rock/Metal the raycast misses every frame and the trail
+    // never renders. Widen the mask once, right after Start() sets it.
+    [HarmonyPatch(typeof(SnowTrail), "Start")]
+    public class SnowTrail_Start_LayerMask
+    {
+        [HarmonyPostfix]
+        public static void Postfix()
+        {
+            int rideableMask = (1 << 0) | (1 << 6) | (1 << 7) | (1 << 14);
+            Traverse.Create(typeof(SnowTrail)).Field("layerMask").SetValue(rideableMask);
+        }
+    }
+
     // Custom thumbnails. The game sets each level's menu thumbnail via
     // Resources.Load<Sprite>(thumbnailPath), which can't read a PNG off disk and
     // runs before the map bundle is loaded. So instead, after the menu is built,
