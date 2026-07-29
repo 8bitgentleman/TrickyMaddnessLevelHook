@@ -11,6 +11,6 @@ namespace TrickyMaddnessLevelHook
         // user's log could not tell those builds apart. Bump this on every
         // release from here on; the BepInEx boot line is the only version a bug
         // report carries for the Hook itself.
-        public const string PLUGIN_VERSION = "2.0.0";
+        public const string PLUGIN_VERSION = "2.1.0";
     }
 }
