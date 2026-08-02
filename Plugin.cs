@@ -45,6 +45,7 @@ namespace TrickyMaddnessLevelHook
         // Inert at scale 1 and on built-in levels regardless of the flag.
         internal static ConfigEntry<bool> scaleGravityWithMap;
         internal static ConfigEntry<float> startLaunchSpeedScale;
+        internal static ConfigEntry<bool> fixRailProjection;
         // Fine-tune multiplier on the skydome's auto-fit (feature 13). SkydomeFollow
         // sizes the dome to ~95% of the camera far-clip plane each frame so it envelops
         // the whole visible course; this scales that target (1 = the fit). Tunable, no
@@ -211,6 +212,17 @@ namespace TrickyMaddnessLevelHook
                 "hot (the sideways projection preserves nearly the full kick, which a " +
                 "gentle down-course start would not). 1.0 = keep the full speed. " +
                 "Human rider only; no effect on built-in levels.");
+            fixRailProjection = Config.Bind("Gameplay", "FixRailProjection", true,
+                "Bug fix in the GAME's own Rail.GetClosestPosition: it builds the " +
+                "closest point on a rail segment as 'start + segmentVector * t' " +
+                "where t is a distance in metres, so the projection is only correct " +
+                "on segments exactly 1 m long — and no rail in the game is, stock " +
+                "levels included. The rider can be snapped metres off the rail and, " +
+                "at the tail, the method reports 'still on the rail' when they have " +
+                "run off it, so the game re-attaches them behind where they were " +
+                "(the rail-end snap-back loop; CPU riders never escape it). " +
+                "On by default. Set false to restore the stock behaviour — this " +
+                "is the one Hook feature that changes built-in levels too.");
             skydomeScale = Config.Bind("Skydome", "Scale", 1f,
                 "Fine-tune multiplier on the skydome's automatic fit. The dome is " +
                 "auto-sized each frame so its radius is ~90% of the camera's far-clip " +
@@ -2346,6 +2358,15 @@ namespace TrickyMaddnessLevelHook
             else
                 Log.LogDebug($"[Gravity] {label}: routed {patched} gravity literal(s) through ScaledGravity");
         }
+
+        // The corrected multiply for Rail.GetClosestPosition's closest-point
+        // formula: the game scales the raw segment vector by a distance in
+        // metres, where only the unit direction may be scaled. See
+        // Rail_GetClosestPosition_Projection for the full story.
+        internal static Vector3 RailProject(Vector3 segmentDelta, float distanceAlong)
+        {
+            return segmentDelta.normalized * distanceAlong;
+        }
     }
 
 
@@ -2581,6 +2602,79 @@ namespace TrickyMaddnessLevelHook
         public static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
         {
             return Plugin.ScaleGravityLiterals(instructions, "Caster.Cast", new[] { 20f, 17f });
+        }
+    }
+
+    // Rail.GetClosestPosition — fix the closest-point projection.
+    //
+    // IL-verified against Assembly-CSharp. Per segment i the game computes
+    //     d   = seg[i+1].position - seg[i].position      (NOT normalized)
+    //     dir = d.normalized
+    //     len = d.magnitude
+    //     t   = clamp(Dot(rider - seg[i].position, dir), 0, len)   // metres
+    // and then takes the closest point on that segment as
+    //     seg[i].position + d * t                        // <-- wrong term
+    // where it must be dir * t. The two agree only when |d| == 1 m. Nothing
+    // resamples rails to unit length — not the game's own authoring tool
+    // (MakerRails.GenerateSegments emits one Segment per PointList child, no
+    // resampling) and not our importer — and measured spacing is 1.8–7.0 m
+    // median across every course we ship, so this is wrong on every rail in
+    // the game, built-in levels included. The rotation and distance lerps
+    // further down the same method both use the correct normalized parameter
+    // t/len; the position line is the lone outlier, which is what makes this
+    // read as a typo rather than as intent.
+    //
+    // Consequence: each segment's candidate point overshoots by a factor of
+    // |d|, so a segment the rider is nowhere near can win the nearest-segment
+    // contest. Measured on spline_CRA3_railslides_secret_1002 (13 points,
+    // 4.9–5.9 m spans, 65.1 m long), walking the rider exactly along the true
+    // polyline: the shipped formula snaps up to 3.55 m off the rail line, and
+    // 5% past the tail it returns end = 0 where the corrected one returns
+    // end = 1. `end` and `distance` are only committed for the winning
+    // segment, so picking the wrong segment corrupts both. Snowboarder gates
+    // re-attachment on `if (end == railDirection) return;` — with end stuck at
+    // 0 the game never learns the rider ran off the end and re-attaches them
+    // behind where they were. That is the reported rail-end snap-back loop;
+    // jumping escapes it because jumping is a separate exit path, which is why
+    // CPU riders (who don't jump out) stay stuck.
+    //
+    // Surgical fix: the method contains exactly ONE Vector3 * float multiply
+    // and it is that term, so reroute that one call through Plugin.RailProject
+    // (which normalizes first). No local-variable rewriting, nothing else
+    // touched. Bails out unchanged and loudly if the match count isn't exactly
+    // 1, so a future game update degrades to stock behaviour rather than to
+    // corrupted rails.
+    [HarmonyPatch(typeof(Rail), "GetClosestPosition")]
+    public class Rail_GetClosestPosition_Projection
+    {
+        [HarmonyTranspiler]
+        public static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+        {
+            var code = new List<CodeInstruction>(instructions);
+            if (!Plugin.fixRailProjection.Value)
+            {
+                Plugin.Log.LogInfo("[Rail] FixRailProjection off — leaving Rail.GetClosestPosition stock");
+                return code;
+            }
+
+            var mul = AccessTools.Method(typeof(Vector3), "op_Multiply",
+                new[] { typeof(Vector3), typeof(float) });
+            var fix = AccessTools.Method(typeof(Plugin), nameof(Plugin.RailProject));
+
+            var hits = new List<int>();
+            for (int i = 0; i < code.Count; i++)
+                if (code[i].opcode == OpCodes.Call && Equals(code[i].operand, mul))
+                    hits.Add(i);
+
+            if (hits.Count != 1)
+            {
+                Plugin.Log.LogWarning($"[Rail] GetClosestPosition: expected exactly 1 Vector3*float multiply, found {hits.Count} — game updated? Leaving the method stock.");
+                return code;
+            }
+
+            code[hits[0]].operand = fix;
+            Plugin.Log.LogInfo("[Rail] GetClosestPosition: closest-point projection corrected (scale the unit direction, not the raw segment vector)");
+            return code;
         }
     }
 
