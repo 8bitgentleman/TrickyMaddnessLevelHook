@@ -43,6 +43,16 @@ Sidecar format (one token line per point, invariant-culture floats):
                           "ssx3" (SSX 3 ports). Absent == "tricky_madness": the
                           Hook defaults sidecar-less / header-less maps to OG,
                           which is what the game's own built-in courses are.
+    group <label>      <- optional level-select section heading, e.g. "SSX 3".
+                          Everything after the key is the label, so it MAY
+                          contain spaces (the only header that may). Absent ==
+                          the Hook's DefaultGroup, "CUSTOM".
+    order <n>          <- optional level-select sort key, a whole number, GLOBAL
+                          across every map in Maps/ (not per group). Sections are
+                          runs of adjacent maps sharing a `group`, so two maps in
+                          one group must not have another group's map ordered
+                          between them. Absent == sorts after every map that
+                          declares one, by name.
     path               <- starts a new path
     <x> <z> <0|1>      <- world XZ position + windup flag
 
@@ -50,6 +60,7 @@ Usage:
     python3 gen_aipaths.py [--scale <f>] [--gravity <f>] \
         [--platform <mac|windows|none>] [--source <slug>] \
         [--spawnsnap <both|raise|off>] [--mapversion <v>] \
+        [--group <label>] [--order <n>] \
         <map1.asset> [map2.asset ...]
 
 All flags apply to every asset in the same invocation.
@@ -138,6 +149,8 @@ def main(argv):
     source = None
     spawnsnap = None
     mapversion = None
+    group = None
+    order = None
     while args and args[0].startswith("--"):
         flag = args[0]
         if len(args) < 2:
@@ -190,6 +203,21 @@ def main(argv):
                       "got %r" % val, file=sys.stderr)
                 return 2
             mapversion = val
+        elif flag == "--group":
+            # Free prose: it is drawn verbatim as a section heading. Only
+            # constraint is that it stays one line and is not blank.
+            val = " ".join(val.split())
+            if not val:
+                print("--group must not be blank", file=sys.stderr)
+                return 2
+            group = val
+        elif flag == "--order":
+            try:
+                order = int(val)
+            except ValueError:
+                print("--order must be a whole number, got %r" % val,
+                      file=sys.stderr)
+                return 2
         else:
             print("unknown flag %r" % flag, file=sys.stderr)
             return 2
@@ -228,6 +256,10 @@ def main(argv):
                 f.write("spawnsnap %s\n" % spawnsnap)
             if mapversion is not None:
                 f.write("mapversion %s\n" % mapversion)
+            if group is not None:
+                f.write("group %s\n" % group)
+            if order is not None:
+                f.write("order %d\n" % order)
             for pts in paths:
                 f.write("path\n")
                 for x, z, w in pts:
