@@ -37,6 +37,11 @@ namespace TrickyMaddnessLevelHook
         // scrolling behaviour attached). Default on.
         internal static ConfigEntry<bool> levelSelectScroll;
 
+        // Vertical grid with a heading per source game, instead of the vanilla
+        // one-row strip. Default on; false falls back to the strip scroller.
+        internal static ConfigEntry<bool> levelSelectGrid;
+        internal static ConfigEntry<float> levelSelectGridHeight;
+
         // Opt-in feel-tuning knob (default OFF): multiply the game's rider/caster
         // gravity constants by the active map's declared world scale. Scaled-up
         // maps deliberately keep stock gravity — the rider's jumps are tuned for
@@ -196,6 +201,17 @@ namespace TrickyMaddnessLevelHook
                 "Scroll the level-select card strip when more cards exist than fit " +
                 "on screen, auto-scrolling to the selected card. When all cards fit, " +
                 "the menu is left pixel-identical to vanilla. Set false to disable.");
+            levelSelectGrid = Config.Bind("UI", "LevelSelectGrid", true,
+                "Lay the level select out as a vertical scrolling grid with a heading " +
+                "per source game (Tricky Madness / SSX Tricky / SSX 3 / SSX 2012), " +
+                "instead of one long horizontal strip. Set false to fall back to the " +
+                "vanilla strip with LevelSelectScroll's scrolling. Ignored entirely " +
+                "when LevelSelectScroll is false.");
+            levelSelectGridHeight = Config.Bind("UI", "LevelSelectGridHeight", 1800f,
+                "Height of the level-select grid, in the menu canvas's 3840x2160 " +
+                "reference pixels. The bottom of the grid is fixed just above the " +
+                "nav bar (y=216); this is how far up the screen it reaches, so 1944 " +
+                "is full height. Lower it if the grid crowds the top of your screen.");
             scaleGravityWithMap = Config.Bind("Gameplay", "ScaleGravityWithMap", false,
                 "Opt-in feel tuning: on custom maps that declare a world scale (a " +
                 "'scale' line in their .aipaths.txt sidecar), multiply the " +
@@ -804,19 +820,61 @@ namespace TrickyMaddnessLevelHook
             }
         }
 
-        // Desired level-selector order: SSX Tricky courses (user's chosen sequence),
-        // then the SSX 3 courses in mountain order (Peak 1 down to Peak 3), then the
-        // whole-mountain chain. Matched case-insensitively against each map's file
-        // name via StartsWith, so scale variants ("Garibaldi 2.5x") share their base's
-        // rank. Any map matching nothing here (e.g. the "Tricky" bonus arena, or a
-        // future drop-in) sorts after all known courses, alphabetically.
-        // ⚠️ The SSX 3 keys are whole map names because they share the "SSX3: Peak n "
-        // prefix — shortening one to that prefix would swallow its sibling. They mirror
-        // BuildBundle.DisplayNames, which is what names the .asset files; a key that
-        // drifts from that table doesn't break anything loudly, it just silently sorts
-        // that course last. (These were "Ssx3_Acourse"… until 2026-08-02, when the maps
-        // took their real names from the PS2 ELF course table — SSX3_FULL_MOUNTAIN_RE.md §8.)
-        private static readonly string[] TrackOrder =
+        // ── Level-selector grouping ───────────────────────────────────────────
+        // The list is grouped by which GAME a course came from, and only within a
+        // group by that game's own course order. A map's group comes from the
+        // "source <slug>" header in its .aipaths.txt sidecar (ReadBundleSource).
+        //
+        // ⚠️ This makes `source` LOAD-BEARING for menu layout — it used to be purely
+        // diagnostic ("logged, never keyed off"). Absence is still legal and still
+        // means DefaultSource; such a map just lands in the Other group at the
+        // bottom rather than vanishing. An unrecognised slug does the same.
+        //
+        // EraBuiltIn is not a sidecar value — the game's own four levels are
+        // registered by MenuManager before our postfix runs and always sort first.
+        internal const int EraBuiltIn = 0;
+        internal const int EraTricky = 1;
+        internal const int EraSsx3 = 2;
+        internal const int EraSsx2012 = 3;
+        internal const int EraOther = 4;
+        internal const int EraCount = 5;
+
+        // Section headings drawn above each group in the level-select grid.
+        internal static readonly string[] EraLabels =
+        {
+            "TRICKY MADNESS",
+            "SSX TRICKY",
+            "SSX 3",
+            "SSX (2012)",
+            "OTHER",
+        };
+
+        private static int EraOf(string source)
+        {
+            switch (source)
+            {
+                case "ssx_tricky": return EraTricky;
+                case "ssx3": return EraSsx3;
+                case "ssx2012": return EraSsx2012;
+                default: return EraOther;
+            }
+        }
+
+        // Within-group order, matched case-insensitively against each map's file
+        // name via StartsWith, so scale variants ("Garibaldi 2.5x") share their
+        // base's rank. A map matching nothing in its group's table (e.g. the
+        // "Tricky" bonus arena) sorts after that group's known courses,
+        // alphabetically — it does NOT fall into another group.
+        //
+        // ⚠️ StartsWith takes the FIRST hit, so within one table no entry may be a
+        // prefix of another. Splitting the old single table per era is also what
+        // fixes a live collision: "Alaska" (Tricky) swallowed all five SSX 2012
+        // "Alaska: …" tracks, ranking them as the Tricky course.
+
+        // SSX Tricky, in World Circuit order (user-supplied, 2026-08-03). Molokai
+        // Pahee and Snow Belline are the bonus-disc courses and sit where the user
+        // placed them, after Alaska.
+        private static readonly string[] TrickyOrder =
         {
             "Garibaldi",
             "Snowdream",
@@ -826,17 +884,30 @@ namespace TrickyMaddnessLevelHook
             "Tokyo",
             "Aloha",
             "Alaska",
+            "Molokai Pahee",
+            "Snow Belline",
             "Untracked",
             "Pipedream",
-            // SSX 3, grouped by peak: the peak's Race runs first, then its
-            // Backcountry / Slopestyle / Big Air / Super Pipe courses.
-            // ⚠️ TrackRank matches by StartsWith and takes the FIRST hit, so no
-            // entry here may be a prefix of another — spell each SSX3 course out in
-            // full, INCLUDING its "(Discipline)" tag. Shorten "SSX3: Peak 2 Ruthless
-            // (Backcountry)" to "SSX3: Peak 2 Ruthless" and it swallows "SSX3: Peak 2
-            // Ruthless Ridge", which then silently sorts to this rank instead of its
-            // own. (The pre-SSX3 entries above are deliberately partial — "Merqury",
-            // "Tokyo" — and are safe only because nothing else starts with them.)
+        };
+
+        // SSX 3, grouped by peak: the peak's Race runs first, then its
+        // Backcountry / Slopestyle / Big Air / Super Pipe courses.
+        // ⚠️ These keys are whole map names because they share the "SSX3: Peak n "
+        // prefix — spell each out in full, INCLUDING its "(Discipline)" tag.
+        // Shorten "SSX3: Peak 2 Ruthless (Backcountry)" to "SSX3: Peak 2 Ruthless"
+        // and it swallows "SSX3: Peak 2 Ruthless Ridge", which then silently sorts
+        // to this rank instead of its own. They mirror BuildBundle.DisplayNames,
+        // which is what names the .asset files; a key that drifts from that table
+        // doesn't break anything loudly, it just silently sorts that course last.
+        // (These were "Ssx3_Acourse"… until 2026-08-02, when the maps took their
+        // real names from the PS2 ELF course table — SSX3_FULL_MOUNTAIN_RE.md §8.)
+        //
+        // Note ssx3_course_names.tsv's own `u0` column implies a DIFFERENT shipped
+        // order — all five Races, then Slopestyle, Big Air, Super Pipe, Backcountry.
+        // We deliberately keep the peak grouping: "the order they were available in"
+        // on this mountain means descending it, which is what peak order expresses.
+        private static readonly string[] Ssx3Order =
+        {
             "SSX3: Peak 1 Snow Jam",
             "SSX3: Peak 1 Metro-City",
             "SSX3: Peak 1 Happiness (Backcountry)",
@@ -857,25 +928,132 @@ namespace TrickyMaddnessLevelHook
             "SSX3: Peak to Valley Race",
         };
 
-        private static int TrackRank(string name)
+        // SSX (2012), in World Tour order. The chapter a region unlocks in is
+        // shipped data, not a guess: it comes from the `drop_label` field
+        // ("chapter_9_drop_h2h") on that region's ghost bindings in
+        // ssx/ssx2012_ghost_assign.tsv, taking each region's lowest chapter.
+        // Within a region, EA's own track-id numbering. Names mirror
+        // BuildBundle.DisplayNames.
+        //
+        // Two judgement calls, neither data-backed — flagged so nobody reads them
+        // as measured:
+        //  • japan1101 (Mount Fuji) has NO chapter binding at all (its ghosts carry
+        //    only `exp_` labels), so it is placed last on id-numbering inference.
+        //  • "Himalayas" is two non-adjacent blocks — himwest unlocks at chapter 7,
+        //    himeast (Death Zone) at 11 — so the six Himalayan courses do not sit
+        //    together. That is what the shipped chapters say; it looks like a bug
+        //    in the list and isn't.
+        private static readonly string[] Ssx2012Order =
         {
-            for (int i = 0; i < TrackOrder.Length; i++)
-                if (name.StartsWith(TrackOrder[i], StringComparison.OrdinalIgnoreCase))
+            // chapter 2 — Rockies
+            "Rockies: Whitehorn Mountain",
+            "Rockies: Curnoe's Moustache",
+            "Rockies: Intrepid",
+            "Rockies: Wrecking Crew",
+            "Rockies: Extinguisher Tower",
+            "Rockies: Mt. Eddie",
+            // chapter 3 — Patagonia
+            "Patagonia: Blackbox",
+            "Patagonia: Broken Elbow",
+            "Patagonia: Code Blue",
+            "Patagonia: Last Call",
+            "Patagonia: Vengeance",
+            "Patagonia: Cerro Pollone",
+            "Patagonia: Salient",
+            // chapter 4 — Siberia
+            "Siberia: Boris",
+            "Siberia: Punch Up",
+            "Siberia: Critical Mass",
+            "Siberia: Don't Make Me",
+            // chapter 5 — Alaska
+            "Alaska: Silverthrone",
+            "Alaska: Invincible",
+            "Alaska: Emergency Exit",
+            "Alaska: Lock Jaw",
+            "Alaska: The Dilemma",
+            // chapter 6 — Antarctica
+            "Antarctica: Vinson Massif",
+            "Antarctica: Dreadnought",
+            "Antarctica: Root Down",
+            "Antarctica: Long Horn",
+            "Antarctica: Headshot",
+            // chapter 7 — Himalayas (west)
+            "Himalayas: Makalu",
+            "Himalayas: Burnout",
+            "Himalayas: Fall from Grace",
+            "Himalayas: The Monster",
+            "Himalayas: Bear Claw",
+            // chapter 8 — Alps
+            "Alps: Vorassay",
+            "Alps: One Way Ticket",
+            "Alps: Hard Currency",
+            "Alps: One Step Ahead",
+            "Alps: Sentinel",
+            // chapter 9 — Africa
+            "Africa: Meru",
+            "Africa: Snake Bite",
+            "Africa: Hush",
+            "Africa: Incoming",
+            // chapter 10 — New Zealand
+            "New Zealand: Mount Wakefield",
+            "New Zealand: Route Zero",
+            "New Zealand: Jack-Knife",
+            "New Zealand: Buckeye",
+            "New Zealand: Thunderbird",
+            // chapter 11 — Himalayas (east)
+            "Himalayas: Death Zone",
+            // no chapter binding — see note above
+            "Japan: Mount Fuji",
+        };
+
+        private static readonly string[] NoOrder = new string[0];
+
+        // Indexed by era. EraBuiltIn and EraOther have no curated order — built-ins
+        // never reach TrackRank (the game registers them itself), and an Other map
+        // is by definition something we know nothing about, so it sorts by name.
+        private static readonly string[][] EraTrackOrder =
+        {
+            NoOrder,        // EraBuiltIn
+            TrickyOrder,    // EraTricky
+            Ssx3Order,      // EraSsx3
+            Ssx2012Order,   // EraSsx2012
+            NoOrder,        // EraOther
+        };
+
+        private static int TrackRank(int era, string name)
+        {
+            var order = EraTrackOrder[era];
+            for (int i = 0; i < order.Length; i++)
+                if (name.StartsWith(order[i], StringComparison.OrdinalIgnoreCase))
                     return i;
-            return int.MaxValue; // unranked maps go last
+            return int.MaxValue; // unranked maps go last WITHIN their own era
         }
+
+        // Asset path -> era, filled by AddTracks. The level-select grid reads this
+        // to find its section boundaries; it is keyed by path rather than by index
+        // because the menu's card list has the game's own levels in front of ours.
+        internal static readonly Dictionary<string, int> TrackEra =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
         public void AddTracks()
         {
             var List = Directory.GetFiles(MapsDir, "*.asset");
+            // Read every map's provenance once, up front: the comparison below runs
+            // O(n log n) times and each lookup would otherwise re-read a sidecar.
+            TrackEra.Clear();
+            foreach (var p in List) TrackEra[p] = EraOf(ReadBundleSource(p));
+
             // Directory.GetFiles order is filesystem-defined (roughly alphabetical),
-            // so sort into the curated course order; scale variants of one course sit
-            // adjacent (same rank) and fall back to name order (base before "2x").
+            // so sort by era, then the curated course order within that era; scale
+            // variants of one course sit adjacent (same rank) and fall back to name
+            // order (base before "2x").
             Array.Sort(List, (a, b) =>
             {
+                int ea = TrackEra[a], eb = TrackEra[b];
+                if (ea != eb) return ea.CompareTo(eb);
                 string na = Path.GetFileNameWithoutExtension(a);
                 string nb = Path.GetFileNameWithoutExtension(b);
-                int cmp = TrackRank(na).CompareTo(TrackRank(nb));
+                int cmp = TrackRank(ea, na).CompareTo(TrackRank(eb, nb));
                 return cmp != 0 ? cmp : string.Compare(na, nb, StringComparison.OrdinalIgnoreCase);
             });
             for (int i = 0; i < List.Length; i++)
@@ -883,7 +1061,15 @@ namespace TrickyMaddnessLevelHook
                 Paths.Add(List[i]);
                 TrackNames.Add(Path.GetFileNameWithoutExtension(List[i]));
             }
-            Logger.LogInfo($"AddTracks: {Paths.Count} track(s) registered from {MapsDir}");
+
+            // Per-era counts, so a map that lost its `source` header (and therefore
+            // dropped into Other) is visible in the log rather than only in the menu.
+            var perEra = new int[EraCount];
+            foreach (var p in List) perEra[TrackEra[p]]++;
+            var parts = new List<string>();
+            for (int e = 0; e < EraCount; e++)
+                if (perEra[e] > 0) parts.Add($"{EraLabels[e]}={perEra[e]}");
+            Logger.LogInfo($"AddTracks: {Paths.Count} track(s) registered from {MapsDir} [{string.Join(", ", parts)}]");
         }
 
         public static void DoPatching()
@@ -2770,12 +2956,38 @@ namespace TrickyMaddnessLevelHook
                 Plugin.Log.LogWarning("[LevelSelect] no ScrollRect found under LevelSelectMenu; scrolling disabled");
                 return;
             }
-            if (scrollRect.gameObject.GetComponent<LevelSelectScroller>() == null)
+            bool grid = Plugin.levelSelectGrid == null || Plugin.levelSelectGrid.Value;
+            if (grid)
+            {
+                if (scrollRect.gameObject.GetComponent<LevelSelectGrid>() == null)
+                {
+                    var g = scrollRect.gameObject.AddComponent<LevelSelectGrid>();
+                    g.Init(scrollRect);
+                    Plugin.Log.LogInfo("[LevelSelect] attached vertical grid");
+                }
+            }
+            else if (scrollRect.gameObject.GetComponent<LevelSelectScroller>() == null)
             {
                 var scroller = scrollRect.gameObject.AddComponent<LevelSelectScroller>();
                 scroller.Init(scrollRect);
                 Plugin.Log.LogInfo("[LevelSelect] attached card-strip scroller");
             }
+        }
+
+        // Which era section a card belongs to. Card i is LevelEntries.GetEntry(i)
+        // — the game's own levels first (they carry no "$" scene marker and are
+        // EraBuiltIn by construction), then our custom maps, whose era AddTracks
+        // already resolved from their sidecar. Keyed off the entry rather than the
+        // sibling index so a future change to how many built-ins ship can't skew it.
+        internal static int EraOfCard(int cardIndex)
+        {
+            if (cardIndex < 0 || cardIndex >= LevelEntries.GetLevelCount()) return Plugin.EraOther;
+            var entry = LevelEntries.GetEntry(cardIndex);
+            if (string.IsNullOrEmpty(entry.sceneName) || !entry.sceneName.StartsWith("$"))
+                return Plugin.EraBuiltIn;
+            int era;
+            return Plugin.TrackEra.TryGetValue(entry.sceneName.TrimStart('$'), out era)
+                ? era : Plugin.EraOther;
         }
 
         private static Sprite LoadSprite(string pngPath)
@@ -2972,6 +3184,344 @@ namespace TrickyMaddnessLevelHook
             float cur = content.anchoredPosition.x;
             float nx = Mathf.Lerp(cur, targetX, 1f - Mathf.Exp(-10f * Time.unscaledDeltaTime));
             content.anchoredPosition = new Vector2(nx, content.anchoredPosition.y);
+        }
+    }
+
+    // Level select as a vertical scrolling GRID with a heading per source game,
+    // replacing the vanilla one-row horizontal strip. Lives on the "Scroll View"
+    // GameObject, same as LevelSelectScroller (which it replaces when enabled).
+    //
+    // Why: the strip was fine at 4 built-in levels and stayed usable at a handful
+    // of mods. At 79 custom maps a 640-wide card in a 3840-wide canvas means 6 on
+    // screen and ~14 screens of horizontal scrolling, with nothing telling you
+    // which game a course came from. A grid at the same card size shows ~20 at a
+    // time in ~4 screens, and the headings make the eras findable.
+    //
+    // ⚠️ THE constraint (IL-verified in LevelSelectMenu::OnEnable): the menu selects
+    // its start card with content.GetChild(Mathf.Clamp(lastSelectedLevel + 1, 1,
+    // entryCount)).GetComponentInChildren<Button>().gameObject — no null check. So
+    // Content's children 1..N must stay exactly the N cards, in entry order. Era
+    // dividers are therefore APPENDED after the last card (index > N), never
+    // interleaved; landing the clamp on a divider is a NullReferenceException out
+    // of OnEnable that leaves the menu with nothing selected. They are positioned
+    // manually, so sibling order and visual order are unrelated.
+    //
+    // ⚠️ Card sizeDelta belongs to LevelSelectEntry::FixedUpdate, which springs it
+    // 640x360 -> 768x432 (and nameLabel.fontSize 40 -> 48) on the selected card
+    // every fixed step. We own anchoredPosition ONLY. That is why the cell pitch is
+    // the SELECTED size: a cell exactly contains a card at full growth, so the
+    // selected card never overlaps its neighbours.
+    public class LevelSelectGrid : MonoBehaviour
+    {
+        private const int Columns = 5;
+        // == LevelSelectEntry's selected-card size; see the note above.
+        private const float CellW = 768f;
+        private const float CellH = 432f;
+        private const float GridW = Columns * CellW; // 3840 == the canvas reference width
+        // The nav bar (BottomBar / NavOptions) occupies y 0..216 of the 2160-tall
+        // reference canvas and the Scroll View is anchored at 0.1 with a bottom
+        // pivot, so the grid grows upward from y=216 and 1944 is full height.
+        private const float MaxGridH = 1944f;
+        private const float HeaderH = 140f;
+        private const float HeaderInset = 48f;
+        private const float TopPad = 30f;
+        private const float SectionGap = 40f;
+        private const float BottomPad = 60f;
+        private const float EdgeMargin = 24f;
+
+        private ScrollRect scrollRect;
+        private RectTransform content, viewport, scrollView;
+        private bool built;
+        private float contentHeight;
+
+        // Parallel to `cards`: each card's cell top/bottom as a distance DOWN from
+        // the content's top edge, which is the same space content.anchoredPosition.y
+        // scrolls in. cardTop for a card on a section's first row includes the
+        // heading above it, so selecting into a new section scrolls the heading
+        // into view with it.
+        private readonly List<RectTransform> cards = new List<RectTransform>();
+        private readonly List<float> cardTop = new List<float>();
+        private readonly List<float> cardBottom = new List<float>();
+        private readonly List<GameObject> dividers = new List<GameObject>();
+
+        private TextMeshProUGUI labelTemplate;
+
+        public void Init(ScrollRect sr) { scrollRect = sr; }
+
+        private void OnEnable()
+        {
+            // AddComponent fires OnEnable before Init runs, but we're on the
+            // ScrollRect's own GameObject, so GetComponent always resolves it.
+            if (scrollRect == null) scrollRect = GetComponent<ScrollRect>();
+            if (!built) Build();
+        }
+
+        private void Build()
+        {
+            if (scrollRect == null) return;
+            content = scrollRect.content;
+            viewport = scrollRect.viewport != null
+                ? scrollRect.viewport
+                : scrollRect.transform.GetChild(0) as RectTransform;
+            scrollView = transform as RectTransform;
+            if (content == null || viewport == null || scrollView == null)
+            {
+                Plugin.Log.LogWarning("[LevelSelect] grid: ScrollRect has no content/viewport; leaving the strip alone");
+                return;
+            }
+
+            // Drop any dividers from a previous build before recounting cards.
+            for (int i = 0; i < dividers.Count; i++)
+                if (dividers[i] != null) Destroy(dividers[i]);
+            dividers.Clear();
+
+            // Content child 0 is the inactive card template; everything active with
+            // a Selectable on it is a card. (The Selectable test also means a
+            // divider surviving from an earlier build can never be counted as one.)
+            cards.Clear(); cardTop.Clear(); cardBottom.Clear();
+            for (int i = 0; i < content.childCount; i++)
+            {
+                var ch = content.GetChild(i) as RectTransform;
+                if (ch == null || !ch.gameObject.activeSelf) continue;
+                if (ch.GetComponent<Selectable>() == null) continue;
+                cards.Add(ch);
+            }
+            if (cards.Count == 0)
+            {
+                Plugin.Log.LogWarning("[LevelSelect] grid: no cards found under Content; leaving the strip alone");
+                return;
+            }
+
+            // Split into contiguous era runs BEFORE touching anything, so the
+            // nothing-to-group case below can still bail with the menu untouched.
+            var sectionEra = new List<int>();
+            var sectionStart = new List<int>();
+            for (int i = 0; i < cards.Count; )
+            {
+                int era = LevelSelectMenu_Populate.EraOfCard(i);
+                sectionEra.Add(era);
+                sectionStart.Add(i);
+                while (i < cards.Count && LevelSelectMenu_Populate.EraOfCard(i) == era) i++;
+            }
+
+            // Nothing to group — one era, one row's worth of cards. That is exactly
+            // the empty-Maps-folder case: the game's own four levels and nothing
+            // else. A grid there is strictly worse than vanilla (four cards pinned
+            // to the top-left of a screen-tall empty panel, under a heading naming
+            // the only section there is), and headings exist to separate things
+            // there is nothing to separate. Leave the menu pixel-identical to
+            // vanilla, same as LevelSelectScroller does when everything fits.
+            if (sectionEra.Count <= 1 && cards.Count <= Columns)
+            {
+                Plugin.Log.LogInfo($"[LevelSelect] grid: only {cards.Count} level(s) in one section — "
+                    + "leaving the vanilla strip alone (nothing to group).");
+                return;
+            }
+
+            labelTemplate = cards[0].GetComponentInChildren<TextMeshProUGUI>(true);
+            if (labelTemplate == null)
+                Plugin.Log.LogWarning("[LevelSelect] grid: no TMP label on the card template — "
+                    + "section headings will draw as rules with no text.");
+
+            scrollRect.horizontal = false;
+            scrollRect.vertical = true;
+            scrollRect.movementType = ScrollRect.MovementType.Clamped;
+
+            // The scene's layout components fight manual placement. Neither is read
+            // by any game code (verified over the whole Assembly-CSharp dump), and
+            // the ContentSizeFitter is Unconstrained on both axes in the scene
+            // anyway — it only ever did anything because LevelSelectScroller turned
+            // it on. Disable rather than destroy so the strip fallback still finds them.
+            var hlg = content.GetComponent<HorizontalLayoutGroup>();
+            if (hlg != null) hlg.enabled = false;
+            var csf = content.GetComponent<ContentSizeFitter>();
+            if (csf != null) csf.enabled = false;
+
+            // Un-stretch Content and pin its top-left to the viewport's, so every
+            // card/divider position below is an absolute offset from that corner.
+            content.anchorMin = new Vector2(0f, 1f);
+            content.anchorMax = new Vector2(0f, 1f);
+            content.pivot = new Vector2(0f, 1f);
+            content.anchoredPosition = Vector2.zero;
+
+            var rows = new List<List<Selectable>>();
+            float y = TopPad;
+            for (int s = 0; s < sectionEra.Count; s++)
+            {
+                int idx = sectionStart[s];
+                int end = s + 1 < sectionStart.Count ? sectionStart[s + 1] : cards.Count;
+
+                float headerTop = y;
+                CreateDivider(sectionEra[s], headerTop);
+                y += HeaderH;
+
+                int n = end - idx;
+                int rowsInSection = (n + Columns - 1) / Columns;
+                // A section too small to fill one row is centred rather than left
+                // in the corner — a lone SSX 3 map under a full row of Tricky ones
+                // reads as a layout bug otherwise. Multi-row sections stay left
+                // aligned so their columns line up with the section above.
+                float indent = rowsInSection == 1 ? (Columns - n) * CellW * 0.5f : 0f;
+                int firstRow = rows.Count;
+                for (int k = 0; k < n; k++)
+                {
+                    int r = k / Columns, c = k % Columns;
+                    float top = y + r * CellH;
+                    var rt = cards[idx + k];
+                    rt.anchoredPosition = new Vector2(
+                        indent + c * CellW + CellW * 0.5f,
+                        -(top + CellH * 0.5f));
+                    cardTop.Add(r == 0 ? headerTop : top);
+                    cardBottom.Add(top + CellH);
+                    while (rows.Count <= firstRow + r) rows.Add(new List<Selectable>());
+                    rows[firstRow + r].Add(rt.GetComponent<Selectable>());
+                }
+
+                y += rowsInSection * CellH + SectionGap;
+            }
+            contentHeight = y - SectionGap + BottomPad;
+            content.sizeDelta = new Vector2(GridW, contentHeight);
+
+            // Grow the strip into a panel — but never taller than what it holds, so
+            // a two-section install doesn't get a screen of empty space under it.
+            // Only sizeDelta changes: the Scroll View's anchors/pivot stay put (it
+            // is pivoted at its bottom edge, so this grows upward off the nav bar),
+            // and its Animation component (a 0.1 s anchoredPosition.x slide-in whose
+            // clip is SHARED with character select — do not edit it) is left running
+            // and untouched.
+            float gridH = Mathf.Clamp(
+                Plugin.levelSelectGridHeight != null ? Plugin.levelSelectGridHeight.Value : 1800f,
+                CellH, MaxGridH);
+            gridH = Mathf.Min(gridH, contentHeight);
+            scrollView.sizeDelta = new Vector2(GridW, gridH);
+
+            WireNavigation(rows);
+
+            built = true;
+            Plugin.Log.LogInfo($"[LevelSelect] grid: {cards.Count} card(s) in {dividers.Count} section(s), "
+                + $"{rows.Count} row(s), content {contentHeight:0} px tall in a {gridH:0} px viewport");
+        }
+
+        private void CreateDivider(int era, float top)
+        {
+            string label = era >= 0 && era < Plugin.EraLabels.Length ? Plugin.EraLabels[era] : "OTHER";
+
+            var go = new GameObject("EraDivider_" + label, typeof(RectTransform));
+            var rt = (RectTransform)go.transform;
+            rt.SetParent(content, false); // appends — never insert, see the class note
+            rt.anchorMin = rt.anchorMax = new Vector2(0f, 1f);
+            rt.pivot = new Vector2(0f, 1f);
+            rt.sizeDelta = new Vector2(GridW, HeaderH);
+            rt.anchoredPosition = new Vector2(0f, -top);
+            dividers.Add(go);
+
+            if (labelTemplate != null)
+            {
+                var lbl = Instantiate(labelTemplate.gameObject, rt);
+                lbl.name = "Label";
+                lbl.SetActive(true);
+                // A heading must never be focusable: it would be a dead end for
+                // navigation and a NullReference risk if anything indexed it.
+                foreach (var s in lbl.GetComponentsInChildren<Selectable>(true)) Destroy(s);
+                var lrt = (RectTransform)lbl.transform;
+                lrt.anchorMin = Vector2.zero;
+                lrt.anchorMax = Vector2.one;
+                lrt.pivot = new Vector2(0.5f, 0.5f);
+                lrt.offsetMin = new Vector2(HeaderInset, 0f);
+                lrt.offsetMax = new Vector2(-HeaderInset, 0f);
+                var tmp = lbl.GetComponent<TextMeshProUGUI>();
+                if (tmp != null)
+                {
+                    tmp.enableAutoSizing = false;
+                    tmp.fontSize = 56f;
+                    tmp.alignment = TextAlignmentOptions.MidlineLeft;
+                    tmp.enableWordWrapping = false;
+                    tmp.raycastTarget = false;
+                    tmp.text = label;
+                }
+            }
+
+            // Rule under the heading, so a section reads as a band even where the
+            // cards below it are still thumbnail-less grey boxes.
+            var line = new GameObject("Rule", typeof(RectTransform), typeof(Image));
+            var lineRt = (RectTransform)line.transform;
+            lineRt.SetParent(rt, false);
+            lineRt.anchorMin = new Vector2(0f, 0f);
+            lineRt.anchorMax = new Vector2(1f, 0f);
+            lineRt.pivot = new Vector2(0.5f, 0f);
+            lineRt.sizeDelta = new Vector2(-2f * HeaderInset, 4f);
+            lineRt.anchoredPosition = new Vector2(0f, 14f);
+            var img = line.GetComponent<Image>();
+            img.color = new Color(1f, 1f, 1f, 0.25f);
+            img.raycastTarget = false;
+        }
+
+        // Explicit four-way navigation on EVERY card, computed from its grid slot.
+        //
+        // Two reasons this isn't left to the engine. (1) LevelSelectMenu::Populate
+        // rewrites the FIRST and LAST card with a zeroed Navigation set to Explicit
+        // and only selectOnLeft/selectOnRight filled — up and down are null, so in a
+        // grid those two cards are dead ends. (2) Every other card is authored at
+        // mode -1, which Selectable treats bitwise as automatic on both axes; that
+        // works, but its neighbour search is geometric and can pick diagonals, which
+        // we have not tested at 79 cards. Explicit removes the question.
+        private static void WireNavigation(List<List<Selectable>> rows)
+        {
+            for (int r = 0; r < rows.Count; r++)
+            {
+                var row = rows[r];
+                for (int c = 0; c < row.Count; c++)
+                {
+                    var s = row[c];
+                    if (s == null) continue;
+                    var nav = new Navigation { mode = Navigation.Mode.Explicit };
+                    // Left/right walk the list linearly, wrapping across rows, so
+                    // holding a direction traverses every course in menu order.
+                    nav.selectOnLeft = c > 0
+                        ? row[c - 1]
+                        : (r > 0 ? rows[r - 1][rows[r - 1].Count - 1] : null);
+                    nav.selectOnRight = c < row.Count - 1
+                        ? row[c + 1]
+                        : (r < rows.Count - 1 ? rows[r + 1][0] : null);
+                    // Up/down hold the column, clamping into short rows (the last
+                    // row of a section, and any section with fewer than 5 courses).
+                    nav.selectOnUp = r > 0
+                        ? rows[r - 1][Mathf.Min(c, rows[r - 1].Count - 1)]
+                        : null;
+                    nav.selectOnDown = r < rows.Count - 1
+                        ? rows[r + 1][Mathf.Min(c, rows[r + 1].Count - 1)]
+                        : null;
+                    s.navigation = nav;
+                }
+            }
+        }
+
+        private void LateUpdate()
+        {
+            if (!built || content == null || viewport == null) return;
+
+            var es = EventSystem.current;
+            GameObject sel = es == null ? null : es.currentSelectedGameObject;
+            if (sel == null || !sel.transform.IsChildOf(content)) return;
+
+            // Walk up to the card root (the child whose parent is Content).
+            Transform card = sel.transform;
+            while (card != null && card.parent != content) card = card.parent;
+            int i = cards.IndexOf(card as RectTransform);
+            if (i < 0) return;
+
+            float vh = viewport.rect.height;
+            if (vh < 1f) return; // menu not laid out yet; try again next frame
+
+            float cur = content.anchoredPosition.y;
+            float target = cur;
+            if (target > cardTop[i] - EdgeMargin) target = cardTop[i] - EdgeMargin;
+            if (target < cardBottom[i] - vh + EdgeMargin) target = cardBottom[i] - vh + EdgeMargin;
+            target = Mathf.Clamp(target, 0f, Mathf.Max(0f, contentHeight - vh));
+            if (Mathf.Abs(target - cur) < 0.5f) return; // in view — don't fight a drag
+
+            float ny = Mathf.Lerp(cur, target, 1f - Mathf.Exp(-12f * Time.unscaledDeltaTime));
+            content.anchoredPosition = new Vector2(content.anchoredPosition.x, ny);
         }
     }
 
