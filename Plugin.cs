@@ -805,13 +805,17 @@ namespace TrickyMaddnessLevelHook
         }
 
         // Desired level-selector order: SSX Tricky courses (user's chosen sequence),
-        // then SSX3 A-E. Matched case-insensitively against each map's file name via
-        // StartsWith, so scale variants ("Garibaldi 2.5x") and the "Rebuilt" suffix
-        // ("Ssx3_Acourse_Tricky Rebuilt") share their base's rank. Any map matching
-        // nothing here (e.g. the "Tricky" bonus arena, or a future drop-in) sorts
-        // after all known courses, alphabetically. Note "Tricky" must never be a key:
-        // it's a substring of the SSX3 "..._Tricky" names, and StartsWith on the file
-        // name keeps them apart, but a bare "Tricky" key would still be redundant.
+        // then the SSX 3 courses in mountain order (Peak 1 down to Peak 3), then the
+        // whole-mountain chain. Matched case-insensitively against each map's file
+        // name via StartsWith, so scale variants ("Garibaldi 2.5x") share their base's
+        // rank. Any map matching nothing here (e.g. the "Tricky" bonus arena, or a
+        // future drop-in) sorts after all known courses, alphabetically.
+        // ⚠️ The SSX 3 keys are whole map names because they share the "SSX3: Peak n "
+        // prefix — shortening one to that prefix would swallow its sibling. They mirror
+        // BuildBundle.DisplayNames, which is what names the .asset files; a key that
+        // drifts from that table doesn't break anything loudly, it just silently sorts
+        // that course last. (These were "Ssx3_Acourse"… until 2026-08-02, when the maps
+        // took their real names from the PS2 ELF course table — SSX3_FULL_MOUNTAIN_RE.md §8.)
         private static readonly string[] TrackOrder =
         {
             "Garibaldi",
@@ -824,11 +828,12 @@ namespace TrickyMaddnessLevelHook
             "Alaska",
             "Untracked",
             "Pipedream",
-            "Ssx3_Acourse",
-            "Ssx3_Bcourse",
-            "Ssx3_Ccourse",
-            "Ssx3_Dcourse",
-            "Ssx3_Ecourse",
+            "SSX3: Peak 1 Snow Jam",
+            "SSX3: Peak 1 Metro-City",
+            "SSX3: Peak 2 Ruthless Ridge",
+            "SSX3: Peak 2 Intimidator",
+            "SSX3: Peak 3 Gravitude",
+            "SSX3: Peak to Valley Race",
         };
 
         private static int TrackRank(string name)
