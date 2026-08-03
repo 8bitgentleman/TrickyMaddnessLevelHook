@@ -828,11 +828,32 @@ namespace TrickyMaddnessLevelHook
             "Alaska",
             "Untracked",
             "Pipedream",
+            // SSX 3, grouped by peak: the peak's Race runs first, then its
+            // Backcountry / Slopestyle / Big Air / Super Pipe courses.
+            // ⚠️ TrackRank matches by StartsWith and takes the FIRST hit, so no
+            // entry here may be a prefix of another — spell each SSX3 course out in
+            // full, INCLUDING its "(Discipline)" tag. Shorten "SSX3: Peak 2 Ruthless
+            // (Backcountry)" to "SSX3: Peak 2 Ruthless" and it swallows "SSX3: Peak 2
+            // Ruthless Ridge", which then silently sorts to this rank instead of its
+            // own. (The pre-SSX3 entries above are deliberately partial — "Merqury",
+            // "Tokyo" — and are safe only because nothing else starts with them.)
             "SSX3: Peak 1 Snow Jam",
             "SSX3: Peak 1 Metro-City",
+            "SSX3: Peak 1 Happiness (Backcountry)",
+            "SSX3: Peak 1 R&B (Slopestyle)",
+            "SSX3: Peak 1 Crow's Nest (Big Air)",
+            "SSX3: Peak 1 The Junction (Super Pipe)",
             "SSX3: Peak 2 Ruthless Ridge",
             "SSX3: Peak 2 Intimidator",
+            "SSX3: Peak 2 Ruthless (Backcountry)",
+            "SSX3: Peak 2 Style Mile (Slopestyle)",
+            "SSX3: Peak 2 Launch Time (Big Air)",
+            "SSX3: Peak 2 Schizophrenia (Super Pipe)",
             "SSX3: Peak 3 Gravitude",
+            "SSX3: Peak 3 The Throne (Backcountry)",
+            "SSX3: Peak 3 Kick Doubt (Slopestyle)",
+            "SSX3: Peak 3 Much-2-Much (Big Air)",
+            "SSX3: Peak 3 Perpendiculous (Super Pipe)",
             "SSX3: Peak to Valley Race",
         };
 
