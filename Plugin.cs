@@ -51,6 +51,7 @@ namespace TrickyMaddnessLevelHook
         internal static ConfigEntry<bool> scaleGravityWithMap;
         internal static ConfigEntry<float> startLaunchSpeedScale;
         internal static ConfigEntry<bool> fixRailProjection;
+        internal static ConfigEntry<bool> mapPhysicsRate;
         // Fine-tune multiplier on the skydome's auto-fit (feature 13). SkydomeFollow
         // sizes the dome to ~95% of the camera far-clip plane each frame so it envelops
         // the whole visible course; this scales that target (1 = the fit). Tunable, no
@@ -88,6 +89,38 @@ namespace TrickyMaddnessLevelHook
         // Reset to 1 on every built-in selection and menu return (same lifetime
         // rule as WorldScale) so built-in gravity stays provably stock.
         internal static float MapGravityMultiplier = 1f;
+        // Physics tick rate the active custom map asks for, from the optional
+        // "physicshz <f>" header in its .aipaths.txt sidecar. 0 = no declaration
+        // (built-in levels and every map that doesn't ask), which leaves the
+        // game's own Time.fixedDeltaTime alone.
+        //
+        // WHY a map gets to ask: Unity runs FixedUpdate repeatedly to drag the
+        // physics clock up to the frame clock, capped by Time.maximumDeltaTime.
+        // The game ships fixedDeltaTime=0.01 (100 Hz — double Unity's own 50 Hz
+        // default) with maximumDeltaTime=0.05, so a frame slower than 50 ms pins
+        // at FIVE full FixedUpdate passes per rendered frame, and each slow frame
+        // buys more of them. On the SSX3 whole-mountain chain that is exactly what
+        // happens: measured 5.0 fixed steps per frame on every row of a 21-row
+        // ablation sweep. Halving the rate was worth +54.5% (65 ms -> 29.7 ms,
+        // 15.5 -> 33.7 fps) and dropped it to 1.5 steps/frame — i.e. the map
+        // stopped pinning at the cap and started tracking real time again.
+        //
+        // ⚠️ The cost is NOT the PhysX solve. Stopping simulation outright
+        // (simulationMode = Script, which leaves FixedUpdate still being CALLED)
+        // measured inside the noise floor on the same sweep. What's expensive is
+        // whatever runs per FixedUpdate iteration, paid five times a frame — so
+        // the lever is the iteration COUNT, not the physics workload.
+        //
+        // ⚠️ Global setting, so it MUST be restored on every exit path, or a huge
+        // map's rate silently follows the player into the next level and changes
+        // the feel of a course that never asked for it. Same lifetime rule as
+        // WorldScale: reset on built-in selection and on menu return.
+        internal static float MapPhysicsHz = 0f;
+        // The game's own fixedDeltaTime, captured once at Awake before anything
+        // can have modified it. Restoring from a snapshot taken at apply time
+        // would re-capture an already-overridden value if two custom maps loaded
+        // back to back, permanently baking one map's rate in as "stock".
+        internal static float StockFixedDeltaTime = 0.02f;
         // Platform the active custom map's bundle was authored native to, from an
         // optional "platform <windows|mac>" line in its .aipaths.txt sidecar. null
         // (every existing map, no header) means "unknown — assume the bytecode is
@@ -161,6 +194,10 @@ namespace TrickyMaddnessLevelHook
         // game-side grind-detection contract (layer-9 hit + GetComponent<Rail>).
         // Off in shipped builds.
         private static ConfigEntry<bool> railColliderProbe;
+        // When true, custom maps spawn PerfHarness: an on-screen frame-rate readout
+        // plus hotkeys that switch each suspected frame-rate cost on and off mid-ride,
+        // so which one dominates is measured rather than guessed. Off in shipped builds.
+        private static ConfigEntry<bool> perfHarness;
 
         // Snapshot of the GAME's shaders, taken in the LoadScene prefix right
         // before the map bundle is loaded (so nothing bundle-origin can be in it).
@@ -183,6 +220,11 @@ namespace TrickyMaddnessLevelHook
             // Plugin startup logic
             Logger.LogInfo($"Plugin {PluginInfo.PLUGIN_GUID} is loaded!");
 
+            // Snapshot the game's physics rate before anything (us, another
+            // plugin, a map's physicshz header) can change it. This is what every
+            // restore path returns to, so it has to be read exactly once, here.
+            StockFixedDeltaTime = Time.fixedDeltaTime;
+
             debugBundleLoad = Config.Bind("Debug", "DebugBundleLoad", false,
                 "Load every registered map bundle at startup and log its scene paths. " +
                 "Diagnostic only; leave false for normal play.");
@@ -196,6 +238,13 @@ namespace TrickyMaddnessLevelHook
             railColliderProbe = Config.Bind("Debug", "RailColliderProbe", false,
                 "After building rail colliders on a custom map, SphereCast-probe the " +
                 "first rail to verify grind detection would hit it. Diagnostic only; " +
+                "leave false for normal play.");
+            perfHarness = Config.Bind("Debug", "PerfHarness", false,
+                "On custom maps, show a frame-rate readout and enable Ctrl+<key> " +
+                "hotkeys that toggle each suspected cost (shadow casters, shadow " +
+                "distance, cascade count, distance-based region streaming, MSAA, " +
+                "render scale) live, so a single ride shows which one the frame rate " +
+                "is actually spent on. Every change is logged. Diagnostic only; " +
                 "leave false for normal play.");
             levelSelectScroll = Config.Bind("UI", "LevelSelectScroll", true,
                 "Scroll the level-select card strip when more cards exist than fit " +
@@ -239,6 +288,20 @@ namespace TrickyMaddnessLevelHook
                 "(the rail-end snap-back loop; CPU riders never escape it). " +
                 "On by default. Set false to restore the stock behaviour — this " +
                 "is the one Hook feature that changes built-in levels too.");
+            mapPhysicsRate = Config.Bind("Gameplay", "MapPhysicsRate", true,
+                "Honour a custom map's 'physicshz <n>' sidecar header, which lets a " +
+                "very large map ask to run physics at a lower tick rate than the " +
+                "game's 100 Hz. Unity catches the physics clock up to the frame " +
+                "clock by running FixedUpdate repeatedly, so on a map heavy enough " +
+                "to drop below 20 fps it runs the maximum FIVE full physics passes " +
+                "per rendered frame — and each slow frame buys more of them. The " +
+                "SSX3 whole-mountain chain measured exactly that; asking for 50 Hz " +
+                "(which is Unity's own default rate, half what this game ships) " +
+                "more than doubled its frame rate. The trade is coarser collision: " +
+                "at a lower rate a rider at speed is likelier to clip through thin " +
+                "geometry. Only maps that declare the header are affected; built-in " +
+                "levels and every other custom map keep the game's rate untouched. " +
+                "Set false to ignore the header everywhere.");
             skydomeScale = Config.Bind("Skydome", "Scale", 1f,
                 "Fine-tune multiplier on the skydome's automatic fit. The dome is " +
                 "auto-sized each frame so its radius is ~90% of the camera's far-clip " +
@@ -393,10 +456,17 @@ namespace TrickyMaddnessLevelHook
             // go through the LoadScene prefix) restores stock gravity. The pending
             // guard keeps a possible intermediate loading scene during a custom
             // load from resetting the scale the prefix just read.
-            if (!isCustomScene && pendingSceneName == null && (WorldScale != 1f || MapGravityMultiplier != 1f))
+            // MapPhysicsHz belongs to the same reset — and must be part of the
+            // GUARD too, not just the body: a map that declares only physicshz
+            // (no scale, no gravity) would otherwise fail the condition and leave
+            // its tick rate applied to every level loaded afterwards.
+            if (!isCustomScene && pendingSceneName == null
+                && (WorldScale != 1f || MapGravityMultiplier != 1f || MapPhysicsHz != 0f))
             {
                 WorldScale = 1f;
                 MapGravityMultiplier = 1f;
+                MapPhysicsHz = 0f;
+                ApplyPhysicsRate("left custom map");
                 Log.LogInfo("[Gravity] left custom map; world scale + gravity multiplier reset to 1");
             }
 
@@ -1861,6 +1931,12 @@ namespace TrickyMaddnessLevelHook
                 if (PostFX.Active) break;
             }
 
+            // Frame-rate instrumentation. Last, so it indexes the scene the player will
+            // actually ride — after the passes above have added, disabled and destroyed
+            // renderers (glass strip, PhysProps, smashables), whose state it snapshots.
+            if (perfHarness != null && perfHarness.Value)
+                PerfHarness.Spawn(levelManagerMaker.gameObject.scene);
+
             // NB: the open-top sky-fill is started from OnSceneLoaded (not here) —
             // SolidColorSky captures the ACTIVE scene name, which isn't the custom scene
             // yet at LoadLevelManager time, so starting it here exits immediately.
@@ -2248,6 +2324,56 @@ namespace TrickyMaddnessLevelHook
             }
         }
 
+        // Reads the optional "physicshz <f>" header from a map's .aipaths.txt
+        // sidecar. Returns 0 (no declaration — leave the game's rate alone) for a
+        // missing sidecar, no physicshz line, or a value outside 10-1000 Hz.
+        //
+        // The bounds are a typo guard, not a tuning range: below ~30 Hz a rider at
+        // speed starts tunnelling through thin geometry (rails, fences, the
+        // destructible panes), and a value in the hundreds would make the catch-up
+        // spiral this header exists to escape strictly worse.
+        internal static float ReadPhysicsHz(string bundlePath)
+        {
+            try
+            {
+                string sidecarPath = Path.ChangeExtension(bundlePath, ".aipaths.txt");
+                if (!File.Exists(sidecarPath)) return 0f;
+                foreach (var raw in File.ReadAllLines(sidecarPath))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("#")) continue;
+                    var t = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (!HeaderMatches(t, "physicshz", Path.GetFileName(sidecarPath))) continue;
+                    float hz = float.Parse(t[1], CultureInfo.InvariantCulture);
+                    if (hz >= 10f && hz <= 1000f) return hz;
+                    Log.LogWarning($"[Physics] sidecar {Path.GetFileName(sidecarPath)} declares physicshz {t[1]} "
+                        + "(must be 10-1000); ignoring, using the game's rate");
+                    return 0f;
+                }
+                return 0f;
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"[Physics] failed reading physics rate sidecar for {bundlePath}: {e}");
+                return 0f;
+            }
+        }
+
+        // Applies MapPhysicsHz (or restores the game's rate when it is 0 or the
+        // feature is configured off). Idempotent, so calling it on every scene
+        // load is safe.
+        internal static void ApplyPhysicsRate(string why)
+        {
+            float want = (MapPhysicsHz > 0f && mapPhysicsRate.Value)
+                ? 1f / MapPhysicsHz
+                : StockFixedDeltaTime;
+            if (Mathf.Approximately(Time.fixedDeltaTime, want)) return;
+            Time.fixedDeltaTime = want;
+            Log.LogInfo($"[Physics] fixedDeltaTime -> {want.ToString("F4", CultureInfo.InvariantCulture)} "
+                + $"({(1f / want).ToString("F0", CultureInfo.InvariantCulture)} Hz), up to "
+                + $"{Mathf.Floor(Time.maximumDeltaTime / want):F0} step(s) per frame — {why}");
+        }
+
         // Reads the optional "platform <windows|mac>" header from a map's
         // .aipaths.txt sidecar. Returns null (no declaration) for a missing
         // sidecar, no platform line, or an unrecognized value — the safe default
@@ -2540,6 +2666,8 @@ namespace TrickyMaddnessLevelHook
                 Plugin.pendingSceneName = null;
                 Plugin.WorldScale = 1f;
                 Plugin.MapGravityMultiplier = 1f;
+                Plugin.MapPhysicsHz = 0f;
+                Plugin.ApplyPhysicsRate("built-in level selected");
                 Plugin.BundleNativePlatform = null;
                 Plugin.BundleSource = Plugin.DefaultSource;
                 Plugin.BundleMapVersion = "";
@@ -2628,6 +2756,14 @@ namespace TrickyMaddnessLevelHook
                 Plugin.MapGravityMultiplier = Plugin.ReadGravityMultiplier(path);
                 if (Plugin.MapGravityMultiplier != 1f)
                     Plugin.Log.LogInfo($"[Gravity] map declares gravity multiplier {Plugin.MapGravityMultiplier.ToString(CultureInfo.InvariantCulture)}x (applied on top of any world-scale gravity)");
+
+                // Per-map physics tick rate from the same sidecar (0 = leave the
+                // game's rate alone). Applied here rather than at sceneLoaded so
+                // the rate is already right for the level's first FixedUpdate.
+                Plugin.MapPhysicsHz = Plugin.ReadPhysicsHz(path);
+                if (Plugin.MapPhysicsHz > 0f && !Plugin.mapPhysicsRate.Value)
+                    Plugin.Log.LogInfo($"[Physics] map declares physicshz {Plugin.MapPhysicsHz.ToString(CultureInfo.InvariantCulture)} but MapPhysicsRate is off in config; keeping the game's rate");
+                Plugin.ApplyPhysicsRate($"map '{levelEntry.name}'");
 
                 // Native-platform declaration from the same sidecar (null when absent).
                 // Read on reuse too — the sidecar may have changed on disk.
@@ -4299,6 +4435,1362 @@ namespace TrickyMaddnessLevelHook
                 }
             }
             return true;
+        }
+    }
+
+    // Frame-rate instrumentation for heavy custom maps (Debug/PerfHarness, off by
+    // default). Written for the SSX 3 whole-mountain chain, which ships 34,986
+    // MeshRenderers / 8.84 M triangles against a single peak course's 5,229 / 878 K
+    // and rides at roughly half the frame rate.
+    //
+    // It exists because the candidate costs are NOT obviously ordered, and each has a
+    // different fix in a different file:
+    //   * shadow casters   — 34,620 of the chain's 34,986 renderers cast into one
+    //                        4-cascade directional light, while the map's own fog
+    //                        (ExponentialSquared, density 0.005) is ~2% transmittance
+    //                        by 400 units. Most casters shadow geometry nobody can see.
+    //   * culling set size — every renderer is frustum-tested every frame, whether or
+    //                        not anything within the fog bubble needs it. The map is
+    //                        14,344 x 11,911 units; the visible slice is a rounding error.
+    //   * fill rate        — 4x MSAA (project QualitySettings) at retina resolution.
+    // Each is a hotkey, so one ride answers which one to actually fix.
+    //
+    // Region streaming leans on a property of the chain: every patch and instance name
+    // carries its source SSX3 region ("patch_EBC3_wholetrack_2699", "mdl_ERA5_rock_1027"),
+    // so the regions are free spatial buckets. They are DISCOVERED from the patch names
+    // at load, not tabled, so this works on any map following the same naming and simply
+    // finds a single bucket on maps that don't (streaming then does nothing, which is
+    // the correct answer for a map small enough not to need it).
+    //
+    // ⚠️ This mutates the GAME's URP asset in memory (shadow distance, cascades, MSAA,
+    // render scale), which outlives the map. Every field is snapshotted on first change
+    // and restored in OnDestroy, so leaving the map puts the game back as it was.
+    public class PerfHarness : MonoBehaviour
+    {
+        const float FpsWindow = 0.25f;      // frame-rate readout refresh
+        const float StreamWindow = 0.20f;   // region visibility re-test
+        const float FrustumWindow = 1.0f;   // in-frustum recount (the expensive one)
+
+        static PerfHarness _inst;
+
+        // One bucket of renderers sharing a source region, with the world-space AABB
+        // that encloses them. Static geometry, so the bounds are computed once.
+        class Region
+        {
+            public string key;
+            public Renderer[] rends;
+            public Bounds bounds;
+            public bool on = true;
+        }
+
+        // Parallel arrays over every renderer that was ENABLED at index time. Renderers
+        // the pipeline deliberately ships disabled (invisible break triggers, dropped
+        // instances) are excluded outright — this must never switch one back on.
+        Renderer[] _all;
+        Bounds[] _bounds;                                        // cached: r.bounds is a native call
+        bool[] _isTerrain;                                       // name starts with "patch_"
+        UnityEngine.Rendering.ShadowCastingMode[] _castOrig;
+        Region[] _regions;
+        int _terrainCount, _casterCount;
+
+        // Mode state. Index 0 of every cycle is "as the map shipped", so Ctrl+0 style
+        // A/B-ing always has a baseline to come back to.
+        int _shadowMode;        // 0 stock, 1 terrain casters off, 2 all casters off
+        int _shadowDistIdx;     // into ShadowDists, -1 = stock
+        int _cascadeIdx;        // into Cascades, -1 = stock
+        int _streamMode;        // 0 off, 1 hide renderers, 2 deactivate GameObjects
+        int _radiusIdx;
+        int _msaaIdx, _scaleIdx;
+
+        static readonly float[] ShadowDists = { 500f, 250f, 125f, 0f };
+        static readonly int[] Cascades = { 2, 1 };
+        static readonly float[] Radii = { 1500f, 1000f, 700f, 3000f };
+        static readonly int[] Msaa = { 2, 1 };
+        static readonly float[] Scales = { 0.85f, 0.7f };
+
+        // URP asset snapshot, taken lazily on the first change of each field.
+        float _urpDist0 = -1f, _urpScale0 = -1f;
+        int _urpCascade0 = -1, _urpMsaa0 = -1;
+
+        bool _show = true;
+        float _acc, _tick, _streamTick, _frustumTick;
+        int _frames;
+        float _fps;
+        int _visible = -1, _activeCount;
+        string _text = "";
+        GUIStyle _style;
+
+        public static void Spawn(Scene scene)
+        {
+            if (_inst != null) return;
+            var go = new GameObject("HookPerfHarness");
+            // Deliberately NOT DontDestroyOnLoad: dying with the scene is what
+            // guarantees OnDestroy runs and hands the URP asset back unmodified.
+            _inst = go.AddComponent<PerfHarness>();
+            // A diagnostic must never be able to take the map down with it: a throw in
+            // Index would leave the component alive with null arrays and NRE every frame.
+            try { _inst.Index(scene); }
+            catch (Exception e)
+            {
+                Plugin.Log.LogError($"[Perf] indexing failed, harness disabled: {e}");
+                Destroy(go);
+                _inst = null;
+            }
+        }
+
+        void Index(Scene scene)
+        {
+            var found = new List<Renderer>();
+            foreach (var root in scene.GetRootGameObjects())
+                found.AddRange(root.GetComponentsInChildren<Renderer>(true));
+
+            var live = new List<Renderer>(found.Count);
+            foreach (var r in found)
+                if (r != null && r.enabled) live.Add(r);
+
+            int n = live.Count;
+            _all = live.ToArray();
+            _bounds = new Bounds[n];
+            _isTerrain = new bool[n];
+            _castOrig = new UnityEngine.Rendering.ShadowCastingMode[n];
+
+            // Region keys come from the terrain patches, which are the one class of
+            // object the pipeline never renames (UVScroll_/PhysProp_ prefixing applies
+            // to instances). "patch_<KEY>_..." -> KEY.
+            var keys = new HashSet<string>();
+            for (int i = 0; i < n; i++)
+            {
+                string nm = _all[i].gameObject.name;
+                if (!nm.StartsWith("patch_")) continue;
+                int a = 6, b = nm.IndexOf('_', a);
+                if (b > a) keys.Add(nm.Substring(a, b - a));
+            }
+
+            var buckets = new Dictionary<string, List<Renderer>>();
+            for (int i = 0; i < n; i++)
+            {
+                var r = _all[i];
+                string nm = r.gameObject.name;
+                _bounds[i] = r.bounds;
+                _isTerrain[i] = nm.StartsWith("patch_");
+                _castOrig[i] = r.shadowCastingMode;
+                if (_isTerrain[i]) _terrainCount++;
+                if (_castOrig[i] != UnityEngine.Rendering.ShadowCastingMode.Off) _casterCount++;
+
+                string key = RegionOf(nm, keys);
+                if (key == null) continue;   // skydome, lightmap overlays, gems, markers — never streamed
+                if (!buckets.TryGetValue(key, out var list)) buckets[key] = list = new List<Renderer>();
+                list.Add(r);
+            }
+
+            var regions = new List<Region>(buckets.Count);
+            foreach (var kv in buckets)
+            {
+                var reg = new Region { key = kv.Key, rends = kv.Value.ToArray() };
+                var b = kv.Value[0].bounds;
+                for (int i = 1; i < kv.Value.Count; i++) b.Encapsulate(kv.Value[i].bounds);
+                reg.bounds = b;
+                regions.Add(reg);
+            }
+            regions.Sort((x, y) => y.rends.Length.CompareTo(x.rends.Length));
+            _regions = regions.ToArray();
+            _activeCount = n;
+
+            Plugin.Log.LogInfo($"[Perf] indexed {n} enabled renderer(s): {_terrainCount} terrain patch, " +
+                               $"{_casterCount} shadow caster(s), {_regions.Length} region bucket(s)");
+            var urp = Urp();
+            if (urp != null)
+                Plugin.Log.LogInfo($"[Perf] URP asset '{urp.name}': shadowDistance={urp.shadowDistance:F0} " +
+                                   $"cascades={urp.shadowCascadeCount} msaa={urp.msaaSampleCount}x " +
+                                   $"renderScale={urp.renderScale:F2}");
+            else
+                Plugin.Log.LogWarning("[Perf] no UniversalRenderPipelineAsset active — the shadow-distance, " +
+                                      "cascade, MSAA and render-scale hotkeys will do nothing");
+            // Frame pacing and output size, so a capped or vsynced run is never mistaken
+            // for a workload result — a staircase of frame times reads exactly like a
+            // workload that refuses to respond to anything.
+            Plugin.Log.LogInfo($"[Perf] pacing: vSyncCount={QualitySettings.vSyncCount} " +
+                               $"targetFrameRate={Application.targetFrameRate} | " +
+                               $"screen {Screen.width}x{Screen.height} @{Screen.currentResolution.refreshRateRatio.value:F0}Hz " +
+                               $"({Screen.fullScreenMode}) | gpu '{SystemInfo.graphicsDeviceName}' " +
+                               $"({SystemInfo.graphicsDeviceType})");
+            // The fixed clock, because it decides how many times a slow frame pays for
+            // physics: Unity catches the fixed clock up to the frame clock in whole
+            // steps, capped by maximumDeltaTime, so maxDelta/fixedDelta is the worst-case
+            // number of full simulations per rendered frame.
+            Plugin.Log.LogInfo($"[Perf] time: fixedDeltaTime={Time.fixedDeltaTime:F4} " +
+                               $"({1f / Time.fixedDeltaTime:F0} Hz) maximumDeltaTime={Time.maximumDeltaTime:F4} " +
+                               $"timeScale={Time.timeScale:F2} -> up to " +
+                               $"{Mathf.Floor(Time.maximumDeltaTime / Time.fixedDeltaTime):F0} physics step(s) per frame");
+            // Info, not Debug: BepInEx's disk listener ships with LogLevels excluding
+            // Debug, so a Debug line here would be visible in-game and absent from the
+            // log file that is the whole point of the exercise.
+            foreach (var reg in _regions)
+                Plugin.Log.LogInfo($"[Perf]   region {reg.key}: {reg.rends.Length} renderer(s), " +
+                                   $"extent {reg.bounds.size.magnitude:F0} u");
+            Plugin.Log.LogInfo("[Perf] hotkeys: Ctrl+B AUTOMATIC SWEEP (park, press, the camera locks itself) | " +
+                               "Ctrl+T TREND (3 min, changes nothing, RIDE while it runs; Ctrl+T again stops) | " +
+                               "Ctrl+R CPU riders off/on (safe mid-trend) | " +
+                               "Ctrl+P overlay | Ctrl+1 shadow casters | Ctrl+2 shadow distance | " +
+                               "Ctrl+3 cascades | Ctrl+4 region streaming | Ctrl+5 stream radius | " +
+                               "Ctrl+6 MSAA | Ctrl+7 render scale | Ctrl+8 reset all | " +
+                               "Ctrl+9 ALL SCRIPTS OFF (one-way, expect to relaunch) | Ctrl+0 log a sample");
+        }
+
+        // First '_'-separated segment that is a known region key. Scanning all segments
+        // (rather than taking index 1) is what keeps this working through the pipeline's
+        // renaming prefixes — "UVScroll_0.1_0_mdl_ERA5_water" still resolves to ERA5.
+        static string RegionOf(string nm, HashSet<string> keys)
+        {
+            int start = 0;
+            while (start < nm.Length)
+            {
+                int e = nm.IndexOf('_', start);
+                if (e < 0) e = nm.Length;
+                if (e > start)
+                {
+                    string seg = nm.Substring(start, e - start);
+                    if (keys.Contains(seg)) return seg;
+                }
+                start = e + 1;
+            }
+            return null;
+        }
+
+        static UnityEngine.Rendering.Universal.UniversalRenderPipelineAsset Urp()
+        {
+            return UnityEngine.Rendering.GraphicsSettings.currentRenderPipeline
+                   as UnityEngine.Rendering.Universal.UniversalRenderPipelineAsset;
+        }
+
+        void Update()
+        {
+            HandleKeys();
+
+            _acc += Time.unscaledDeltaTime;
+            _frames++;
+            _tick += Time.unscaledDeltaTime;
+            _streamTick += Time.unscaledDeltaTime;
+            _frustumTick += Time.unscaledDeltaTime;
+
+            if (_streamMode != 0 && _streamTick >= StreamWindow) { _streamTick = 0f; UpdateStreaming(); }
+
+            if (_tick < FpsWindow) return;
+            _fps = _acc > 0f ? _frames / _acc : 0f;
+            _acc = 0f; _frames = 0; _tick = 0f;
+
+            // The in-frustum recount walks every renderer, so it runs on its own slow
+            // cadence, only while the overlay is up, and NEVER during a sweep. On the
+            // chain that is a 35k-entry walk of managed->native calls: left running, it
+            // injected a ~50 ms spike frame into every 2 s measurement window, inflating
+            // each row by a few percent and blowing out the 'worst' column.
+            if (_show && !_bench && _frustumTick >= FrustumWindow) { _frustumTick = 0f; CountVisible(); }
+            if (_show) _text = BuildText();
+        }
+
+        void CountVisible()
+        {
+            var cam = Camera.main;
+            if (cam == null) { _visible = -1; return; }
+            // During a sweep the camera transform is only forced back to the locked pose
+            // at beginCameraRendering — this runs in Update, where it still holds
+            // whatever the chase cam last wrote. Reading it straight gives a different
+            // frustum every row of a run that is rendering the SAME view, which is
+            // exactly the sort of number that gets mistaken for a finding.
+            var planes = _lockedCam != null
+                ? GeometryUtility.CalculateFrustumPlanes(
+                      cam.projectionMatrix
+                      * Matrix4x4.Scale(new Vector3(1f, 1f, -1f))
+                      * Matrix4x4.TRS(_lockPos, _lockRot, Vector3.one).inverse)
+                : GeometryUtility.CalculateFrustumPlanes(cam);
+            int vis = 0, act = 0;
+            for (int i = 0; i < _all.Length; i++)
+            {
+                var r = _all[i];
+                if (r == null || !r.enabled || !r.gameObject.activeInHierarchy) continue;
+                act++;
+                if (GeometryUtility.TestPlanesAABB(planes, _bounds[i])) vis++;
+            }
+            _visible = vis; _activeCount = act;
+        }
+
+        void UpdateStreaming()
+        {
+            var cam = Camera.main;
+            if (cam == null) return;
+            Vector3 p = cam.transform.position;
+            float r2 = Radii[_radiusIdx] * Radii[_radiusIdx];
+            foreach (var reg in _regions)
+            {
+                bool want = reg.bounds.SqrDistance(p) <= r2;
+                if (want != reg.on) ApplyRegion(reg, want);
+            }
+        }
+
+        void ApplyRegion(Region reg, bool on)
+        {
+            reg.on = on;
+            foreach (var r in reg.rends)
+            {
+                if (r == null) continue;
+                if (_streamMode == 2) r.gameObject.SetActive(on);
+                else r.enabled = on;
+            }
+        }
+
+        // Put every region back on under BOTH mechanisms. Switching stream modes without
+        // this leaves a region hidden by the mechanism that is no longer being driven —
+        // a permanently invisible chunk of mountain that looks like a conversion bug.
+        void RestoreStreaming()
+        {
+            foreach (var reg in _regions)
+            {
+                if (!reg.on)
+                    foreach (var r in reg.rends)
+                    {
+                        if (r == null) continue;
+                        r.enabled = true;
+                        r.gameObject.SetActive(true);
+                    }
+                reg.on = true;
+            }
+        }
+
+        void ApplyShadowMode()
+        {
+            int changed = 0;
+            for (int i = 0; i < _all.Length; i++)
+            {
+                var r = _all[i];
+                if (r == null) continue;
+                var want = _shadowMode == 0 ? _castOrig[i]
+                         : _shadowMode == 1 ? (_isTerrain[i] ? UnityEngine.Rendering.ShadowCastingMode.Off : _castOrig[i])
+                         : UnityEngine.Rendering.ShadowCastingMode.Off;
+                if (r.shadowCastingMode == want) continue;
+                r.shadowCastingMode = want;
+                changed++;
+            }
+            // Silent during a sweep: 12 configs x a reset each would bury the results
+            // table under 24 lines of bookkeeping in the log we're here to read.
+            if (!_bench)
+                Plugin.Log.LogInfo($"[Perf] shadow casters -> {ShadowModeName()} ({changed} renderer(s) changed)");
+        }
+
+        string ShadowModeName()
+        {
+            return _shadowMode == 0 ? "stock"
+                 : _shadowMode == 1 ? $"terrain off ({_terrainCount} patches)"
+                 : $"all off ({_casterCount} casters)";
+        }
+
+        // ---- automatic sweep -------------------------------------------------
+        //
+        // Hand-driven A/B is only trustworthy if exactly one thing changes between two
+        // readings and the camera doesn't move — which is a lot to ask of somebody
+        // holding a controller. The sweep applies each config itself, from the same
+        // viewpoint, for the same dwell, and prints a table. It re-measures stock at the
+        // END as a drift check: if the closing baseline doesn't match the opening one,
+        // the viewpoint moved (or something warmed up) and the whole table is suspect.
+        bool _bench;
+        string _benchNote = "";
+        int _fixedCalls;
+
+        void FixedUpdate() { _fixedCalls++; }
+
+        // Camera lock. Every sweep row has to render the SAME view or the rows aren't
+        // comparable — a run where the player drifted produced three separate wrong
+        // conclusions before this existed. Snapshotting the transform and forcing it
+        // back leaves the rider free to ride; only the viewpoint is pinned.
+        //
+        // Forced in beginCameraRendering, not LateUpdate: the chase cam also moves in
+        // LateUpdate and script order between us and the game is undefined, so a
+        // LateUpdate write is a coin flip on who lands last (this is the same reason
+        // the skydome follow uses this callback — HOOK_NOTES §13).
+        Transform _lockedCam;
+        Vector3 _lockPos;
+        Quaternion _lockRot;
+
+        void LockCamera()
+        {
+            var c = Camera.main;
+            if (c == null) { Plugin.Log.LogWarning("[Perf] no Camera.main to lock — rows will not be comparable"); return; }
+            _lockedCam = c.transform;
+            _lockPos = _lockedCam.position;
+            _lockRot = _lockedCam.rotation;
+            UnityEngine.Rendering.RenderPipelineManager.beginCameraRendering += HoldCamera;
+        }
+
+        // Unsubscribe UNCONDITIONALLY. If the locked camera was destroyed mid-sweep
+        // (respawn, scene teardown) then _lockedCam reads null through Unity's
+        // fake-null and an early return here would leave HoldCamera subscribed for
+        // the rest of the process.
+        void UnlockCamera()
+        {
+            UnityEngine.Rendering.RenderPipelineManager.beginCameraRendering -= HoldCamera;
+            _lockedCam = null;
+        }
+
+        void HoldCamera(UnityEngine.Rendering.ScriptableRenderContext ctx, Camera cam)
+        {
+            if (_lockedCam == null || cam.transform != _lockedCam) return;
+            _lockedCam.SetPositionAndRotation(_lockPos, _lockRot);
+        }
+
+        class Step
+        {
+            public string name;
+            public Action apply;
+            // Run while the ablation is STILL applied, the instant the window closes.
+            // An ablation the game quietly undoes reads as "this subsystem is free",
+            // which is the most dangerous wrong answer this harness can give — it sent
+            // the whole investigation down a blind alley once already.
+            public Func<string> verify;
+            // Run after verify, before the renderer recount, to put the scene back.
+            public Action undo;
+        }
+
+        Camera[] _cams;                 // enabled cameras, captured when a row masks them
+        int[] _masks;                   // their cullingMasks, to restore
+        MonoBehaviour[] _hookScripts;
+        MonoBehaviour[] _allScripts;
+
+        // The ABLATIONS only. Sweep() interleaves a stock row between every pair, so
+        // there is deliberately no baseline row in here.
+        Step[] BuildSteps()
+        {
+            return new[]
+            {
+                new Step { name = "shadows fully off",       apply = () => { _shadowMode = 2; ApplyShadowMode(); SetDist(0f); } },
+                new Step { name = "MSAA 4x -> 1x",           apply = () => SetMsaa(1) },
+
+                // Camera.enabled = false skips the whole URP loop for this camera —
+                // culling, shadow pass, post (our own bloom included), resolve, blit.
+                // If this row is worth ~nothing then the frame is not being spent
+                // drawing, and every GPU-side knob above is a dead end.
+                new Step { name = "CAMERA OFF (whole loop)", apply = CameraOff, verify = CameraOffVerify, undo = CameraOn },
+
+                // The discriminator for "deactivating 85% of the chain barely helped".
+                // Hiding the FAR renderers leaves near-field density untouched; hiding
+                // the NEAR ones leaves it empty. Renderer.enabled only — colliders and
+                // scripts stay up, so the parked rider can't fall through the map.
+                new Step { name = "hide FAR 700u",           apply = () => DistHide(700f, true),  verify = DistVerify, undo = DistShow },
+                new Step { name = "hide NEAR 700u",          apply = () => DistHide(700f, false), verify = DistVerify, undo = DistShow },
+                // Same far cut, but the whole GameObject: renderer + collider + every
+                // component on it. Minus the row above, this is what the non-render
+                // half of a far object costs.
+                new Step { name = "deactivate FAR 700u",     apply = () => DistKill(700f),        verify = DistVerify, undo = DistShow },
+
+                new Step { name = "PHYSICS OFF",             apply = PhysicsOff, verify = PhysicsVerify,  undo = PhysicsOn },
+
+                // ---- the catch-up spiral ----
+                // Unity runs FixedUpdate repeatedly to catch the fixed clock up to the
+                // frame clock, capped by Time.maximumDeltaTime. A slow frame therefore
+                // buys MORE physics steps, which makes the next frame slower still. The
+                // chain's first sweep measured a flat 5.0 fixed steps per rendered frame
+                // on every row, so whatever physics costs here, it is being paid five
+                // times a frame over 27,089 mesh colliders. These two rows price the two
+                // ways out: cap the catch-up, or step physics half as often.
+                new Step { name = "maxDeltaTime 0.033",      apply = () => SetMaxDelta(0.0333f),  verify = MaxDeltaVerify, undo = RestoreMaxDelta },
+                new Step { name = "fixed step x2 (half Hz)", apply = SetHalfPhysicsRate,          verify = FixedStepVerify, undo = RestoreFixedStep },
+
+                new Step { name = "HOOK SCRIPTS OFF",        apply = ScriptsOff, verify = ScriptsVerify,  undo = ScriptsOn },
+                // ⚠️ "ALL SCRIPTS OFF" is deliberately NOT a sweep row — see AllScriptsOff.
+                // It is not safely reversible and it left the game unplayable once.
+            };
+        }
+
+        // Time settings are global and outlive the map, so both of these snapshot on
+        // first use and are handed back in OnDestroy as well as by the sweep's finally.
+        float _maxDelta0 = -1f, _fixedStep0 = -1f;
+
+        void SetMaxDelta(float v)
+        {
+            if (_maxDelta0 < 0f) _maxDelta0 = Time.maximumDeltaTime;
+            Time.maximumDeltaTime = v;
+        }
+        string MaxDeltaVerify() { return $"maxDeltaTime={Time.maximumDeltaTime:F4}"; }
+        void RestoreMaxDelta() { if (_maxDelta0 >= 0f) { Time.maximumDeltaTime = _maxDelta0; _maxDelta0 = -1f; } }
+
+        void SetHalfPhysicsRate()
+        {
+            if (_fixedStep0 < 0f) _fixedStep0 = Time.fixedDeltaTime;
+            Time.fixedDeltaTime = _fixedStep0 * 2f;
+        }
+        string FixedStepVerify() { return $"fixedDeltaTime={Time.fixedDeltaTime:F4}"; }
+        void RestoreFixedStep() { if (_fixedStep0 >= 0f) { Time.fixedDeltaTime = _fixedStep0; _fixedStep0 = -1f; } }
+
+        // Whole-render-loop ablation. Riskier than the mask (Camera.main goes null for
+        // one frame's worth of game code), so it is verified like the rest.
+        Camera[] _offCams;
+
+        void CameraOff()
+        {
+            var found = FindObjectsOfType<Camera>();
+            var live = new List<Camera>();
+            foreach (var c in found) if (c != null && c.enabled) live.Add(c);
+            _offCams = live.ToArray();
+            foreach (var c in _offCams) c.enabled = false;
+        }
+
+        string CameraOffVerify()
+        {
+            if (_offCams == null || _offCams.Length == 0) return "NO CAMERAS FOUND — row is meaningless";
+            int held = 0;
+            foreach (var c in _offCams) if (c != null && !c.enabled) held++;
+            return held == _offCams.Length ? $"{held}/{_offCams.Length} cams off (held)"
+                                           : $"ONLY {held}/{_offCams.Length} still off — GAME RE-ENABLED THEM";
+        }
+
+        void CameraOn()
+        {
+            if (_offCams == null) return;
+            foreach (var c in _offCams) if (c != null) c.enabled = true;
+            _offCams = null;
+        }
+
+        // ---- distance ablations ---------------------------------------------
+        //
+        // Both record exactly what they touched, so the undo can put back that set and
+        // nothing else — a renderer the pipeline shipped disabled must never come back
+        // on, and a blanket "enable everything" is how that happens.
+        readonly List<Renderer> _hidden = new List<Renderer>();
+        readonly List<GameObject> _killed = new List<GameObject>();
+        string _distNote = "";
+
+        void DistHide(float radius, bool killFar)
+        {
+            var cam = Camera.main;
+            if (cam == null) { _distNote = "NO CAMERA — row is meaningless"; return; }
+            Vector3 p = cam.transform.position;
+            float r2 = radius * radius;
+            for (int i = 0; i < _all.Length; i++)
+            {
+                var r = _all[i];
+                if (r == null || !r.enabled) continue;
+                if ((_bounds[i].SqrDistance(p) > r2) != killFar) continue;
+                r.enabled = false;
+                _hidden.Add(r);
+            }
+            _distNote = $"{_hidden.Count}/{_all.Length} renderers hidden";
+        }
+
+        void DistKill(float radius)
+        {
+            var cam = Camera.main;
+            if (cam == null) { _distNote = "NO CAMERA — row is meaningless"; return; }
+            Vector3 p = cam.transform.position;
+            float r2 = radius * radius;
+            for (int i = 0; i < _all.Length; i++)
+            {
+                var r = _all[i];
+                if (r == null) continue;
+                var go = r.gameObject;
+                if (!go.activeSelf) continue;
+                if (_bounds[i].SqrDistance(p) <= r2) continue;
+                go.SetActive(false);
+                _killed.Add(go);
+            }
+            _distNote = $"{_killed.Count}/{_all.Length} objects deactivated";
+        }
+
+        string DistVerify() { return _distNote; }
+
+        void DistShow()
+        {
+            foreach (var r in _hidden) if (r != null) r.enabled = true;
+            foreach (var go in _killed) if (go != null) go.SetActive(true);
+            _hidden.Clear();
+            _killed.Clear();
+            _distNote = "";
+        }
+
+        void RenderOff()
+        {
+            var found = FindObjectsOfType<Camera>();
+            var live = new List<Camera>();
+            foreach (var c in found) if (c != null && c.enabled) live.Add(c);
+            _cams = live.ToArray();
+            _masks = new int[_cams.Length];
+            for (int i = 0; i < _cams.Length; i++) { _masks[i] = _cams[i].cullingMask; _cams[i].cullingMask = 0; }
+        }
+
+        string RenderOffVerify()
+        {
+            if (_cams == null || _cams.Length == 0) return "NO CAMERAS FOUND — row is meaningless";
+            int held = 0;
+            foreach (var c in _cams) if (c != null && c.cullingMask == 0) held++;
+            return held == _cams.Length ? $"{held}/{_cams.Length} cams masked (held)"
+                                        : $"ONLY {held}/{_cams.Length} still masked — GAME RE-ENABLED THEM";
+        }
+
+        void RenderOn()
+        {
+            if (_cams == null) return;
+            for (int i = 0; i < _cams.Length; i++) if (_cams[i] != null) _cams[i].cullingMask = _masks[i];
+            _cams = null; _masks = null;
+        }
+
+        // SimulationMode.Script means "step PhysX only when someone calls
+        // Physics.Simulate", and nobody does — the simulation stops without touching
+        // timeScale, which would also stop the scripts this row wants left running.
+        // ⚠️ It does NOT stop FixedUpdate from being CALLED, so game FixedUpdate code
+        // still runs; that is what the fixed-calls-per-frame column is for.
+        void PhysicsOff() { Physics.simulationMode = SimulationMode.Script; }
+        void PhysicsOn() { Physics.simulationMode = SimulationMode.FixedUpdate; }
+        string PhysicsVerify()
+        {
+            return Physics.simulationMode == SimulationMode.Script ? "simulation stopped (held)"
+                                                                   : "SIMULATION RESTARTED BY GAME";
+        }
+
+        MonoBehaviour[] GrabScripts(bool hookOnly)
+        {
+            var found = FindObjectsOfType<MonoBehaviour>();
+            var live = new List<MonoBehaviour>();
+            string ns = typeof(PerfHarness).Namespace;
+            foreach (var mb in found)
+            {
+                if (mb == null || !mb.enabled || mb is PerfHarness) continue;
+                if (hookOnly && mb.GetType().Namespace != ns) continue;
+                live.Add(mb);
+            }
+            return live.ToArray();
+        }
+
+        static string StillOff(MonoBehaviour[] set)
+        {
+            if (set == null || set.Length == 0) return "NOTHING TO DISABLE — row is meaningless";
+            int held = 0;
+            foreach (var mb in set) if (mb != null && !mb.enabled) held++;
+            return held == set.Length ? $"{held}/{set.Length} disabled (held)"
+                                      : $"ONLY {held}/{set.Length} still disabled — GAME RE-ENABLED THEM";
+        }
+
+        static void SetAll(MonoBehaviour[] set, bool on)
+        {
+            if (set == null) return;
+            foreach (var mb in set) if (mb != null) mb.enabled = on;
+        }
+
+        void ScriptsOff() { _hookScripts = GrabScripts(true); SetAll(_hookScripts, false); }
+        string ScriptsVerify() { return StillOff(_hookScripts); }
+        void ScriptsOn() { SetAll(_hookScripts, true); _hookScripts = null; }
+
+        // ⚠️ NOT REVERSIBLE, which is why it is a manual hotkey and not a sweep row.
+        // Disabling a MonoBehaviour permanently kills the coroutines it started —
+        // re-enabling does NOT resume them — so any game system driven by a coroutine
+        // (race state, countdown, UI, input rebinding) stays dead afterwards. It cost a
+        // whole chain sweep once: the run completed, the results logged, and the player
+        // could not get control back and had to quit. The measurement is still worth
+        // having (on Metro-City it was the single biggest term at +53%), so it stays —
+        // as a deliberate, warned, one-way trip.
+        void AllScriptsOff()
+        {
+            _allScripts = GrabScripts(false);
+            SetAll(_allScripts, false);
+            Plugin.Log.LogWarning($"[Perf] ALL {_allScripts.Length} script(s) disabled. This is ONE-WAY: " +
+                                  "re-enabling does not restart coroutines, so expect to quit and relaunch " +
+                                  "after reading the number. Ctrl+9 again to attempt a restore.");
+        }
+        string AllScriptsVerify() { return StillOff(_allScripts); }
+        void AllScriptsOn() { SetAll(_allScripts, true); _allScripts = null; }
+
+        // Which component types the scene is actually made of. HOOK SCRIPTS OFF priced
+        // our own components and ALL SCRIPTS OFF priced everything; the gap between them
+        // is the game's own per-object components, and this is what says WHICH ones —
+        // the only handle a Hook-side fix has. Logged at sweep time, not at load, so the
+        // rider, HUD and AI managers exist by the time it counts.
+        static void LogScriptCensus()
+        {
+            var counts = new Dictionary<string, int>();
+            foreach (var mb in FindObjectsOfType<MonoBehaviour>())
+            {
+                if (mb == null || !mb.enabled) continue;
+                string t = mb.GetType().FullName;
+                counts.TryGetValue(t, out int c);
+                counts[t] = c + 1;
+            }
+            var list = new List<KeyValuePair<string, int>>(counts);
+            list.Sort((x, y) => y.Value.CompareTo(x.Value));
+            int total = 0;
+            foreach (var kv in list) total += kv.Value;
+            Plugin.Log.LogInfo($"[Perf] script census: {total} enabled MonoBehaviour(s), " +
+                               $"{list.Count} distinct type(s) — top 20:");
+            for (int i = 0; i < list.Count && i < 20; i++)
+                Plugin.Log.LogInfo($"[Perf]   {list[i].Value,6} x {list[i].Key}");
+        }
+
+        // ---- trend mode ---------------------------------------------------------
+        // The discriminator the sweep cannot be. A sweep's own rows enable and
+        // disable tens of thousands of renderers and re-insert ~27k mesh colliders
+        // into PhysX, so a stock baseline that climbs across a sweep is ambiguous:
+        // the level might be degrading, or the harness might be degrading it. This
+        // mode changes NOTHING — no ablation, no camera lock, no enable/disable
+        // churn — and samples on a fixed cadence while you ride.
+        //
+        // It logs POSITION next to frame time because the two candidate causes
+        // predict different correlations. If cost tracks elapsed time, something is
+        // accumulating (trail meshes, allocations, spawned objects). If it tracks
+        // where the rider is on the mountain, it is the map: denser regions lower
+        // down, or riders spreading out across a 7.5 km descent. Same numbers, and
+        // only one instrument can tell them apart.
+        //
+        // First run answered that: TIME. Over 179 s the chain went 31 -> 71 ms
+        // without leaving one region, ending on two samples at an IDENTICAL
+        // position that were the two worst of the run. It also cleared the two
+        // obvious suspects — trail vertices plateau at ~3.3k while the frame time
+        // keeps climbing, and the managed heap just oscillates. So the probes below
+        // look where a managed-heap counter cannot: native Unity objects, live
+        // particles, and whether a CPU rider has stopped moving.
+        bool _trendRun;
+        MeshFilter[] _trailMeshes;
+        Transform[] _riders;
+        Vector3[] _riderPrev;
+
+        // Meshes belonging to anything trail-like, resolved by type NAME rather than
+        // by referencing the game's SnowTrail directly — the Hook must keep building
+        // if a game update renames or drops it. Sampling their vertex count each
+        // interval tests the strongest "grows over time" candidate for ~nothing: a
+        // trail laid down a 7.5 km descent is roughly five times any normal course's.
+        void FindTrailMeshes()
+        {
+            var found = new List<MeshFilter>();
+            foreach (var mb in FindObjectsOfType<MonoBehaviour>())
+            {
+                if (mb == null) continue;
+                if (mb.GetType().Name.IndexOf("Trail", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                foreach (var mf in mb.GetComponentsInChildren<MeshFilter>(true))
+                    if (mf != null) found.Add(mf);
+            }
+            _trailMeshes = found.ToArray();
+            Plugin.Log.LogInfo($"[Perf] trend: watching {_trailMeshes.Length} trail mesh(es) for growth");
+        }
+
+        int TrailVerts()
+        {
+            if (_trailMeshes == null) return -1;
+            int v = 0;
+            foreach (var mf in _trailMeshes)
+            {
+                if (mf == null) continue;
+                var m = mf.sharedMesh;
+                if (m != null) v += m.vertexCount;
+            }
+            return v;
+        }
+
+        // The CPU riders, resolved by type NAME for the same reason the trail probe
+        // is (no compile-time dependency on a game type that an update may rename).
+        void FindRiders()
+        {
+            var found = new List<Transform>();
+            foreach (var mb in FindObjectsOfType<MonoBehaviour>())
+            {
+                if (mb == null) continue;
+                if (mb.GetType().Name != "Snowboarder") continue;
+                found.Add(mb.transform);
+            }
+            _riders = found.ToArray();
+            _riderPrev = new Vector3[_riders.Length];
+            for (int i = 0; i < _riders.Length; i++)
+                _riderPrev[i] = _riders[i] != null ? _riders[i].position : Vector3.zero;
+            Plugin.Log.LogInfo($"[Perf] trend: watching {_riders.Length} rider(s) for stalls");
+        }
+
+        // How many riders moved less than `eps` since the previous sample. A rider
+        // caught in a respawn or rail-snapback loop reads as stalled while the rest
+        // of the field descends — the cheapest signature of "one of the CPU riders
+        // is eating the frame", and the reason this map's OOB trouble and its frame
+        // rate might be one bug rather than two.
+        string RiderStalls(float eps)
+        {
+            if (_riders == null || _riders.Length == 0) return "-";
+            int stalled = 0, alive = 0;
+            for (int i = 0; i < _riders.Length; i++)
+            {
+                var tr = _riders[i];
+                if (tr == null) continue;
+                alive++;
+                Vector3 p = tr.position;
+                if ((p - _riderPrev[i]).sqrMagnitude < eps * eps) stalled++;
+                _riderPrev[i] = p;
+            }
+            return $"{stalled}/{alive}";
+        }
+
+        // The causal test the stall column can only hint at. Correlation got as far
+        // as "the frame time steps up around the time the 4th rider stops moving
+        // for good" and no further, because the count wobbles before it settles.
+        // Switching the CPU riders off answers it in one press.
+        //
+        // SetActive(false) rather than disabling their scripts, for two reasons: a
+        // disabled MonoBehaviour permanently loses the coroutines it started (that
+        // is the lost-control bug ALL SCRIPTS OFF is quarantined for), and their
+        // rendering is not a confound worth caring about — 8 riders against 34,979
+        // renderers, on a map where switching off 96% of the geometry landed inside
+        // the noise floor.
+        GameObject[] _ridersOff;   // non-null while the CPU riders are deactivated
+
+        void ToggleRiders()
+        {
+            if (_ridersOff != null)
+            {
+                int n = 0;
+                foreach (var go in _ridersOff) if (go != null) { go.SetActive(true); n++; }
+                Plugin.Log.LogInfo($"[Perf] riders: {n} CPU rider(s) RE-ENABLED");
+                _ridersOff = null;
+                return;
+            }
+
+            var all = new List<Transform>();
+            foreach (var mb in FindObjectsOfType<MonoBehaviour>())
+            {
+                if (mb == null) continue;
+                if (mb.GetType().Name != "Snowboarder") continue;
+                all.Add(mb.transform);
+            }
+            if (all.Count == 0) { Plugin.Log.LogInfo("[Perf] riders: none found"); return; }
+
+            // Whoever the camera is following is the human; never deactivate them.
+            // The chase cam trails by metres and the field spreads over kilometres,
+            // so nearest-to-camera is unambiguous in practice.
+            var cam = Camera.main;
+            Vector3 eye = cam != null ? cam.transform.position : Vector3.zero;
+            int human = 0; float bestD = float.MaxValue;
+            for (int i = 0; i < all.Count; i++)
+            {
+                float d = (all[i].position - eye).sqrMagnitude;
+                if (d < bestD) { bestD = d; human = i; }
+            }
+
+            // Where each rider is, logged before they go away — a clutch of riders
+            // sitting on one spot is the shape of a respawn loop, and that is worth
+            // knowing whether or not it turns out to cost frame time.
+            var off = new List<GameObject>();
+            for (int i = 0; i < all.Count; i++)
+            {
+                Vector3 p = all[i].position;
+                Plugin.Log.LogInfo($"[Perf]   rider {i}{(i == human ? " (HUMAN, kept)" : "")}: "
+                    + $"({p.x,8:F0},{p.y,7:F0},{p.z,8:F0})  {(p - eye).magnitude,7:F0} from camera");
+                if (i == human) continue;
+                all[i].gameObject.SetActive(false);
+                off.Add(all[i].gameObject);
+            }
+            _ridersOff = off.ToArray();
+            Plugin.Log.LogInfo($"[Perf] riders: {_ridersOff.Length} CPU rider(s) DEACTIVATED — "
+                + "Ctrl+R again to restore");
+        }
+
+        // Unity objects and particles live in NATIVE memory, so neither shows up in
+        // GC.GetTotalMemory — a flat managed heap does not mean nothing is
+        // accumulating. Both counts are taken outside the measured window on
+        // purpose: FindObjectsOfType over ~59k objects is not cheap and must not
+        // inflate the number it exists to diagnose.
+        int ObjectCount() { return FindObjectsOfType<Transform>(true).Length; }
+
+        string ParticleCount()
+        {
+            var systems = FindObjectsOfType<ParticleSystem>();
+            int live = 0;
+            foreach (var ps in systems) if (ps != null) live += ps.particleCount;
+            return $"{systems.Length}/{live}";
+        }
+
+        // Nearest region bucket to a point, as a rough "where on the mountain" label.
+        // Buckets overlap heavily on the chain, so this is a hint for reading the
+        // table, never a claim about which region the rider is inside.
+        string NearestRegion(Vector3 p)
+        {
+            if (_regions == null || _regions.Length == 0) return "?";
+            string best = "?"; float bestD = float.MaxValue;
+            foreach (var reg in _regions)
+            {
+                float d = (reg.bounds.center - p).sqrMagnitude;
+                if (d < bestD) { bestD = d; best = reg.key; }
+            }
+            return best;
+        }
+
+        System.Collections.IEnumerator Trend(float minutes, float cadence)
+        {
+            _bench = true;          // suppresses the Update-time frustum recount spike
+            _trendRun = true;
+            FindTrailMeshes();
+            FindRiders();
+            int total = Mathf.Max(1, Mathf.RoundToInt(minutes * 60f / cadence));
+            Plugin.Log.LogInfo($"[Perf] === TREND START ({total} samples, {cadence:F0}s apart, " +
+                               $"~{minutes:F0} min) — NOTHING is changed; ride normally. " +
+                               "Ctrl+T again to stop early. ===");
+            Plugin.Log.LogInfo("[Perf]   t(s)     ms   worst  fx/f  gc    heapMB  trailV    objs  " +
+                               "psys/live  stall   pos(x,y,z)                 dist   region");
+
+            float t0 = Time.unscaledTime;
+            try
+            {
+                for (int i = 0; i < total && _trendRun; i++)
+                {
+                    int gc0 = GC.CollectionCount(0);
+                    long mem0 = GC.GetTotalMemory(false);
+                    int fixed0 = _fixedCalls;
+                    float acc = 0f, worst = 0f; int n = 0;
+                    while (acc < 2f && _trendRun)
+                    {
+                        float dt = Time.unscaledDeltaTime;
+                        acc += dt; n++;
+                        if (dt > worst) worst = dt;
+                        yield return null;
+                    }
+                    if (n == 0) break;
+
+                    float ms = acc / n * 1000f;
+                    float fpf = (float)(_fixedCalls - fixed0) / n;
+                    var cam = Camera.main;
+                    // Camera position, not the rider's — a chase cam trails by a few
+                    // metres, which is irrelevant at the kilometre scale this is
+                    // asking about, and it avoids coupling the harness to the game's
+                    // player type.
+                    Vector3 p = cam != null ? cam.transform.position : Vector3.zero;
+
+                    // `eps` = 20 map units. Calibrated off the previous trend run,
+                    // where a descending rider covered 60-70 units/s, so a 5 s
+                    // sample moves ~320 — 20 is comfortably "did not move" without
+                    // flagging someone merely slow. A judgement call, not measured
+                    // against a rider known to be stuck.
+                    Plugin.Log.LogInfo(
+                        $"[Perf]  {Time.unscaledTime - t0,5:F0}  {ms,6:F1}  {worst * 1000f,6:F1}  "
+                        + $"{fpf,4:F1}  {GC.CollectionCount(0) - gc0,2}  "
+                        + $"{(GC.GetTotalMemory(false) - mem0) / 1048576f,7:F1}  "
+                        + $"{TrailVerts(),6}  {ObjectCount(),6}  {ParticleCount(),9}  "
+                        + $"{RiderStalls(20f),5}   "
+                        + $"({p.x,8:F0},{p.y,7:F0},{p.z,8:F0})  {p.magnitude,7:F0}  {NearestRegion(p)}");
+
+                    // Idle out the rest of the cadence so the sample is a snapshot of
+                    // normal play, not a continuous measurement that could itself cost.
+                    float rest = cadence - 2f;
+                    while (rest > 0f && _trendRun) { rest -= Time.unscaledDeltaTime; yield return null; }
+                }
+            }
+            finally
+            {
+                _bench = false;
+                _trendRun = false;
+                _trailMeshes = null;
+                _riders = null;
+                _riderPrev = null;
+                Plugin.Log.LogInfo("[Perf] === TREND END (nothing was changed, nothing to restore) ===");
+            }
+        }
+
+        void SetDist(float d)
+        {
+            var urp = Urp(); if (urp == null) return;
+            if (_urpDist0 < 0f) _urpDist0 = urp.shadowDistance;
+            urp.shadowDistance = d;
+        }
+        void SetCascades(int c)
+        {
+            var urp = Urp(); if (urp == null) return;
+            if (_urpCascade0 < 0) _urpCascade0 = urp.shadowCascadeCount;
+            urp.shadowCascadeCount = c;
+        }
+        void SetMsaa(int m)
+        {
+            var urp = Urp(); if (urp == null) return;
+            if (_urpMsaa0 < 0) _urpMsaa0 = urp.msaaSampleCount;
+            urp.msaaSampleCount = m;
+        }
+        void SetScale(float s)
+        {
+            var urp = Urp(); if (urp == null) return;
+            if (_urpScale0 < 0f) _urpScale0 = urp.renderScale;
+            urp.renderScale = s;
+        }
+        void StartStream(int mode, float radius)
+        {
+            RestoreStreaming();
+            _streamMode = mode;
+            _radiusIdx = Array.IndexOf(Radii, radius);
+            if (_radiusIdx < 0) _radiusIdx = 0;
+            UpdateStreaming();
+        }
+
+        // Frame Timing Stats. The API always exists, but the DATA only exists if the
+        // player build enabled "Frame Timing Stats" — hence the sample-count return
+        // rather than trusting the struct.
+        static readonly FrameTiming[] _ft = new FrameTiming[1];
+
+        static bool SampleTiming(ref double cpuMain, ref double cpuRender, ref double gpu)
+        {
+            FrameTimingManager.CaptureFrameTimings();
+            if (FrameTimingManager.GetLatestTimings(1, _ft) == 0) return false;
+            cpuMain += _ft[0].cpuMainThreadFrameTime;
+            cpuRender += _ft[0].cpuRenderThreadFrameTime;
+            gpu += _ft[0].gpuFrameTime;
+            return true;
+        }
+
+        System.Collections.IEnumerator Sweep()
+        {
+            _bench = true;
+
+            // Interleave a stock row between every pair of ablations. The previous
+            // design measured stock once at each end and used the disagreement as a
+            // pass/fail on the whole table — which threw away every row of a 36 s run
+            // whenever the rider's position, thermals or warm-up moved the baseline by
+            // more than a few percent, and that turned out to be most runs. Sandwiching
+            // each ablation between two baselines makes the drift cancel instead:
+            // an ablation is scored against the mean of its own two neighbours, so a
+            // baseline sliding steadily through the sweep no longer contaminates
+            // anything, and the spread ACROSS the stock rows becomes an honest,
+            // measured noise floor to judge the deltas against.
+            var abl = BuildSteps();
+            var seq = new List<Step>();
+            var isStock = new List<bool>();
+            seq.Add(new Step { name = "stock", apply = () => { } }); isStock.Add(true);
+            foreach (var a in abl)
+            {
+                seq.Add(a); isStock.Add(false);
+                seq.Add(new Step { name = "stock", apply = () => { } }); isStock.Add(true);
+            }
+
+            var rowMs = new float[seq.Count];
+            var rowText = new string[seq.Count];
+
+            LockCamera();
+            Plugin.Log.LogInfo($"[Perf] === SWEEP START ({abl.Length} ablations, {seq.Count} rows, " +
+                               $"~{seq.Count * 3}s) — camera is LOCKED for the duration; " +
+                               "ride or don't, the view won't move ===");
+
+            // try/finally, not try/catch — a coroutine may yield inside a finally-only
+            // try. The ablation rows leave the game unplayable while they run (no
+            // cameras, no physics), so if the scene unloads or a row throws mid-window,
+            // the restore has to happen anyway or the player is left staring at a frozen
+            // black screen with no way back.
+            try
+            {
+            for (int i = 0; i < seq.Count; i++)
+            {
+                ResetAllQuiet();
+                seq[i].apply();
+                _benchNote = $"sweep {i + 1}/{seq.Count}: {seq[i].name}";
+
+                // 1 s settle (shadow-map reallocation, streaming state changes and the
+                // first frames after a render-scale change are not representative),
+                // then 2 s of measurement.
+                float t = 0f;
+                while (t < 1f) { t += Time.unscaledDeltaTime; yield return null; }
+
+                int gc0 = GC.CollectionCount(0);
+                long mem0 = GC.GetTotalMemory(false);
+                int fixed0 = _fixedCalls;
+                float acc = 0f, worst = 0f; int n = 0;
+                double cpuMain = 0, cpuRender = 0, gpu = 0; int timed = 0;
+                while (acc < 2f)
+                {
+                    float dt = Time.unscaledDeltaTime;
+                    acc += dt; n++;
+                    if (dt > worst) worst = dt;
+                    if (SampleTiming(ref cpuMain, ref cpuRender, ref gpu)) timed++;
+                    yield return null;
+                }
+                float ms = acc / n * 1000f;
+                // The one measurement that splits "the GPU is drawing too much" from
+                // "the main thread is running too much code" without ablating anything.
+                // Needs Frame Timing Stats enabled in the player build; zero samples
+                // means the build doesn't have it and the column reads '—'.
+                string timing = timed > 0
+                    ? $"cpu {cpuMain / timed,5:F1} rt {cpuRender / timed,5:F1} gpu {gpu / timed,5:F1}"
+                    : "cpu     — rt     — gpu     —";
+                int gcRuns = GC.CollectionCount(0) - gc0;
+                // Net heap growth, so a collection inside the window makes this an
+                // UNDER-estimate of what was allocated — hence reporting the collection
+                // count next to it rather than a bare number that could read as zero.
+                float allocMB = (GC.GetTotalMemory(false) - mem0) / 1048576f;
+                float fixedPerFrame = (float)(_fixedCalls - fixed0) / n;
+
+                string check = seq[i].verify != null ? seq[i].verify() : "";
+                // Count BEFORE the undo, or the act/vis columns describe the restored
+                // scene instead of the one that was measured — which made every count
+                // in the first tables meaningless.
+                CountVisible();
+                if (seq[i].undo != null) seq[i].undo();
+
+                rowMs[i] = ms;
+                rowText[i] = $"  {seq[i].name,-26} {1000f / ms,6:F1} fps  {ms,6:F1} ms  " +
+                             $"worst {worst * 1000f,6:F1} ms   {timing}   " +
+                             $"{_activeCount,6} act  {_visible,5} vis  gc {gcRuns,2}  " +
+                             $"heap {allocMB,7:F1} MB  fixed/frame {fixedPerFrame,4:F1}" +
+                             (check.Length > 0 ? "   [" + check + "]" : "");
+            }
+            }
+            finally
+            {
+                UnlockCamera();
+                CameraOn();
+                RenderOn();
+                DistShow();
+                PhysicsOn();
+                ScriptsOn();
+                RestoreMaxDelta();
+                RestoreFixedStep();
+                ResetAllQuiet();
+                _bench = false;
+                _benchNote = "";
+            }
+
+            // Noise floor first, so the deltas below are read against a measured
+            // threshold instead of a guessed one.
+            float lo = float.MaxValue, hi = 0f, sum = 0f; int ns = 0;
+            for (int i = 0; i < seq.Count; i++)
+            {
+                if (!isStock[i] || rowMs[i] <= 0f) continue;
+                lo = Mathf.Min(lo, rowMs[i]); hi = Mathf.Max(hi, rowMs[i]);
+                sum += rowMs[i]; ns++;
+            }
+            float stockMean = ns > 0 ? sum / ns : 0f;
+            float noisePct = stockMean > 0f ? (hi - lo) / stockMean * 100f : 0f;
+
+            Plugin.Log.LogInfo("[Perf] === SWEEP RESULTS ===");
+            Plugin.Log.LogInfo($"[Perf] noise floor: {ns} stock rows spanned {lo:F1}-{hi:F1} ms " +
+                               $"(mean {stockMean:F1}) = {noisePct:F1}% — treat any delta smaller " +
+                               "than that as nothing.");
+            for (int i = 0; i < seq.Count; i++)
+            {
+                if (rowText[i] == null) break;
+                string delta = "      —";
+                if (!isStock[i])
+                {
+                    // Score against the mean of THIS row's own two neighbouring stock
+                    // rows, so a baseline that drifts across the sweep cancels out.
+                    float b = (rowMs[i - 1] + rowMs[i + 1]) * 0.5f;
+                    if (b > 0f)
+                    {
+                        float pct = (b - rowMs[i]) / b * 100f;
+                        // Built by hand rather than with a composite alignment: a '+' in
+                        // the alignment slot is not a valid format spec, and the
+                        // FormatException would abort the coroutine and lose the sweep.
+                        delta = ((pct >= 0f ? "+" : "") + pct.ToString("F1") + "%").PadLeft(7);
+                        if (Mathf.Abs(pct) < noisePct) delta += " (noise)";
+                    }
+                }
+                Plugin.Log.LogInfo($"[Perf]{rowText[i]}   {delta}");
+            }
+            // After the table: FindObjectsOfType over a 59k-object scene is not free,
+            // and running it first put its cost inside the opening baseline row.
+            LogScriptCensus();
+            Plugin.Log.LogInfo("[Perf] === SWEEP END (restored to stock) ===");
+        }
+
+        void HandleKeys()
+        {
+            if (!Input.GetKey(KeyCode.LeftControl) && !Input.GetKey(KeyCode.RightControl)) return;
+
+            // Manual toggles are locked out mid-sweep — a keypress during a measurement
+            // window silently poisons that row and every delta computed from it.
+            if (Input.GetKeyDown(KeyCode.B) && !_bench) { StartCoroutine(Sweep()); return; }
+            // Trend must be startable AND stoppable, so its key is handled before the
+            // mid-run lockout below — it is the one mode you may want to cut short,
+            // since it runs for minutes while you ride.
+            if (Input.GetKeyDown(KeyCode.T))
+            {
+                if (_trendRun) { _trendRun = false; return; }
+                if (!_bench) { StartCoroutine(Trend(3f, 5f)); return; }
+            }
+            // Allowed DURING a trend run — deliberately. Flipping the riders off
+            // mid-run puts the before and the after in the same table, under the
+            // same conditions, which is far better evidence than two runs. It is
+            // still locked out of a sweep, where a keypress poisons a row.
+            if (Input.GetKeyDown(KeyCode.R) && (!_bench || _trendRun)) { ToggleRiders(); return; }
+            if (_bench) return;
+
+            if (Input.GetKeyDown(KeyCode.P)) { _show = !_show; _visible = -1; }
+
+            // The one-way probe. Off the sweep on purpose — see AllScriptsOff.
+            if (Input.GetKeyDown(KeyCode.Alpha9))
+            {
+                if (_allScripts == null) AllScriptsOff();
+                else
+                {
+                    AllScriptsOn();
+                    Plugin.Log.LogWarning("[Perf] scripts re-enabled, but coroutines started before the " +
+                                          "disable are gone for good — if the game is unresponsive, that is why.");
+                }
+            }
+
+            if (Input.GetKeyDown(KeyCode.Alpha1))
+            {
+                _shadowMode = (_shadowMode + 1) % 3;
+                ApplyShadowMode();
+            }
+            if (Input.GetKeyDown(KeyCode.Alpha2))
+            {
+                var urp = Urp();
+                if (urp != null)
+                {
+                    if (_urpDist0 < 0f) _urpDist0 = urp.shadowDistance;
+                    _shadowDistIdx = _shadowDistIdx + 1 >= ShadowDists.Length ? -1 : _shadowDistIdx + 1;
+                    urp.shadowDistance = _shadowDistIdx < 0 ? _urpDist0 : ShadowDists[_shadowDistIdx];
+                    Plugin.Log.LogInfo($"[Perf] shadow distance -> {urp.shadowDistance:F0} u" +
+                                       (_shadowDistIdx < 0 ? " (stock)" : ""));
+                }
+            }
+            if (Input.GetKeyDown(KeyCode.Alpha3))
+            {
+                var urp = Urp();
+                if (urp != null)
+                {
+                    if (_urpCascade0 < 0) _urpCascade0 = urp.shadowCascadeCount;
+                    _cascadeIdx = _cascadeIdx + 1 >= Cascades.Length ? -1 : _cascadeIdx + 1;
+                    urp.shadowCascadeCount = _cascadeIdx < 0 ? _urpCascade0 : Cascades[_cascadeIdx];
+                    Plugin.Log.LogInfo($"[Perf] shadow cascades -> {urp.shadowCascadeCount}" +
+                                       (_cascadeIdx < 0 ? " (stock)" : ""));
+                }
+            }
+            if (Input.GetKeyDown(KeyCode.Alpha4))
+            {
+                RestoreStreaming();
+                _streamMode = (_streamMode + 1) % 3;
+                _streamTick = StreamWindow;   // re-test on the next Update, not in 0.2 s
+                Plugin.Log.LogInfo($"[Perf] region streaming -> {StreamModeName()} " +
+                                   $"(radius {Radii[_radiusIdx]:F0} u, {_regions.Length} region(s))");
+                if (_streamMode == 2)
+                    Plugin.Log.LogWarning("[Perf] streaming mode 'deactivate' also switches off COLLIDERS and " +
+                                          "Hook volume components in the hidden regions — it measures the " +
+                                          "physics+script share of the win, but AI riders outside the radius " +
+                                          "will fall through the map. Measurement only, never for play.");
+            }
+            if (Input.GetKeyDown(KeyCode.Alpha5))
+            {
+                RestoreStreaming();
+                _radiusIdx = (_radiusIdx + 1) % Radii.Length;
+                _streamTick = StreamWindow;
+                Plugin.Log.LogInfo($"[Perf] stream radius -> {Radii[_radiusIdx]:F0} u");
+            }
+            if (Input.GetKeyDown(KeyCode.Alpha6))
+            {
+                var urp = Urp();
+                if (urp != null)
+                {
+                    if (_urpMsaa0 < 0) _urpMsaa0 = urp.msaaSampleCount;
+                    _msaaIdx = _msaaIdx + 1 >= Msaa.Length ? -1 : _msaaIdx + 1;
+                    urp.msaaSampleCount = _msaaIdx < 0 ? _urpMsaa0 : Msaa[_msaaIdx];
+                    Plugin.Log.LogInfo($"[Perf] MSAA -> {urp.msaaSampleCount}x" + (_msaaIdx < 0 ? " (stock)" : ""));
+                }
+            }
+            if (Input.GetKeyDown(KeyCode.Alpha7))
+            {
+                var urp = Urp();
+                if (urp != null)
+                {
+                    if (_urpScale0 < 0f) _urpScale0 = urp.renderScale;
+                    _scaleIdx = _scaleIdx + 1 >= Scales.Length ? -1 : _scaleIdx + 1;
+                    urp.renderScale = _scaleIdx < 0 ? _urpScale0 : Scales[_scaleIdx];
+                    Plugin.Log.LogInfo($"[Perf] render scale -> {urp.renderScale:F2}" + (_scaleIdx < 0 ? " (stock)" : ""));
+                }
+            }
+            if (Input.GetKeyDown(KeyCode.Alpha8)) ResetAll();
+            if (Input.GetKeyDown(KeyCode.Alpha0))
+                Plugin.Log.LogInfo($"[Perf] SAMPLE {_fps:F1} fps ({(_fps > 0f ? 1000f / _fps : 0f):F1} ms) | " +
+                                   $"renderers {_activeCount}/{_all.Length} active, {_visible} in frustum | " +
+                                   $"shadows {ShadowModeName()} | stream {StreamModeName()} r={Radii[_radiusIdx]:F0} | " +
+                                   UrpLine());
+        }
+
+        string StreamModeName()
+        {
+            return _streamMode == 0 ? "off" : _streamMode == 1 ? "hide renderers" : "deactivate";
+        }
+
+        string UrpLine()
+        {
+            var urp = Urp();
+            if (urp == null) return "no URP asset";
+            return $"shadowDist {urp.shadowDistance:F0} cascades {urp.shadowCascadeCount} " +
+                   $"msaa {urp.msaaSampleCount}x scale {urp.renderScale:F2}";
+        }
+
+        void ResetAllQuiet()
+        {
+            RestoreStreaming();
+            _streamMode = 0;
+            _shadowMode = 0; ApplyShadowMode();
+            var urp = Urp();
+            if (urp != null)
+            {
+                if (_urpDist0 >= 0f) { urp.shadowDistance = _urpDist0; _shadowDistIdx = -1; }
+                if (_urpCascade0 >= 0) { urp.shadowCascadeCount = _urpCascade0; _cascadeIdx = -1; }
+                if (_urpMsaa0 >= 0) { urp.msaaSampleCount = _urpMsaa0; _msaaIdx = -1; }
+                if (_urpScale0 >= 0f) { urp.renderScale = _urpScale0; _scaleIdx = -1; }
+            }
+        }
+
+        void ResetAll()
+        {
+            ResetAllQuiet();
+            Plugin.Log.LogInfo("[Perf] reset to stock");
+        }
+
+        string BuildText()
+        {
+            string vis = _visible < 0 ? "?" : _visible.ToString();
+            if (_bench)
+                return $"{_fps:F1} fps   {(_fps > 0f ? 1000f / _fps : 0f):F1} ms\n" +
+                       $"SWEEP RUNNING — HOLD STILL, DON'T TOUCH ANYTHING\n{_benchNote}\n" +
+                       $"results go to BepInEx/LogOutput.log when it finishes";
+            return $"{_fps:F1} fps   {(_fps > 0f ? 1000f / _fps : 0f):F1} ms\n" +
+                   $"renderers {_activeCount}/{_all.Length} active, {vis} in frustum ({_regions.Length} regions)\n" +
+                   $"1 shadow casters: {ShadowModeName()}\n" +
+                   $"2/3 {UrpLine()}\n" +
+                   $"4/5 streaming: {StreamModeName()}, radius {Radii[_radiusIdx]:F0} u\n" +
+                   $"Ctrl+B = automatic sweep (park, then hold still ~40 s)\n" +
+                   $"Ctrl+ 1 casters  2 dist  3 cascades  4 stream  5 radius  6 msaa  7 scale  8 reset  0 log  P hide";
+        }
+
+        void OnGUI()
+        {
+            if (!_show) return;
+            if (_style == null)
+                _style = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 20,
+                    alignment = TextAnchor.UpperLeft,
+                    normal = { textColor = Color.white },
+                    richText = false,
+                };
+            var r = new Rect(16f, 16f, 900f, 220f);
+            GUI.color = new Color(0f, 0f, 0f, 0.55f);
+            GUI.DrawTexture(r, Texture2D.whiteTexture);
+            GUI.color = Color.white;
+            GUI.Label(new Rect(r.x + 10f, r.y + 6f, r.width - 20f, r.height - 12f), _text, _style);
+        }
+
+        void OnDestroy()
+        {
+            // Leaving the map mid-sweep kills the coroutine without running its finally
+            // in some Unity versions; physics simulation mode and the beginCameraRendering
+            // subscription in particular are global and would follow the player out.
+            UnlockCamera();
+            CameraOn();
+            RenderOn();
+            DistShow();
+            PhysicsOn();
+            ScriptsOn();
+            AllScriptsOn();
+            RestoreMaxDelta();
+            RestoreFixedStep();
+
+            // Hand the game's own URP asset back exactly as found — it is shared with
+            // every other level, so a harness left half-applied would silently follow
+            // the player into stock courses for the rest of the session.
+            var urp = Urp();
+            if (urp != null)
+            {
+                if (_urpDist0 >= 0f) urp.shadowDistance = _urpDist0;
+                if (_urpCascade0 >= 0) urp.shadowCascadeCount = _urpCascade0;
+                if (_urpMsaa0 >= 0) urp.msaaSampleCount = _urpMsaa0;
+                if (_urpScale0 >= 0f) urp.renderScale = _urpScale0;
+            }
+            if (_inst == this) _inst = null;
         }
     }
 }

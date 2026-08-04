@@ -14,6 +14,15 @@ Sidecar format (one token line per point, invariant-culture floats):
     gravity <f>        <- optional per-map gravity multiplier (Hook feature 8).
                           Independent of scale: >1 = heavier, <1 = lighter,
                           applied at any world scale. Absent = 1.0 (stock).
+    physicshz <f>      <- optional physics tick rate, 10-1000 Hz. Absent = the
+                          game's own 100 Hz. Unity drags the physics clock up to
+                          the frame clock by running FixedUpdate repeatedly, so a
+                          map heavy enough to drop below ~20 fps pins at FIVE full
+                          physics passes per rendered frame and each slow frame
+                          buys more of them. Declaring 50 here escapes that (it is
+                          also Unity's own default rate). Costs collision
+                          precision: a rider at speed is likelier to clip through
+                          thin geometry, so this is for very large maps only.
     platform <p>       <- native-GPU platform: "mac" or "windows". Tells the Hook
                           the bundle's own shaders are native to that backend so
                           it trusts them (no shader remap). WITHOUT it every
@@ -57,7 +66,7 @@ Sidecar format (one token line per point, invariant-culture floats):
     <x> <z> <0|1>      <- world XZ position + windup flag
 
 Usage:
-    python3 gen_aipaths.py [--scale <f>] [--gravity <f>] \
+    python3 gen_aipaths.py [--scale <f>] [--gravity <f>] [--physics-hz <f>] \
         [--platform <mac|windows|none>] [--source <slug>] \
         [--spawnsnap <both|raise|off>] [--mapversion <v>] \
         [--group <label>] [--order <n>] \
@@ -145,6 +154,7 @@ def main(argv):
     args = argv[1:]
     scale = None
     gravity = None
+    physics_hz = None
     platform = None
     source = None
     spawnsnap = None
@@ -174,6 +184,19 @@ def main(argv):
                 return 2
             if gravity <= 0:
                 print("--gravity must be > 0, got %r" % val, file=sys.stderr)
+                return 2
+        elif flag == "--physics-hz":
+            try:
+                physics_hz = float(val)
+            except ValueError:
+                print("--physics-hz value must be a float, got %r" % val,
+                      file=sys.stderr)
+                return 2
+            # Same bounds the Hook enforces on read, so a typo fails here at
+            # build time rather than being silently ignored at load time.
+            if not (10.0 <= physics_hz <= 1000.0):
+                print("--physics-hz must be 10-1000, got %r" % val,
+                      file=sys.stderr)
                 return 2
         elif flag == "--platform":
             if val not in ("mac", "windows", "none"):
@@ -248,6 +271,8 @@ def main(argv):
                 f.write("scale %r\n" % scale)
             if gravity is not None:
                 f.write("gravity %r\n" % gravity)
+            if physics_hz is not None:
+                f.write("physicshz %r\n" % physics_hz)
             if plat is not None and plat != "none":
                 f.write("platform %s\n" % plat)
             if source is not None:
