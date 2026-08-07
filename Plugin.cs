@@ -52,6 +52,16 @@ namespace TrickyMaddnessLevelHook
         internal static ConfigEntry<float> startLaunchSpeedScale;
         internal static ConfigEntry<bool> fixRailProjection;
         internal static ConfigEntry<bool> mapPhysicsRate;
+        internal static ConfigEntry<bool> respawnLoopGuard;
+        internal static ConfigEntry<bool> respawnLoopGuardPlayer;
+        internal static ConfigEntry<int> respawnLoopAdvance;
+
+        // The race-line respawn markers built in BuildScene, in course order, so the
+        // loop guard can escalate a wedged rider FORWARD by index. The game itself
+        // only ever picks the nearest marker, which is exactly why it can't break a
+        // loop: the nearest marker to a rider stuck in an OOB volume is the one that
+        // keeps putting them back in it.
+        internal static readonly List<Transform> RaceLineRespawns = new List<Transform>();
         // Fine-tune multiplier on the skydome's auto-fit (feature 13). SkydomeFollow
         // sizes the dome to ~95% of the camera far-clip plane each frame so it envelops
         // the whole visible course; this scales that target (1 = the fit). Tunable, no
@@ -288,6 +298,32 @@ namespace TrickyMaddnessLevelHook
                 "(the rail-end snap-back loop; CPU riders never escape it). " +
                 "On by default. Set false to restore the stock behaviour — this " +
                 "is the one Hook feature that changes built-in levels too.");
+            respawnLoopGuard = Config.Bind("Gameplay", "RespawnLoopGuard", true,
+                "Break the out-of-bounds respawn loop. The GAME's own " +
+                "Snowboarder.OnControllerColliderHit calls Respawn() the instant it " +
+                "touches anything on the OOB layer, with no cooldown and no " +
+                "CanRespawn() check — and Respawn puts the rider on the NEAREST " +
+                "respawn marker, which for a rider stuck inside an OOB volume is the " +
+                "marker that drops them straight back into it. Measured on the SSX3 " +
+                "whole-mountain chain: one rider respawning 2817 times in 114 seconds, " +
+                "once per rendered frame, which is what the map's frame rate was " +
+                "actually being spent on. This detects a rider respawning repeatedly " +
+                "without getting anywhere and moves them FORWARD along the race line " +
+                "until they are clear. Only acts on custom maps that have race-line " +
+                "respawn markers; built-in levels are untouched.");
+            respawnLoopGuardPlayer = Config.Bind("Gameplay", "RespawnLoopGuardPlayer", false,
+                "Apply RespawnLoopGuard to the human rider too. Off by default: " +
+                "skipping a stuck CPU rider forward costs nothing, but doing it to the " +
+                "player moves them down the course through terrain they did not ride, " +
+                "which is a gift in a race. Turn it on if you would rather be nudged " +
+                "past a bad spot than sit in a respawn loop.");
+            respawnLoopAdvance = Config.Bind("Gameplay", "RespawnLoopAdvance", 3,
+                "How many race-line respawn markers forward the loop guard moves a " +
+                "wedged rider each time it fires. Markers sit roughly 25 m apart, so " +
+                "3 is about 75 m down-course — far enough to clear a reset volume, " +
+                "short enough that a rider who was only unlucky loses little. The " +
+                "guard re-fires if that landing is also bad, so this compounds rather " +
+                "than having to be right first time.");
             mapPhysicsRate = Config.Bind("Gameplay", "MapPhysicsRate", true,
                 "Honour a custom map's 'physicshz <n>' sidecar header, which lets a " +
                 "very large map ask to run physics at a lower tick rate than the " +
@@ -1382,6 +1418,10 @@ namespace TrickyMaddnessLevelHook
             {
                 var respawnParent = new GameObject("Respawn Points (race line)");
                 respawnParent.transform.parent = levelManager.transform;
+                // Static, so it outlives the scene it belongs to: a second map would
+                // otherwise escalate riders onto the previous map's markers.
+                Plugin.RaceLineRespawns.Clear();
+                Snowboarder_Respawn.ResetLoopState();
                 var rpts = TempRaceLine.m_points;
                 bool seat = Plugin.SpawnSnapMode != Plugin.SpawnSnap.Off;
                 int made = 0, moved = 0, dropped = 0;
@@ -1404,6 +1444,7 @@ namespace TrickyMaddnessLevelHook
                     fwd.y = 0f;
                     if (fwd.sqrMagnitude > 1e-6f)
                         go.transform.rotation = Quaternion.LookRotation(fwd.normalized, Vector3.up);
+                    Plugin.RaceLineRespawns.Add(go.transform);
                     made++;
                 }
                 // Every point airborne means the cast never found the terrain at all
@@ -1417,6 +1458,9 @@ namespace TrickyMaddnessLevelHook
                 else
                 {
                     UnityEngine.Object.Destroy(respawnParent);
+                    // The markers we just recorded are about to be destroyed; leaving
+                    // them listed would have the loop guard escalate onto nulls.
+                    Plugin.RaceLineRespawns.Clear();
                     Log.LogWarning($"[Respawn] all {rpts.Count} race-line points are airborne — keeping maker branch-head markers");
                 }
             }
@@ -2807,6 +2851,48 @@ namespace TrickyMaddnessLevelHook
         }
     }
 
+    // The game's OOB contact handler, and the reason this map's frame rate collapses
+    // at one spot. Snowboarder.OnControllerColliderHit reads (IL-verified):
+    //
+    //     if (state == Dead) return;
+    //     if (hit.collider.gameObject.layer == LayerMask.NameToLayer("OOB")) {
+    //         Respawn(); OnOOB?.Invoke(); return;
+    //     }
+    //
+    // Respawn() sets state = Riding, so that early-out can never engage on the rider
+    // it just moved — and Respawn picks the NEAREST respawn marker, which for a rider
+    // standing inside an OOB volume is the marker that puts them back inside it. There
+    // is no cooldown, so the whole cycle re-runs on the next contact, i.e. every
+    // rendered frame. Measured: 2817 respawns in 114 s for a single rider.
+    //
+    // SSX3 reset zones are what they hit: SSXImporter.EmitResetZone emits every
+    // Mdl_Resetzone* instance as a SOLID (isTrigger = false) layer-10 BoxCollider,
+    // 1234 of them on the chain.
+    //
+    // This prefix records only — it names the collider so the misplaced volumes can be
+    // fixed in the map data, and flags the respawn about to happen as OOB-triggered so
+    // the loop guard below can tell it apart from a crash.
+    [HarmonyPatch(typeof(Snowboarder), "OnControllerColliderHit")]
+    public class Snowboarder_OnControllerColliderHit
+    {
+        internal const int OobLayer = 10;
+
+        // Set immediately before the game's own Respawn() call on the OOB branch and
+        // consumed by Snowboarder_Respawn's prefix on the same call stack, so no
+        // frame-boundary staleness is possible.
+        internal static string PendingOobCollider;
+
+        [HarmonyPrefix]
+        public static void Prefix(ControllerColliderHit hit)
+        {
+            if (hit == null) return;
+            var col = hit.collider;
+            if (col == null || col.gameObject.layer != OobLayer) return;
+            PendingOobCollider = col.gameObject.name;
+            PerfHarness.NoteOobHit(PendingOobCollider, col.transform.position);
+        }
+    }
+
     // On custom maps AISnowboarder.GetSteeringInput calls Snowboarder.Respawn()
     // directly after 1.5s of pathlessness, bypassing CanRespawn() — during the
     // countdown that launches AI off the start line. Block Respawn while the
@@ -2821,6 +2907,14 @@ namespace TrickyMaddnessLevelHook
         [HarmonyPrefix]
         public static bool Prefix(Snowboarder __instance)
         {
+            // Snapshot BEFORE the game moves them — Respawn resets state to Riding and
+            // deathTimer to 0, so a postfix can no longer tell why it was called.
+            if (__instance != null)
+            {
+                object st = Traverse.Create(__instance).Field("state").GetValue();
+                PerfHarness.NotePreRespawn(__instance.transform.position,
+                    st != null && Convert.ToInt32(st) == 4);   // 4 = State.Dead
+            }
             if (string.IsNullOrEmpty(Plugin.LoadedAssetBundle)) return true;
             string custom = Plugin.CustomSceneName();
             if (custom == null || SceneManager.GetActiveScene().name != custom) return true;
@@ -2832,6 +2926,106 @@ namespace TrickyMaddnessLevelHook
                 Plugin.Log.LogDebug($"[AIPaths] blocked pre-start Respawn on custom scene '{custom}' (state=Starting)");
             }
             return false;
+        }
+
+        // Ground truth for the perf harness's respawn report: the game telling us it
+        // respawned somebody, rather than the harness inferring it from a position
+        // jump big enough to clear a guessed threshold. Diagnostic only — it reads
+        // position and records it, and changes nothing.
+        [HarmonyPostfix]
+        public static void Postfix(Snowboarder __instance, bool __runOriginal)
+        {
+            // Harmony runs postfixes even when a prefix skipped the original, so a
+            // respawn WE blocked above must not be recorded as one that happened.
+            if (!__runOriginal || __instance == null) return;
+            bool wasOob = Snowboarder_OnControllerColliderHit.PendingOobCollider != null;
+            Snowboarder_OnControllerColliderHit.PendingOobCollider = null;
+            PerfHarness.NoteRespawn(__instance.transform, __instance.transform.position);
+            if (wasOob) LoopGuard(__instance);
+        }
+
+        // ---- OOB respawn loop guard ------------------------------------------
+        // Escalate a rider FORWARD along the race line when respawning has stopped
+        // making progress. The game can't break the loop itself because it always
+        // picks the nearest marker, and the nearest marker is what put them there.
+        class Loop { public float lastT; public int hits; }
+        static readonly Dictionary<int, Loop> _loops = new Dictionary<int, Loop>();
+        static string _guardLoggedScene;
+
+        // Consecutive OOB respawns within this window count as one loop. The real
+        // loop fires every frame, so anything above a couple of frames is generous;
+        // a genuine crash-respawn can't repeat this fast because CanRespawn() needs
+        // deathTimer > 1.5.
+        const float LoopWindow = 1.0f;
+        const int LoopTrigger = 3;
+
+        public static void ResetLoopState() { _loops.Clear(); _guardLoggedScene = null; }
+
+        static void LoopGuard(Snowboarder sb)
+        {
+            if (!Plugin.respawnLoopGuard.Value) return;
+            // Custom maps only, and only when BuildScene actually produced race-line
+            // markers — with no ordered list there is no "forward" to escalate to, so
+            // the guard fails to stock rather than guessing at a destination.
+            if (string.IsNullOrEmpty(Plugin.LoadedAssetBundle)) return;
+            var marks = Plugin.RaceLineRespawns;
+            if (marks.Count < 2) return;
+
+            bool isAI = Traverse.Create(sb).Field("snowboardController").GetValue() is AISnowboarder;
+            if (!isAI && !Plugin.respawnLoopGuardPlayer.Value) return;
+
+            int id = sb.GetInstanceID();
+            Loop st;
+            if (!_loops.TryGetValue(id, out st)) { st = new Loop(); _loops[id] = st; }
+
+            float now = Time.unscaledTime;
+            st.hits = (now - st.lastT <= LoopWindow) ? st.hits + 1 : 1;
+            st.lastT = now;
+            if (st.hits < LoopTrigger) return;
+            st.hits = 0;
+
+            // Nearest marker to where the game just dropped them, then step forward.
+            // Escalating from the CURRENT nearest (rather than a remembered index)
+            // is what makes repeated firings compound: each one starts from wherever
+            // the last one landed.
+            Vector3 p = sb.transform.position;
+            int near = -1;
+            float best = float.MaxValue;
+            for (int i = 0; i < marks.Count; i++)
+            {
+                if (marks[i] == null) continue;
+                float d = (marks[i].position - p).sqrMagnitude;
+                if (d < best) { best = d; near = i; }
+            }
+            if (near < 0) return;
+
+            int adv = Mathf.Max(1, Plugin.respawnLoopAdvance.Value);
+            int dest = Mathf.Min(near + adv, marks.Count - 1);
+            // Already at the last marker: the finish is right there and shunting them
+            // further is meaningless. Leave them to the game.
+            if (dest == near) return;
+            var target = marks[dest];
+            if (target == null) return;
+
+            // A CharacterController caches its own position and will drag the rider
+            // back to it, so a bare transform write does not stick — toggle it around
+            // the move.
+            var cc = sb.GetComponent<CharacterController>();
+            if (cc != null) cc.enabled = false;
+            sb.transform.position = target.position;
+            sb.transform.rotation = target.rotation;
+            if (cc != null) cc.enabled = true;
+
+            string scene = Plugin.CustomSceneName();
+            if (_guardLoggedScene != scene)
+            {
+                _guardLoggedScene = scene;
+                Plugin.Log.LogInfo($"[Respawn] loop guard active on '{scene}' — "
+                    + $"escalating wedged riders {adv} marker(s) down-course "
+                    + $"(first: {sb.name} at {p} -> marker {dest} of {marks.Count})");
+            }
+            Plugin.Log.LogDebug($"[Respawn] loop guard moved {sb.name} "
+                + $"marker {near} -> {dest} (OOB respawn x{LoopTrigger})");
         }
     }
 
@@ -4523,6 +4717,11 @@ namespace TrickyMaddnessLevelHook
         public static void Spawn(Scene scene)
         {
             if (_inst != null) return;
+            // Static, so it outlives the harness it belongs to: a second map would
+            // otherwise open with the previous map's respawns already in the report.
+            GameRespawns.Clear();
+            OobHits.Clear();
+            OobWhere.Clear();
             var go = new GameObject("HookPerfHarness");
             // Deliberately NOT DontDestroyOnLoad: dying with the scene is what
             // guarantees OnDestroy runs and hands the URP asset back unmodified.
@@ -4631,6 +4830,8 @@ namespace TrickyMaddnessLevelHook
             Plugin.Log.LogInfo("[Perf] hotkeys: Ctrl+B AUTOMATIC SWEEP (park, press, the camera locks itself) | " +
                                "Ctrl+T TREND (3 min, changes nothing, RIDE while it runs; Ctrl+T again stops) | " +
                                "Ctrl+R CPU riders off/on (safe mid-trend) | " +
+                               "Ctrl+Y CPU rider ragdoll/IK off/on (they keep racing) | " +
+                               "Ctrl+U respawn hot-spot report | " +
                                "Ctrl+P overlay | Ctrl+1 shadow casters | Ctrl+2 shadow distance | " +
                                "Ctrl+3 cascades | Ctrl+4 region streaming | Ctrl+5 stream radius | " +
                                "Ctrl+6 MSAA | Ctrl+7 render scale | Ctrl+8 reset all | " +
@@ -4666,6 +4867,7 @@ namespace TrickyMaddnessLevelHook
         void Update()
         {
             HandleKeys();
+            TrackRespawns();
 
             _acc += Time.unscaledDeltaTime;
             _frames++;
@@ -5231,6 +5433,30 @@ namespace TrickyMaddnessLevelHook
         // the noise floor.
         GameObject[] _ridersOff;   // non-null while the CPU riders are deactivated
 
+        // Every rider, plus which index is the human. Whoever the camera is
+        // following is the human; the chase cam trails by metres while the field
+        // spreads over kilometres, so nearest-to-camera is unambiguous in practice.
+        List<Transform> FindRiderTransforms(out int human)
+        {
+            var all = new List<Transform>();
+            foreach (var mb in FindObjectsOfType<MonoBehaviour>())
+            {
+                if (mb == null) continue;
+                if (mb.GetType().Name != "Snowboarder") continue;
+                all.Add(mb.transform);
+            }
+            human = -1;
+            var cam = Camera.main;
+            Vector3 eye = cam != null ? cam.transform.position : Vector3.zero;
+            float bestD = float.MaxValue;
+            for (int i = 0; i < all.Count; i++)
+            {
+                float d = (all[i].position - eye).sqrMagnitude;
+                if (d < bestD) { bestD = d; human = i; }
+            }
+            return all;
+        }
+
         void ToggleRiders()
         {
             if (_ridersOff != null)
@@ -5242,26 +5468,11 @@ namespace TrickyMaddnessLevelHook
                 return;
             }
 
-            var all = new List<Transform>();
-            foreach (var mb in FindObjectsOfType<MonoBehaviour>())
-            {
-                if (mb == null) continue;
-                if (mb.GetType().Name != "Snowboarder") continue;
-                all.Add(mb.transform);
-            }
+            int human;
+            var all = FindRiderTransforms(out human);
             if (all.Count == 0) { Plugin.Log.LogInfo("[Perf] riders: none found"); return; }
-
-            // Whoever the camera is following is the human; never deactivate them.
-            // The chase cam trails by metres and the field spreads over kilometres,
-            // so nearest-to-camera is unambiguous in practice.
             var cam = Camera.main;
             Vector3 eye = cam != null ? cam.transform.position : Vector3.zero;
-            int human = 0; float bestD = float.MaxValue;
-            for (int i = 0; i < all.Count; i++)
-            {
-                float d = (all[i].position - eye).sqrMagnitude;
-                if (d < bestD) { bestD = d; human = i; }
-            }
 
             // Where each rider is, logged before they go away — a clutch of riders
             // sitting on one spot is the shape of a respawn loop, and that is worth
@@ -5279,6 +5490,377 @@ namespace TrickyMaddnessLevelHook
             _ridersOff = off.ToArray();
             Plugin.Log.LogInfo($"[Perf] riders: {_ridersOff.Length} CPU rider(s) DEACTIVATED — "
                 + "Ctrl+R again to restore");
+        }
+
+        // ---- respawn tracking ---------------------------------------------------
+        // Where riders respawn, and whether the loops cluster. A respawn is detected
+        // as a POSITION JUMP — a discontinuity far larger than the rider could have
+        // travelled in one frame — so this needs to know nothing about the game's
+        // respawn code and cannot be broken by an update renaming it.
+        //
+        // This exists to answer one question before any fix is written: if the loops
+        // pile up at two or three places, they are bad respawn nodes in OUR merged
+        // chain data and the fix is the data. If they are scattered, it is the
+        // game's respawn logic and the fix is escalation at runtime.
+        //
+        // NOTE this is also what corrects the stall probe's reading. `stall` measures
+        // DISPLACEMENT between samples five seconds apart, not distance travelled, so
+        // a rider looping back to the same spot is indistinguishable from one frozen
+        // solid. It never said "frozen" — that was a misreading of what it measures.
+        struct Respawn { public int rider; public Vector3 to; public float t; }
+
+        Transform[] _watch;
+        Vector3[] _watchPrev;
+        float[] _watchStep;
+        float _watchRetry;
+        bool _watchLocked;
+        readonly List<Respawn> _respawns = new List<Respawn>();
+
+        // GAME-TRUTH respawns, recorded by Snowboarder_Respawn's postfix. The
+        // position-jump detector above has to guess a threshold and so can only
+        // ever UNDER-count (a rider who crashes next to their own respawn marker
+        // moves too little to trip it); the game telling us it respawned somebody
+        // cannot be wrong. Kept side by side on purpose — the gap between the two
+        // counts is the calibration the jump detector never had.
+        // `from` is where the rider was STUCK, which is the location a fix has to act
+        // on; `to` is only where the game put them. `crashed` distinguishes the two
+        // routes into Respawn, which need completely different fixes:
+        //   crashed=true  -> Snowboarder.FixedUpdate, gated on CanRespawn() (state
+        //                    Dead + deathTimer > 1.5). The rider wrecked on geometry.
+        //   crashed=false -> AISnowboarder.GetSteeringInput calling Respawn() DIRECTLY,
+        //                    bypassing CanRespawn(), after 1.5 s of finding no AI path.
+        //                    That path re-arms immediately, so if the respawn lands
+        //                    somewhere equally pathless it never terminates.
+        public struct GameRespawn
+        { public Transform who; public Vector3 from, to; public float t; public bool crashed; }
+        public static readonly List<GameRespawn> GameRespawns = new List<GameRespawn>();
+
+        // Which OOB collider each respawn loop is actually firing on. The whole point
+        // is to name the objects: the level data can then be fixed at source instead
+        // of the Hook papering over a misplaced volume forever.
+        public static readonly Dictionary<string, int> OobHits = new Dictionary<string, int>();
+        public static readonly Dictionary<string, Vector3> OobWhere = new Dictionary<string, Vector3>();
+
+        public static void NoteOobHit(string name, Vector3 at)
+        {
+            if (_inst == null || name == null) return;
+            int n;
+            OobHits.TryGetValue(name, out n);
+            // Bounded: a level with pathological naming must not grow this without end.
+            if (n == 0 && OobHits.Count >= 512) return;
+            OobHits[name] = n + 1;
+            OobWhere[name] = at;
+        }
+
+        static Vector3 _preFrom;
+        static bool _preCrashed;
+
+        public static void NotePreRespawn(Vector3 from, bool crashed)
+        { _preFrom = from; _preCrashed = crashed; }
+
+        public static void NoteRespawn(Transform who, Vector3 to)
+        {
+            // Nothing to report to when the harness is off; don't accumulate for a
+            // reader that will never run.
+            if (_inst == null) return;
+            // Bounded: a pathological loop must not turn a diagnostic into a leak.
+            if (GameRespawns.Count < 8192)
+                GameRespawns.Add(new GameRespawn
+                {
+                    who = who, from = _preFrom, to = to,
+                    t = Time.unscaledTime, crashed = _preCrashed,
+                });
+        }
+
+        // ---- stuck / looping discrimination -------------------------------------
+        // The jump detector answers "where do they respawn". It cannot answer the
+        // question the first report raised: riders visibly stop racing far more
+        // often than they teleport, so most of them are not respawning at all.
+        //
+        // Over a fixed window, compare each rider's PATH LENGTH against their NET
+        // DISPLACEMENT. Healthy: both large. Wedged against geometry: both ~zero.
+        // Looping (crash -> recover -> crash the same rock): path large, net ~zero.
+        // Those three are indistinguishable to any single-position probe, which is
+        // exactly why the stall column read them all as "stalled".
+        const float StuckWindow = 10f;      // s
+        const float StuckNet = 50f;         // u of net travel below which a window is "not racing"
+        const float LoopPath = 150f;        // u of path length above which "not racing" means looping
+
+        struct Stuck { public int rider; public Vector3 at; public float t; public bool looping; }
+
+        Vector3[] _winStart;
+        float[] _winPath;
+        float _winClock;
+        readonly List<Stuck> _stuck = new List<Stuck>();
+
+        void TrackRespawns()
+        {
+            if (!_watchLocked)
+            {
+                // Riders are spawned after the scene builds, so retry until they
+                // exist — then LOCK and never scan again.
+                //
+                // ⚠️ This scan is FindObjectsOfType<MonoBehaviour>() over a 59k-object
+                // scene plus a GetType().Name string allocation per behaviour. It first
+                // shipped on a fixed 5 s timer, which put a periodic hitch and steady GC
+                // pressure into every ride and read as "the map got slower" — the
+                // instrument degrading the thing it was measuring. It may run while
+                // resolving, and after that only if a rider is destroyed.
+                _watchRetry -= Time.unscaledDeltaTime;
+                if (_watchRetry > 0f) return;
+                _watchRetry = 2f;
+                int human;
+                var all = FindRiderTransforms(out human);
+                if (all.Count == 0) return;
+                _watch = all.ToArray();
+                _watchPrev = new Vector3[_watch.Length];
+                _watchStep = new float[_watch.Length];
+                _winStart = new Vector3[_watch.Length];
+                _winPath = new float[_watch.Length];
+                for (int i = 0; i < _watch.Length; i++)
+                {
+                    _watchPrev[i] = _watch[i] != null ? _watch[i].position : Vector3.zero;
+                    _winStart[i] = _watchPrev[i];
+                }
+                _winClock = 0f;
+                _watchLocked = true;
+                return;     // no previous frame to compare against yet
+            }
+
+            bool endWindow = (_winClock += Time.unscaledDeltaTime) >= StuckWindow;
+
+            for (int i = 0; i < _watch.Length; i++)
+            {
+                var tr = _watch[i];
+                // A destroyed rider is the one thing that justifies re-scanning.
+                if (tr == null) { _watchLocked = false; return; }
+                Vector3 p = tr.position;
+                float step = (p - _watchPrev[i]).magnitude;
+                // A teleport is a jump both absolutely large AND far bigger than the
+                // rider's own recent per-frame step, so a genuinely fast rider on a
+                // slow frame does not read as a respawn. 40 units and 5x are guesses
+                // sized off the ~60 u/s descent speed seen in the trend runs — not
+                // calibrated against a known respawn, which is why NoteRespawn now
+                // records the game's own respawns alongside this.
+                bool jump = step > 40f && step > _watchStep[i] * 5f && _watchStep[i] > 0f;
+                if (jump)
+                {
+                    _respawns.Add(new Respawn { rider = i, to = p, t = Time.unscaledTime });
+                    // A teleport is not travel: counting it as path length would make
+                    // a respawning rider look like a healthy one.
+                    _winStart[i] = p;
+                    _winPath[i] = 0f;
+                }
+                else _winPath[i] += step;
+
+                if (endWindow)
+                {
+                    float net = (p - _winStart[i]).magnitude;
+                    if (net < StuckNet)
+                        _stuck.Add(new Stuck
+                        {
+                            rider = i, at = p, t = Time.unscaledTime,
+                            looping = _winPath[i] > LoopPath,
+                        });
+                    _winStart[i] = p;
+                    _winPath[i] = 0f;
+                }
+
+                _watchStep[i] = step;
+                _watchPrev[i] = p;
+            }
+
+            if (endWindow) _winClock = 0f;
+        }
+
+        // Cluster events by proximity and report the hot spots. Greedy single-pass
+        // clustering: good enough to answer "two spots or twenty", which is the only
+        // question being asked of it.
+        void ReportClusters(string label, List<Vector3> pos, List<int> rider, List<float> time)
+        {
+            if (pos.Count == 0)
+            {
+                Plugin.Log.LogInfo($"[Perf] {label}: none");
+                return;
+            }
+            const float R = 200f;
+            var centres = new List<Vector3>();
+            var counts = new List<int>();
+            var who = new List<HashSet<int>>();
+            var first = new List<float>();
+            var last = new List<float>();
+            for (int e = 0; e < pos.Count; e++)
+            {
+                int hit = -1;
+                for (int c = 0; c < centres.Count; c++)
+                    if ((centres[c] - pos[e]).sqrMagnitude < R * R) { hit = c; break; }
+                if (hit < 0)
+                {
+                    centres.Add(pos[e]); counts.Add(1);
+                    who.Add(new HashSet<int> { rider[e] });
+                    first.Add(time[e]); last.Add(time[e]);
+                }
+                else
+                {
+                    counts[hit]++; who[hit].Add(rider[e]); last[hit] = time[e];
+                }
+            }
+            var idx = new List<int>();
+            for (int i = 0; i < centres.Count; i++) idx.Add(i);
+            idx.Sort((a, b) => counts[b].CompareTo(counts[a]));
+
+            Plugin.Log.LogInfo($"[Perf] {label}: {pos.Count} event(s) in "
+                + $"{centres.Count} cluster(s) (radius {R:F0} u), worst first:");
+            foreach (int c in idx)
+            {
+                var ids = new List<int>(who[c]); ids.Sort();
+                var names = new List<string>();
+                foreach (int id in ids) names.Add(id < 0 ? "?" : id.ToString());
+                Plugin.Log.LogInfo($"[Perf]   {counts[c],4} x near ({centres[c].x,8:F0},"
+                    + $"{centres[c].y,7:F0},{centres[c].z,8:F0})  rider(s) {string.Join(",", names.ToArray())}"
+                    + $"  over {last[c] - first[c],5:F0}s");
+            }
+        }
+
+        int WatchIndex(Transform tr)
+        {
+            if (_watch == null || tr == null) return -1;
+            for (int i = 0; i < _watch.Length; i++)
+                if (ReferenceEquals(_watch[i], tr)) return i;
+            return -1;
+        }
+
+        void DumpRespawns()
+        {
+            // Three reports, deliberately separate, because the first ride showed they
+            // do NOT measure the same thing: 4 position jumps against riders that
+            // visibly stop racing for most of a run. Whichever of these is large is
+            // the one the fix has to address.
+            var pos = new List<Vector3>();
+            var rid = new List<int>();
+            var tim = new List<float>();
+
+            // Split by route, because they are different bugs. Reported by the FROM
+            // position: where the rider was stuck is what a fix has to act on.
+            int crashed = 0;
+            foreach (var g in GameRespawns) if (g.crashed) crashed++;
+
+            foreach (var g in GameRespawns)
+            {
+                if (!g.crashed) continue;
+                pos.Add(g.from); rid.Add(WatchIndex(g.who)); tim.Add(g.t);
+            }
+            ReportClusters($"CRASHED respawns ({crashed}) — wrecked on geometry, from", pos, rid, tim);
+
+            pos.Clear(); rid.Clear(); tim.Clear();
+            foreach (var g in GameRespawns)
+            {
+                if (g.crashed) continue;
+                pos.Add(g.from); rid.Add(WatchIndex(g.who)); tim.Add(g.t);
+            }
+            // NOT "pathless". The first split labelled every non-Dead respawn as the
+            // AI's pathless route; that was an inference and it was wrong. Both the
+            // OOB-contact route and the pathless route leave state != Dead, and the
+            // pathless one is hard-gated at one respawn per 1.5 s per rider — so it
+            // cannot account for 2817 events in 114 s from a single rider. The OOB
+            // tally below is what separates them, by measurement rather than by
+            // deduction from the state field.
+            ReportClusters($"NON-CRASH respawns ({GameRespawns.Count - crashed}) — OOB "
+                + "contact or AI pathless, from", pos, rid, tim);
+
+            if (OobHits.Count > 0)
+            {
+                var names = new List<string>(OobHits.Keys);
+                names.Sort((a, b) => OobHits[b].CompareTo(OobHits[a]));
+                int shown = Math.Min(names.Count, 15);
+                Plugin.Log.LogInfo($"[Perf] OOB collider contacts: {OobHits.Count} distinct "
+                    + $"collider(s), worst {shown}:");
+                for (int i = 0; i < shown; i++)
+                {
+                    Vector3 w = OobWhere[names[i]];
+                    Plugin.Log.LogInfo($"[Perf]   {OobHits[names[i]],7} x  {names[i]}"
+                        + $"  at ({w.x:F0}, {w.y:F0}, {w.z:F0})");
+                }
+            }
+            else Plugin.Log.LogInfo("[Perf] OOB collider contacts: none");
+
+            pos.Clear(); rid.Clear(); tim.Clear();
+            foreach (var g in GameRespawns)
+            { pos.Add(g.to); rid.Add(WatchIndex(g.who)); tim.Add(g.t); }
+            ReportClusters("respawn DESTINATIONS (both routes)", pos, rid, tim);
+
+            pos.Clear(); rid.Clear(); tim.Clear();
+            foreach (var r in _respawns)
+            { pos.Add(r.to); rid.Add(r.rider); tim.Add(r.t); }
+            ReportClusters("respawns (position-jump detector)", pos, rid, tim);
+
+            pos.Clear(); rid.Clear(); tim.Clear();
+            int loops = 0;
+            foreach (var s in _stuck)
+            {
+                if (s.looping) loops++;
+                pos.Add(s.at); rid.Add(s.rider); tim.Add(s.t);
+            }
+            ReportClusters($"not-racing {StuckWindow:F0}s window(s) "
+                + $"[{loops} looping / {_stuck.Count - loops} wedged]", pos, rid, tim);
+        }
+
+        // Per-rider machinery that is NOT the racing logic: ragdoll, IK, and the
+        // rig that drives them. Disabling these leaves Snowboarder / Character /
+        // VOCharacter running, so the CPU riders keep descending and keep racing —
+        // they just stop being animated properly.
+        //
+        // This is the discriminator between the two fixes worth writing. If most of
+        // Ctrl+R's 96% lives here, a distance-based rider LOD buys it back with all
+        // eight riders still in the race. If it does not, the cost is physics scene
+        // queries and the fix has to shrink the 27k-collider scene instead. The two
+        // lead to completely different work, which is why this is worth one ride.
+        static readonly string[] RiderDressing = {
+            "RA2BoneCollisionHandler", "RagdollAnimator2", "TwoBoneIKConstraint",
+            "RigBuilder", "Rig",
+        };
+
+        Behaviour[] _dressingOff;   // non-null while rider dressing is disabled
+
+        void ToggleRiderDressing()
+        {
+            if (_dressingOff != null)
+            {
+                int n = 0;
+                foreach (var b in _dressingOff) if (b != null) { b.enabled = true; n++; }
+                Plugin.Log.LogInfo($"[Perf] riders: {n} dressing component(s) RE-ENABLED — "
+                    + "any coroutine they had started is NOT resumed, so relaunch "
+                    + "before judging how the riders look");
+                _dressingOff = null;
+                return;
+            }
+
+            int human;
+            var all = FindRiderTransforms(out human);
+            if (all.Count == 0) { Plugin.Log.LogInfo("[Perf] riders: none found"); return; }
+
+            var off = new List<Behaviour>();
+            var counts = new Dictionary<string, int>();
+            for (int i = 0; i < all.Count; i++)
+            {
+                if (i == human) continue;   // leave the player's own rider alone
+                foreach (var b in all[i].GetComponentsInChildren<Behaviour>(true))
+                {
+                    if (b == null || !b.enabled) continue;
+                    string tn = b.GetType().Name;
+                    if (Array.IndexOf(RiderDressing, tn) < 0) continue;
+                    b.enabled = false;
+                    off.Add(b);
+                    int c; counts.TryGetValue(tn, out c);
+                    counts[tn] = c + 1;
+                }
+            }
+            _dressingOff = off.ToArray();
+            var parts = new List<string>();
+            foreach (var kv in counts) parts.Add($"{kv.Value}x {kv.Key}");
+            Plugin.Log.LogInfo($"[Perf] riders: dressing DISABLED on {all.Count - 1} CPU rider(s) — "
+                + $"{_dressingOff.Length} component(s) [{string.Join(", ", parts.ToArray())}] — "
+                + "they keep racing; Ctrl+Y again to restore");
         }
 
         // Unity objects and particles live in NATIVE memory, so neither shows up in
@@ -5322,7 +5904,7 @@ namespace TrickyMaddnessLevelHook
                                $"~{minutes:F0} min) — NOTHING is changed; ride normally. " +
                                "Ctrl+T again to stop early. ===");
             Plugin.Log.LogInfo("[Perf]   t(s)     ms   worst  fx/f  gc    heapMB  trailV    objs  " +
-                               "psys/live  stall   pos(x,y,z)                 dist   region");
+                               "psys/live  stall  resp   pos(x,y,z)                 dist   region");
 
             float t0 = Time.unscaledTime;
             try
@@ -5332,6 +5914,7 @@ namespace TrickyMaddnessLevelHook
                     int gc0 = GC.CollectionCount(0);
                     long mem0 = GC.GetTotalMemory(false);
                     int fixed0 = _fixedCalls;
+                    int resp0 = _respawns.Count;
                     float acc = 0f, worst = 0f; int n = 0;
                     while (acc < 2f && _trendRun)
                     {
@@ -5361,7 +5944,7 @@ namespace TrickyMaddnessLevelHook
                         + $"{fpf,4:F1}  {GC.CollectionCount(0) - gc0,2}  "
                         + $"{(GC.GetTotalMemory(false) - mem0) / 1048576f,7:F1}  "
                         + $"{TrailVerts(),6}  {ObjectCount(),6}  {ParticleCount(),9}  "
-                        + $"{RiderStalls(20f),5}   "
+                        + $"{RiderStalls(20f),5}  {_respawns.Count - resp0,4}   "
                         + $"({p.x,8:F0},{p.y,7:F0},{p.z,8:F0})  {p.magnitude,7:F0}  {NearestRegion(p)}");
 
                     // Idle out the rest of the cadence so the sample is a snapshot of
@@ -5377,7 +5960,15 @@ namespace TrickyMaddnessLevelHook
                 _trailMeshes = null;
                 _riders = null;
                 _riderPrev = null;
-                Plugin.Log.LogInfo("[Perf] === TREND END (nothing was changed, nothing to restore) ===");
+                // Trend itself changes nothing, but Ctrl+R/Ctrl+Y are allowed during a
+                // run and outlive it. Saying "nothing to restore" while an ablation is
+                // still live is how a forgotten toggle rode out into the menu.
+                string live = (_ridersOff != null ? " CPU RIDERS ARE STILL OFF (Ctrl+R)." : "")
+                    + (_dressingOff != null ? " RIDER RAGDOLL/IK IS STILL OFF (Ctrl+Y)." : "");
+                Plugin.Log.LogInfo(live.Length > 0
+                    ? "[Perf] === TREND END —" + live + " Leaving the map restores it. ==="
+                    : "[Perf] === TREND END (nothing was changed, nothing to restore) ===");
+                DumpRespawns();   // free, and the whole reason the run was ridden
             }
         }
 
@@ -5601,6 +6192,8 @@ namespace TrickyMaddnessLevelHook
             // same conditions, which is far better evidence than two runs. It is
             // still locked out of a sweep, where a keypress poisons a row.
             if (Input.GetKeyDown(KeyCode.R) && (!_bench || _trendRun)) { ToggleRiders(); return; }
+            if (Input.GetKeyDown(KeyCode.Y) && (!_bench || _trendRun)) { ToggleRiderDressing(); return; }
+            if (Input.GetKeyDown(KeyCode.U)) { DumpRespawns(); return; }
             if (_bench) return;
 
             if (Input.GetKeyDown(KeyCode.P)) { _show = !_show; _visible = -1; }
@@ -5766,6 +6359,18 @@ namespace TrickyMaddnessLevelHook
 
         void OnDestroy()
         {
+            // Both rider ablations are the same hazard as the globals below, and were
+            // missed when they were added: the riders can outlive the map (the menu
+            // draws rider models), so a toggle left on follows the player out of the
+            // level and breaks the menu they land on. Restore first, and loudly.
+            if (_ridersOff != null) ToggleRiders();
+            if (_dressingOff != null) ToggleRiderDressing();
+
+            // Respawn events are collected all ride and were previously only printed
+            // on demand, so a ride that ended without Ctrl+U threw the whole run away.
+            // Leaving the map is exactly when the report is worth having.
+            DumpRespawns();
+
             // Leaving the map mid-sweep kills the coroutine without running its finally
             // in some Unity versions; physics simulation mode and the beginCameraRendering
             // subscription in particular are global and would follow the player out.
