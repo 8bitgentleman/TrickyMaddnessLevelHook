@@ -4681,27 +4681,24 @@ namespace TrickyMaddnessLevelHook
             if (Input.GetKeyDown(KeyCode.U)) DumpRespawns();
         }
 
-        // Every rider, plus which index is the human. Whoever the camera is
-        // following is the human; the chase cam trails by metres while the field
-        // spreads over kilometres, so nearest-to-camera is unambiguous in practice.
-        List<Transform> FindRiderTransforms(out int human)
+        // Every rider, plus which index is the human.
+        //
+        // ⚠️ The human is `LevelManager.player`, read off the game — NOT the rider
+        // nearest the camera. The camera heuristic this replaced is wrong exactly
+        // when it matters: the whole field is bunched at the start gate when the
+        // watch list locks, so it can name any of them, and a report that says
+        // "rider 0" without knowing whether rider 0 is the player is unreadable.
+        List<Snowboarder> FindRiders(out int human)
         {
-            var all = new List<Transform>();
-            foreach (var mb in FindObjectsOfType<MonoBehaviour>())
-            {
-                if (mb == null) continue;
-                if (mb.GetType().Name != "Snowboarder") continue;
-                all.Add(mb.transform);
-            }
+            var all = new List<Snowboarder>(FindObjectsOfType<Snowboarder>());
             human = -1;
-            var cam = Camera.main;
-            Vector3 eye = cam != null ? cam.transform.position : Vector3.zero;
-            float bestD = float.MaxValue;
-            for (int i = 0; i < all.Count; i++)
-            {
-                float d = (all[i].position - eye).sqrMagnitude;
-                if (d < bestD) { bestD = d; human = i; }
-            }
+            var lm = FindObjectOfType<LevelManager>();
+            var player = lm != null
+                ? Traverse.Create(lm).Field("player").GetValue() as Snowboarder
+                : null;
+            if (player != null)
+                for (int i = 0; i < all.Count; i++)
+                    if (ReferenceEquals(all[i], player)) { human = i; break; }
             return all;
         }
 
@@ -4723,6 +4720,8 @@ namespace TrickyMaddnessLevelHook
         struct Respawn { public int rider; public Vector3 to; public float t; }
 
         Transform[] _watch;
+        Snowboarder[] _sb;      // parallel to _watch — the wedge probe reads their state
+        int _human = -1;        // index into _watch of LevelManager.player
         Vector3[] _watchPrev;
         float[] _watchStep;
         float _watchRetry;
@@ -4813,8 +4812,7 @@ namespace TrickyMaddnessLevelHook
                 // Riders are spawned after the scene builds, so retry until they
                 // exist — then LOCK and never scan again.
                 //
-                // ⚠️ This scan is FindObjectsOfType<MonoBehaviour>() over a 59k-object
-                // scene plus a GetType().Name string allocation per behaviour. It first
+                // ⚠️ This scan is a FindObjectsOfType over a 59k-object scene. It first
                 // shipped on a fixed 5 s timer, which put a periodic hitch and steady GC
                 // pressure into every ride and read as "the map got slower" — the
                 // instrument degrading the thing it was measuring. It may run while
@@ -4823,9 +4821,16 @@ namespace TrickyMaddnessLevelHook
                 if (_watchRetry > 0f) return;
                 _watchRetry = 2f;
                 int human;
-                var all = FindRiderTransforms(out human);
+                var all = FindRiders(out human);
                 if (all.Count == 0) return;
-                _watch = all.ToArray();
+                // Don't lock until LevelManager.player resolves. Locking early would
+                // save a watch list that cannot say which rider is the player, which
+                // is the one question the wedge report has to answer.
+                if (human < 0) return;
+                _human = human;
+                _sb = all.ToArray();
+                _watch = new Transform[_sb.Length];
+                for (int i = 0; i < _sb.Length; i++) _watch[i] = _sb[i].transform;
                 _watchPrev = new Vector3[_watch.Length];
                 _watchStep = new float[_watch.Length];
                 _winStart = new Vector3[_watch.Length];
@@ -4869,11 +4874,15 @@ namespace TrickyMaddnessLevelHook
                 {
                     float net = (p - _winStart[i]).magnitude;
                     if (net < StuckNet)
+                    {
+                        bool looping = _winPath[i] > LoopPath;
                         _stuck.Add(new Stuck
                         {
                             rider = i, at = p, t = Time.unscaledTime,
-                            looping = _winPath[i] > LoopPath,
+                            looping = looping,
                         });
+                        if (!looping) ProbeWedge(i, p);
+                    }
                     _winStart[i] = p;
                     _winPath[i] = 0f;
                 }
@@ -4883,6 +4892,77 @@ namespace TrickyMaddnessLevelHook
             }
 
             if (endWindow) _winClock = 0f;
+        }
+
+        // ---- wedge probe --------------------------------------------------------
+        // A WEDGED rider (net travel ~0, path length ~0) is a different bug from a
+        // looping one and the respawn report is blind to it: it generates no
+        // respawns at all, so nothing in GameRespawns names it and the loop guard
+        // never sees it. This says what the rider IS and what it is touching.
+        //
+        // The three readings that separate the candidate causes, per the IL:
+        //   * HUMAN vs AI — the crash respawn is `CanRespawn() &&
+        //     snowboardController.GetRespawnInput()`. The AI's GetRespawnInput
+        //     self-arms on a 0.5–1 s / competence timer, but the player's is a
+        //     button, so a wedged player generating no respawns is the game working
+        //     as designed and NOT something the Hook should be fixing.
+        //   * state / deathTimer / finished — CanRespawn() needs state Dead (4),
+        //     !finished, deathTimer > 1.5. A rider stuck in Riding never qualifies
+        //     however long it sits there, and one that has `finished` is parked on
+        //     purpose.
+        //   * what it is touching — a solid collider holding the rider in place. If
+        //     these come back named `Mdl_Resetzone*` on layer 10 this is the same
+        //     bug as §23; anything else is new.
+        const float ProbeRadius = 12f;      // u — a rider capsule is a couple of units
+        const int ProbeMaxPerRider = 3;     // a whole-run wedge must not flood the log
+        int[] _probed;
+
+        void ProbeWedge(int i, Vector3 p)
+        {
+            if (_probed == null || _probed.Length != _watch.Length)
+                _probed = new int[_watch.Length];
+            if (_probed[i] >= ProbeMaxPerRider) return;
+            _probed[i]++;
+
+            var sb = _sb != null && i < _sb.Length ? _sb[i] : null;
+            string who = i == _human ? "HUMAN" : "AI";
+            string detail = "state ?";
+            if (sb != null)
+            {
+                var tv = Traverse.Create(sb);
+                object st = tv.Field("state").GetValue();
+                object dt = tv.Field("deathTimer").GetValue();
+                object fin = tv.Field("finished").GetValue();
+                var cc = sb.GetComponent<CharacterController>();
+                detail = $"state {st} deathTimer {dt} finished {fin}"
+                    + (cc != null ? $" grounded {cc.isGrounded} vel {cc.velocity.magnitude:F1}" : "");
+            }
+            Plugin.Log.LogInfo($"[Perf] WEDGED rider {i} ({who}) at "
+                + $"({p.x:F0},{p.y:F0},{p.z:F0})  {detail}  "
+                + $"[probe {_probed[i]}/{ProbeMaxPerRider}]");
+
+            // QueryTriggerInteraction.Collide on purpose: a trigger cannot hold a
+            // rider, but knowing one is overlapping is exactly what distinguishes
+            // "wedged in geometry" from "sat in a volume that keeps acting on it".
+            var hits = Physics.OverlapSphere(p, ProbeRadius, ~0, QueryTriggerInteraction.Collide);
+            if (hits == null || hits.Length == 0)
+            {
+                Plugin.Log.LogInfo($"[Perf]   nothing within {ProbeRadius:F0} u — "
+                    + "not held by a collider; look at the rider's own state instead");
+                return;
+            }
+            Array.Sort(hits, (a, b) =>
+                (a.ClosestPoint(p) - p).sqrMagnitude.CompareTo((b.ClosestPoint(p) - p).sqrMagnitude));
+            int shown = Math.Min(hits.Length, 8);
+            Plugin.Log.LogInfo($"[Perf]   {hits.Length} collider(s) within {ProbeRadius:F0} u, nearest {shown}:");
+            for (int h = 0; h < shown; h++)
+            {
+                var c = hits[h];
+                if (c == null) continue;
+                float d = (c.ClosestPoint(p) - p).magnitude;
+                Plugin.Log.LogInfo($"[Perf]     {d,6:F1} u  layer {c.gameObject.layer,2}"
+                    + $"{(c.isTrigger ? " trigger" : " solid  ")}  {c.gameObject.name}");
+            }
         }
 
         // Cluster events by proximity and report the hot spots. Greedy single-pass
@@ -4927,7 +5007,11 @@ namespace TrickyMaddnessLevelHook
             {
                 var ids = new List<int>(who[c]); ids.Sort();
                 var names = new List<string>();
-                foreach (int id in ids) names.Add(id < 0 ? "?" : id.ToString());
+                // The player is marked, because "rider 0" means nothing on its own —
+                // whether a hot spot is the human's or the AI field's decides
+                // whether it is a bug worth fixing at all.
+                foreach (int id in ids)
+                    names.Add(id < 0 ? "?" : (id == _human ? id + "(P)" : id.ToString()));
                 Plugin.Log.LogInfo($"[Perf]   {counts[c],4} x near ({centres[c].x,8:F0},"
                     + $"{centres[c].y,7:F0},{centres[c].z,8:F0})  rider(s) {string.Join(",", names.ToArray())}"
                     + $"  over {last[c] - first[c],5:F0}s");
@@ -4951,6 +5035,10 @@ namespace TrickyMaddnessLevelHook
             var pos = new List<Vector3>();
             var rid = new List<int>();
             var tim = new List<float>();
+
+            Plugin.Log.LogInfo($"[Perf] {(_watch != null ? _watch.Length : 0)} rider(s) watched; "
+                + (_human >= 0 ? $"rider {_human} is the player (marked (P) below)"
+                               : "player NOT identified — LevelManager.player never resolved"));
 
             // Split by route, because they are different bugs. Reported by the FROM
             // position: where the rider was stuck is what a fix has to act on.
