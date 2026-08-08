@@ -1487,7 +1487,15 @@ namespace TrickyMaddnessLevelHook
                     int thin = 0;
                     if (ext.y < ext[thin]) thin = 1;
                     if (ext.z < ext[thin]) thin = 2;
-                    float med = Mathf.Max(ext[(thin + 1) % 3], ext[(thin + 2) % 3]);
+                    // MUST be Min, not Max. A PANE is thin relative to BOTH other
+                    // axes; a POLE is thin relative to only its long one. Under Max
+                    // a tree trunk (0.24 x 0.26 x 4.5) tested 0.24 > 0.3*4.5 = false
+                    // and read as a sheet, so this stripped every trunk, flagpole and
+                    // lamp post in gari/elysium/mesa/untrack (454 in Untracked alone,
+                    // 5030 across a full session) — leaving trees with no collision at
+                    // all, since the leaf meshes never get a collider by design.
+                    // Min keeps genuine panes stripped: those are thin vs their min too.
+                    float med = Mathf.Min(ext[(thin + 1) % 3], ext[(thin + 2) % 3]);
                     if (med < 1e-3f || ext[thin] > 0.3f * med) continue; // not a thin sheet
                     Vector3 thinLocal = thin == 0 ? Vector3.right : thin == 1 ? Vector3.up : Vector3.forward;
                     Vector3 thinWorld = go.transform.TransformDirection(thinLocal).normalized;
