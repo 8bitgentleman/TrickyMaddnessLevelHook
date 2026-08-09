@@ -55,6 +55,9 @@ namespace TrickyMaddnessLevelHook
         internal static ConfigEntry<bool> respawnLoopGuard;
         internal static ConfigEntry<bool> respawnLoopGuardPlayer;
         internal static ConfigEntry<int> respawnLoopAdvance;
+        internal static ConfigEntry<float> respawnCrashLoopWindow;
+        internal static ConfigEntry<bool> airborneStuckGuard;
+        internal static ConfigEntry<float> airborneStuckSeconds;
 
         // The race-line respawn markers built in BuildScene, in course order, so the
         // loop guard can escalate a wedged rider FORWARD by index. The game itself
@@ -317,11 +320,14 @@ namespace TrickyMaddnessLevelHook
                 "until they are clear. Only acts on custom maps that have race-line " +
                 "respawn markers; built-in levels are untouched.");
             respawnLoopGuardPlayer = Config.Bind("Gameplay", "RespawnLoopGuardPlayer", false,
-                "Apply RespawnLoopGuard to the human rider too. Off by default: " +
-                "skipping a stuck CPU rider forward costs nothing, but doing it to the " +
-                "player moves them down the course through terrain they did not ride, " +
-                "which is a gift in a race. Turn it on if you would rather be nudged " +
-                "past a bad spot than sit in a respawn loop.");
+                "Apply the OUT-OF-BOUNDS half of RespawnLoopGuard to the human rider " +
+                "too. Off by default: skipping a stuck CPU rider forward costs nothing, " +
+                "but doing it to the player moves them down the course through terrain " +
+                "they did not ride, which is a gift in a race. Turn it on if you would " +
+                "rather be nudged past a bad spot than sit in a respawn loop. This does " +
+                "NOT gate the crash half of the guard (see RespawnCrashLoopWindow), " +
+                "which always covers the player and the CPU alike — a rider dying on " +
+                "the same piece of geometry forever is not making progress to protect.");
             respawnLoopAdvance = Config.Bind("Gameplay", "RespawnLoopAdvance", 3,
                 "How many race-line respawn markers forward the loop guard moves a " +
                 "wedged rider each time it fires. Markers sit roughly 25 m apart, so " +
@@ -329,6 +335,37 @@ namespace TrickyMaddnessLevelHook
                 "short enough that a rider who was only unlucky loses little. The " +
                 "guard re-fires if that landing is also bad, so this compounds rather " +
                 "than having to be right first time.");
+            respawnCrashLoopWindow = Config.Bind("Gameplay", "RespawnCrashLoopWindow", 10f,
+                "Seconds within which repeated CRASH respawns count as one loop. The " +
+                "out-of-bounds loop fires once per rendered frame, so a one-second " +
+                "window catches it; a crash loop cannot, because the game's own " +
+                "CanRespawn() will not respawn a wrecked rider until deathTimer passes " +
+                "1.5 s. Measured on the SSX3 chain, a rider dying on the same rock " +
+                "came back every ~2.4 s — invisible to a one-second window, which is " +
+                "why the guard originally could not see it. Raise this if a real loop " +
+                "is still slipping through; lower it if the guard is shunting riders " +
+                "who were merely having a bad run.");
+            airborneStuckGuard = Config.Bind("Gameplay", "AirborneStuckGuard", true,
+                "Break riders out of the 'flipping in place and going nowhere' wedge. " +
+                "Getting pinned — on a Wall-layer prop, or against another rider — " +
+                "leaves the game's state machine stuck in Airborne, which is also " +
+                "its trick state, so the rider spins forever with no input that " +
+                "escapes: the game only ever lands you from a ground contact the " +
+                "pin is preventing, and only ever wrecks you from a hard impact a " +
+                "pinned rider cannot produce. This watchdog forces the landing, and " +
+                "wrecks the rider if that does not free them, so a respawn carries " +
+                "them clear. Custom maps only — the mechanism is the base game's, " +
+                "but the geometry that trips it is ours, so built-in levels are " +
+                "left exactly as they ship.");
+            airborneStuckSeconds = Config.Bind("Gameplay", "AirborneStuckSeconds", 2f,
+                "Seconds per window in which an airborne rider must cover at least 25 " +
+                "units of NET travel, or the wedge watchdog acts — and then again " +
+                "before it escalates from forcing a landing to wrecking them. Net " +
+                "rather than per-frame, because the wedge that matters is not " +
+                "motionless: a rider can be oscillating hard and still be going " +
+                "nowhere. A healthy descent covers ~60 units a second, so this is " +
+                "~5x clear of anything actually racing. A judgement call, not a " +
+                "measured one: raise it if a legitimate trick is ever cut short.");
             mapPhysicsRate = Config.Bind("Gameplay", "MapPhysicsRate", true,
                 "Honour a custom map's 'physicshz <n>' sidecar header, which lets a " +
                 "very large map ask to run physics at a lower tick rate than the " +
@@ -1426,6 +1463,9 @@ namespace TrickyMaddnessLevelHook
             // whose floor is 122 m down); the game picks the NEAREST marker and
             // they sit ~25 m apart, so the neighbours cover the gap. Gated on
             // spawnsnap so a map that opts out (gari) keeps its authored markers.
+            // Outside the race-line block on purpose: the wedge watchdog needs no
+            // markers, so it must still be cleared on a map that has no race line.
+            Snowboarder_AirborneStuckGuard.ResetState();
             if (TempRaceLine.m_points != null && TempRaceLine.m_points.Count >= 2)
             {
                 var respawnParent = new GameObject("Respawn Points (race line)");
@@ -2967,6 +3007,11 @@ namespace TrickyMaddnessLevelHook
     {
         private static string loggedScene;
 
+        // Set by the prefix and consumed by the postfix on the same call stack, exactly
+        // like PendingOobCollider — Respawn resets state to Riding, so by the time the
+        // postfix runs the rider no longer looks dead and the route is unrecoverable.
+        internal static bool PendingCrash;
+
         [HarmonyPrefix]
         public static bool Prefix(Snowboarder __instance)
         {
@@ -2975,8 +3020,8 @@ namespace TrickyMaddnessLevelHook
             if (__instance != null)
             {
                 object st = Traverse.Create(__instance).Field("state").GetValue();
-                PerfHarness.NotePreRespawn(__instance.transform.position,
-                    st != null && Convert.ToInt32(st) == 4);   // 4 = State.Dead
+                PendingCrash = st != null && Convert.ToInt32(st) == 4;   // 4 = State.Dead
+                PerfHarness.NotePreRespawn(__instance.transform.position, PendingCrash);
             }
             if (string.IsNullOrEmpty(Plugin.LoadedAssetBundle)) return true;
             string custom = Plugin.CustomSceneName();
@@ -3003,28 +3048,56 @@ namespace TrickyMaddnessLevelHook
             if (!__runOriginal || __instance == null) return;
             bool wasOob = Snowboarder_OnControllerColliderHit.PendingOobCollider != null;
             Snowboarder_OnControllerColliderHit.PendingOobCollider = null;
+            bool wasCrash = PendingCrash;
+            PendingCrash = false;
             PerfHarness.NoteRespawn(__instance.transform, __instance.transform.position);
-            if (wasOob) LoopGuard(__instance);
+            // A rider can be both dead AND touching an OOB volume. OOB wins: it is the
+            // faster loop (every frame, vs. every ~2.4 s) and the one with the tighter
+            // window, so counting it on the crash tally would only slow the response.
+            if (wasOob) LoopGuard(__instance, false);
+            else if (wasCrash) LoopGuard(__instance, true);
         }
 
-        // ---- OOB respawn loop guard ------------------------------------------
+        // ---- respawn loop guard ----------------------------------------------
         // Escalate a rider FORWARD along the race line when respawning has stopped
         // making progress. The game can't break the loop itself because it always
         // picks the nearest marker, and the nearest marker is what put them there.
-        class Loop { public float lastT; public int hits; }
+        //
+        // Two routes reach here, and they loop at completely different rates:
+        //   OOB   — OnControllerColliderHit respawns on every frame of contact.
+        //   CRASH — the rider wrecks on geometry, respawns onto a marker sitting on
+        //           that same geometry, and wrecks again. Rate-limited by the game's
+        //           CanRespawn() (deathTimer > 1.5), so it cycles every ~2.4 s.
+        // Hence a counter per route: one window cannot cover both.
+        class Loop
+        {
+            public float oobT, crashT;
+            public int oobHits, crashHits;
+            // Marker index the last crash-respawn landed near, so the crash route can
+            // tell a loop from a rider who is simply crashing a lot on the way down.
+            public int crashNear = -1;
+        }
         static readonly Dictionary<int, Loop> _loops = new Dictionary<int, Loop>();
-        static string _guardLoggedScene;
+        static string _guardLoggedOob, _guardLoggedCrash;
 
         // Consecutive OOB respawns within this window count as one loop. The real
         // loop fires every frame, so anything above a couple of frames is generous;
         // a genuine crash-respawn can't repeat this fast because CanRespawn() needs
-        // deathTimer > 1.5.
+        // deathTimer > 1.5 — which is exactly why the crash route needs its own,
+        // much wider window (Plugin.respawnCrashLoopWindow).
         const float LoopWindow = 1.0f;
         const int LoopTrigger = 3;
 
-        public static void ResetLoopState() { _loops.Clear(); _guardLoggedScene = null; }
+        // How far down the marker list a crashing rider must get before the crash
+        // counter treats it as progress rather than as the same wreck again. It has
+        // to exceed RespawnLoopAdvance, or the guard's own shunt would read as
+        // progress and reset the counter it just fired.
+        const int CrashProgressBand = 2;
 
-        static void LoopGuard(Snowboarder sb)
+        public static void ResetLoopState()
+        { _loops.Clear(); _guardLoggedOob = _guardLoggedCrash = null; }
+
+        static void LoopGuard(Snowboarder sb, bool crashRoute)
         {
             if (!Plugin.respawnLoopGuard.Value) return;
             // Custom maps only, and only when BuildScene actually produced race-line
@@ -3034,23 +3107,21 @@ namespace TrickyMaddnessLevelHook
             var marks = Plugin.RaceLineRespawns;
             if (marks.Count < 2) return;
 
+            // The OOB route leaves the human alone by default: being moved down-course
+            // is a real advantage in a race, and a CPU rider losing it costs nothing.
+            // The crash route has no such trade to weigh — the rider is not going
+            // anywhere at all — so it always applies to the player and the CPU alike.
             bool isAI = Traverse.Create(sb).Field("snowboardController").GetValue() is AISnowboarder;
-            if (!isAI && !Plugin.respawnLoopGuardPlayer.Value) return;
+            if (!crashRoute && !isAI && !Plugin.respawnLoopGuardPlayer.Value) return;
 
-            int id = sb.GetInstanceID();
-            Loop st;
-            if (!_loops.TryGetValue(id, out st)) { st = new Loop(); _loops[id] = st; }
-
-            float now = Time.unscaledTime;
-            st.hits = (now - st.lastT <= LoopWindow) ? st.hits + 1 : 1;
-            st.lastT = now;
-            if (st.hits < LoopTrigger) return;
-            st.hits = 0;
+            int adv = Mathf.Max(1, Plugin.respawnLoopAdvance.Value);
 
             // Nearest marker to where the game just dropped them, then step forward.
             // Escalating from the CURRENT nearest (rather than a remembered index)
             // is what makes repeated firings compound: each one starts from wherever
-            // the last one landed.
+            // the last one landed. Computed before the trigger test because the crash
+            // route needs it to judge progress; the scan is linear over the marker
+            // list, which even the pathological OOB case can afford.
             Vector3 p = sb.transform.position;
             int near = -1;
             float best = float.MaxValue;
@@ -3062,7 +3133,35 @@ namespace TrickyMaddnessLevelHook
             }
             if (near < 0) return;
 
-            int adv = Mathf.Max(1, Plugin.respawnLoopAdvance.Value);
+            int id = sb.GetInstanceID();
+            Loop st;
+            if (!_loops.TryGetValue(id, out st)) { st = new Loop(); _loops[id] = st; }
+
+            float now = Time.unscaledTime;
+            int hits;
+            if (crashRoute)
+            {
+                // Dying repeatedly is only a loop if it keeps happening in the same
+                // place. A rider who wrecks three times while still working down the
+                // mountain is having a bad run, not stuck, and moving them forward
+                // would be handing out course for free.
+                bool sameSpot = st.crashNear >= 0
+                    && Mathf.Abs(near - st.crashNear) <= adv + CrashProgressBand;
+                bool inWindow = now - st.crashT <= Plugin.respawnCrashLoopWindow.Value;
+                st.crashHits = (inWindow && sameSpot) ? st.crashHits + 1 : 1;
+                st.crashT = now;
+                st.crashNear = near;
+                hits = st.crashHits;
+            }
+            else
+            {
+                st.oobHits = (now - st.oobT <= LoopWindow) ? st.oobHits + 1 : 1;
+                st.oobT = now;
+                hits = st.oobHits;
+            }
+            if (hits < LoopTrigger) return;
+            if (crashRoute) st.crashHits = 0; else st.oobHits = 0;
+
             int dest = Mathf.Min(near + adv, marks.Count - 1);
             // Already at the last marker: the finish is right there and shunting them
             // further is meaningless. Leave them to the game.
@@ -3079,16 +3178,214 @@ namespace TrickyMaddnessLevelHook
             sb.transform.rotation = target.rotation;
             if (cc != null) cc.enabled = true;
 
+            // Named per route, because "the guard is active" means two different
+            // things to whoever is reading the log to decide what to fix: an OOB
+            // loop points at a misplaced reset volume, a crash loop at geometry
+            // sitting on the race line.
+            string route = crashRoute ? "crash" : "OOB";
             string scene = Plugin.CustomSceneName();
-            if (_guardLoggedScene != scene)
+            string logged = crashRoute ? _guardLoggedCrash : _guardLoggedOob;
+            if (logged != scene)
             {
-                _guardLoggedScene = scene;
-                Plugin.Log.LogInfo($"[Respawn] loop guard active on '{scene}' — "
+                if (crashRoute) _guardLoggedCrash = scene; else _guardLoggedOob = scene;
+                Plugin.Log.LogInfo($"[Respawn] {route} loop guard active on '{scene}' — "
                     + $"escalating wedged riders {adv} marker(s) down-course "
-                    + $"(first: {sb.name} at {p} -> marker {dest} of {marks.Count})");
+                    + $"(first: {sb.name} [{id}] at {p} -> marker {dest} of {marks.Count})");
             }
-            Plugin.Log.LogDebug($"[Respawn] loop guard moved {sb.name} "
-                + $"marker {near} -> {dest} (OOB respawn x{LoopTrigger})");
+            Plugin.Log.LogDebug($"[Respawn] {route} loop guard moved {sb.name} [{id}] "
+                + $"marker {near} -> {dest} ({route} respawn x{LoopTrigger})");
+        }
+    }
+
+    // The rider who is standing still and doing tricks.
+    //
+    // Snowboarder.OnControllerColliderHit is the ONLY caller of Land() in the whole
+    // assembly, and neither of the two ways a rider gets pinned reaches it. Rest on
+    // a Wall-layer (8) prop and the Wall branch returns early — it can deflect you,
+    // and it can Die() you on a velocity·normal < -30 impact, but it has no path
+    // that lands you. Get pinned against ANOTHER RIDER (layer 3) and there is no
+    // ground contact to land on at all. Either way the state machine stays in
+    // Airborne — which is also the game's trick state — so the rider flips in place
+    // forever with no input that escapes.
+    //
+    // ⚠️ Detect this by POSITION, never by the rider's own state fields. The first
+    // cut of this guard tested "Airborne AND characterController.isGrounded AND
+    // speed ≈ 0", taken from an AI wedged on terrain, and it never fired once: the
+    // player's wedge was against another rider, where the contact normal is
+    // horizontal, so isGrounded reads FALSE and gravity winds the velocity field up
+    // to 47 u/s while Move is fully blocked. The one thing both wedges share — and
+    // the only thing the perf harness's own WEDGED probe tests — is that the
+    // transform stops moving. Everything else disagrees between the two cases.
+    //
+    // Break the deadlock in two steps: force the landing first, because a rider who
+    // can simply ride off keeps their run; only if that does not take do we wreck
+    // them and let Respawn (and the crash loop guard above) carry them clear.
+    [HarmonyPatch(typeof(Snowboarder), "FixedUpdate")]
+    public class Snowboarder_AirborneStuckGuard
+    {
+        class Stuck { public Vector3 anchor; public float stuckT; public int stage; public bool init; }
+        static readonly Dictionary<int, Stuck> _stuck = new Dictionary<int, Stuck>();
+        static string _loggedScene;
+
+        // NET travel over a whole window, measured the way PerfHarness measures it
+        // (StuckNet/StuckWindow), just faster. It has to be net rather than a "did
+        // it move this tick" test, because the wedge that matters is not motionless:
+        // the player's read 47 u/s of CharacterController velocity while going
+        // nowhere at all. A rider bouncing inside a small region defeats any
+        // per-tick or small-radius test, and defeats a re-anchoring one too — every
+        // excursion past the radius resets the clock and it never accumulates.
+        // A healthy descent covers ~60 u/s, so 25 u over the default 2 s window is
+        // ~5x clear of anything actually racing.
+        const float StuckNet = 25f;
+
+        // Cached rather than Traverse'd: this runs for every rider every physics
+        // tick, which on the chain is 9 riders x 50 Hz.
+        static readonly System.Reflection.FieldInfo fState =
+            AccessTools.Field(typeof(Snowboarder), "state");
+        static readonly System.Reflection.FieldInfo fVel =
+            AccessTools.Field(typeof(Snowboarder), "velocity");
+        static readonly System.Reflection.FieldInfo fCC =
+            AccessTools.Field(typeof(Snowboarder), "characterController");
+        static readonly System.Reflection.FieldInfo fPoints =
+            AccessTools.Field(typeof(Snowboarder), "activePoints");
+        static readonly System.Reflection.MethodInfo mLand =
+            AccessTools.Method(typeof(Snowboarder), "Land", new[] { typeof(float) });
+        static readonly System.Reflection.MethodInfo mDie =
+            AccessTools.Method(typeof(Snowboarder), "Die");
+
+        // Static, so it outlives the scene: instance ids are not reused across a
+        // load, but the dictionary would otherwise grow by a full grid per map.
+        public static void ResetState() { _stuck.Clear(); _loggedScene = null; }
+
+        [HarmonyPostfix]
+        public static void Postfix(Snowboarder __instance)
+        {
+            if (!Plugin.airborneStuckGuard.Value || __instance == null) return;
+            // Custom maps only, for the same reason the rail projection fix is
+            // config-gated: a Hook install must not change how the levels everybody
+            // already has play.
+            if (string.IsNullOrEmpty(Plugin.LoadedAssetBundle)) return;
+            // Any reflection miss and we do nothing at all, rather than run half a
+            // watchdog that can wreck a rider but never land one.
+            if (fState == null || mLand == null || mDie == null) return;
+
+            int id = __instance.GetInstanceID();
+            object s = fState.GetValue(__instance);
+            int state = s == null ? -1 : Convert.ToInt32(s);
+            // Starting (0) is the grid before the gun, Dead (4) is already mid-
+            // respawn and Done (5) is a finished rider coasting out — all three are
+            // motionless on purpose and none of them can be helped by this.
+            if (state == 0 || state == 4 || state == 5 || state < 0)
+            {
+                _stuck.Remove(id);
+                return;
+            }
+
+            Vector3 p = __instance.transform.position;
+            Stuck st;
+            if (!_stuck.TryGetValue(id, out st)) { st = new Stuck(); _stuck[id] = st; }
+            if (!st.init) { st.init = true; st.anchor = p; st.stuckT = 0f; return; }
+
+            // Fixed windows, closed only at the end: sampling net displacement once
+            // per window is what makes an oscillating rider readable at all.
+            st.stuckT += Time.fixedDeltaTime;
+            if (st.stuckT < Plugin.airborneStuckSeconds.Value) return;
+            float net = (p - st.anchor).magnitude;
+            st.anchor = p;
+            st.stuckT = 0f;
+            if (net >= StuckNet)
+            {
+                st.stage = 0;       // they are racing; forget any escalation
+                return;
+            }
+
+            // Not moving is only a BUG while the rider is airborne — stopping on a
+            // flat section is a thing players do on purpose, and a Grounded rider
+            // parked in the snow must never be touched. Once we have intervened
+            // though, stage keeps us armed through the state the intervention put
+            // them in: a forced landing makes them Grounded, and if that did not
+            // free them the escalation still has to reach the wreck.
+            if (state != 2 && st.stage == 0) return;      // 2 = State.Airborne
+
+            string what;
+            if (st.stage == 0)
+            {
+                st.stage = 1;
+                // Land() cashes the trick pot before it flips the state (it calls
+                // CashPoints() one instruction earlier), and a rider who has been
+                // spinning in place for two seconds is sitting on a fortune in spin
+                // points. Handing that over would turn the bug into a scoring
+                // exploit, so the pot is emptied first.
+                if (fPoints != null) fPoints.SetValue(__instance, 0f);
+                mLand.Invoke(__instance, new object[] { 0f });
+                what = "forced landing";
+            }
+            else
+            {
+                st.stage = 0;
+                mDie.Invoke(__instance, null);
+                what = "wrecked (landing did not take)";
+            }
+
+            // The state fields go in the log rather than in the test: they are what
+            // told us the first cut was testing the wrong thing, and if a third
+            // flavour of wedge turns up this is the line that will name it.
+            string detail = Describe(__instance, state) + " net " + net.ToString("F1")
+                + " near " + Nearby(__instance, p);
+            string scene = Plugin.CustomSceneName();
+            if (_loggedScene != scene)
+            {
+                _loggedScene = scene;
+                Plugin.Log.LogInfo($"[Stuck] wedge watchdog active on '{scene}' — riders "
+                    + $"who stop moving for {Plugin.airborneStuckSeconds.Value}s while "
+                    + $"airborne are landed, then wrecked if that does not free them "
+                    + $"(first: {__instance.name} [{id}] at {p} {detail})");
+            }
+            Plugin.Log.LogInfo($"[Stuck] {what}: {__instance.name} [{id}] at {p} {detail}");
+        }
+
+        // Diagnostic only — never a gate. See the ⚠️ on the class.
+        static string Describe(Snowboarder sb, int state)
+        {
+            string nm = state == 1 ? "Grounded" : state == 2 ? "Airborne"
+                      : state == 3 ? "Grinding" : state.ToString();
+            var cc = fCC == null ? null : fCC.GetValue(sb) as CharacterController;
+            object v = fVel == null ? null : fVel.GetValue(sb);
+            float speed = v is Vector3 ? ((Vector3)v).magnitude : -1f;
+            float ccv = cc != null ? cc.velocity.magnitude : -1f;
+            return $"[state {nm} grounded {(cc != null && cc.enabled && cc.isGrounded)} "
+                 + $"vel {speed:F1} ccvel {ccv:F1}]";
+        }
+
+        // ⚠️ EXCLUDES THE RIDER'S OWN COLLIDERS. PerfHarness.ProbeWedge does not,
+        // and that cost a wrong diagnosis: its list is dominated by the rider's own
+        // capsule (layer 3, named "Snowboarder(Clone)" like every other rider), its
+        // own board and its own chase camera, all at ~0 u, which reads exactly like
+        // being pinned against another rider. Only runs when the guard fires, so
+        // the allocation and the sphere cast are off the hot path.
+        //
+        // Deliberately does NOT sort by ClosestPoint: that throws on the non-convex
+        // MeshColliders the terrain is made of, and the resulting error storm is
+        // what buries the useful lines in Player.log.
+        static string Nearby(Snowboarder sb, Vector3 p)
+        {
+            var hits = Physics.OverlapSphere(p, 12f, ~0, QueryTriggerInteraction.Collide);
+            if (hits == null || hits.Length == 0) return "nothing within 12u";
+            Transform root = sb.transform.root;
+            var names = new List<string>();
+            int own = 0;
+            for (int i = 0; i < hits.Length; i++)
+            {
+                var h = hits[i];
+                if (h == null) continue;
+                if (h.transform.root == root) { own++; continue; }
+                if (names.Count < 5)
+                    names.Add($"{h.name}(L{h.gameObject.layer}{(h.isTrigger ? ",trig" : "")})");
+            }
+            if (names.Count == 0)
+                return $"nothing within 12u but its own {own} collider(s) — not held by "
+                     + "geometry, look at the rider's own state";
+            return $"{string.Join(", ", names.ToArray())} (+{own} own)";
         }
     }
 
