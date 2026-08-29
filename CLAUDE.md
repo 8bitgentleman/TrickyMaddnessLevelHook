@@ -1,5 +1,11 @@
 # LevelHook — runtime invariants
 
+<!-- tm-build-stamp -->
+> **RE'd against Tricky Madness build `21290881`** (v3.0, Unity 2022.3.62f1, `Assembly-CSharp.dll` sha256 `88636067…55efa4`).
+> Findings below are true of **that** build. TM is in active development — run `python3 tm_re_baseline.py check`
+> to see what a newer build moved before trusting any of it (`tm_baseline/README.md`).
+<!-- /tm-build-stamp -->
+
 The BepInEx plugin that rebuilds custom levels at runtime. Build commands,
 install paths and the shell gotchas are in the **root `CLAUDE.md`**; this file is
 only the rules whose violation breaks a map *silently*.
@@ -79,3 +85,8 @@ fails to bind → custom levels load to a black screen. Patch `LoadScene`, with 
 `ref LevelEntry` prefix. If a future update breaks it again, disassemble
 `Assembly-CSharp.dll` (`monodis`/`ikdasm`) and re-check `MenuManager`'s load
 method + `LevelEntry`'s shape against `Plugin.cs`.
+
+⚠️ Don't start that by hand. `python3 tm_re_baseline.py check` (from the repo root)
+resolves **every** `[HarmonyPatch]`/`AccessTools` target in all five mods against the
+installed game and names the ones that no longer bind, plus what else in the build
+moved. `tm_baseline/README.md`.
