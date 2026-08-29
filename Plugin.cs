@@ -212,6 +212,10 @@ namespace TrickyMaddnessLevelHook
         // game-side grind-detection contract (layer-9 hit + GetComponent<Rail>).
         // Off in shipped builds.
         private static ConfigEntry<bool> railColliderProbe;
+        // When true, the sidecar's SSX branch paths are handed to the AI alongside
+        // the complete race-line path, so riders pick among alternate routes instead
+        // of running single file. See AI_PATHS_PLAN.md.
+        private static ConfigEntry<bool> multiPathAI;
         // When true, custom maps spawn PerfHarness: an on-screen frame-rate readout
         // plus hotkeys that switch each suspected frame-rate cost on and off mid-ride,
         // so which one dominates is measured rather than guessed. Off in shipped builds.
@@ -306,6 +310,26 @@ namespace TrickyMaddnessLevelHook
                 "(the rail-end snap-back loop; CPU riders never escape it). " +
                 "On by default. Set false to restore the stock behaviour — this " +
                 "is the one Hook feature that changes built-in levels too.");
+            multiPathAI = Config.Bind("Gameplay", "MultiPathAI", true,
+                "Give the AI the map's alternate racing lines instead of marching " +
+                "every rider down one route. The source games authored these — SSX 3 " +
+                "ships ~88 per course, Merqury City 152, Pipedream 18 — and our " +
+                "conversions have always extracted them into the .aipaths.txt " +
+                "sidecar, but the Hook threw them away: the AI needs a route under it " +
+                "at all times, no single SSX fragment spans a course, and an early " +
+                "build of this had riders run off a fragment end and respawn-loop " +
+                "without finishing (MECHANICS_DIAGNOSIS Bug 3). The fix then was to " +
+                "hand them ONE complete race-line path and accept single-file racing. " +
+                "That traded away the wrong thing: measured across all 121 deployed " +
+                "maps and 4191 paths, only FOUR fragment endpoints anywhere sit " +
+                "farther than AIPath.GetTarget's 150-unit acquire radius from another " +
+                "path — the fragments overlap like lanes and hand off to each other. " +
+                "Dropping them left the AI with no candidate to recover onto, which " +
+                "is the opposite of safe. This builds BOTH: the branches to race on " +
+                "and the race line as a guaranteed complete fallback. Off restores " +
+                "the old single-file behaviour with no rebuild. No effect on maps " +
+                "whose sidecar has no branches (SSX 2012, Sled Storm, On Tour) or on " +
+                "built-in levels.");
             respawnLoopGuard = Config.Bind("Gameplay", "RespawnLoopGuard", true,
                 "Break the out-of-bounds respawn loop. The GAME's own " +
                 "Snowboarder.OnControllerColliderHit calls Respawn() the instant it " +
@@ -1389,18 +1413,36 @@ namespace TrickyMaddnessLevelHook
             }
             else
             {
-                // AI needs ONE complete start->finish route. The sidecar holds SSX
-                // branch FRAGMENTS — no single fragment spans the course, so the AI
-                // runs off a fragment end and (especially on a scaled map, where the
-                // gaps exceed FindNewPath's absolute 50-unit reacquire threshold)
-                // loses its path, hits the 1.5s no-path timeout, and respawn-loops
-                // without ever finishing (MECHANICS_DIAGNOSIS Bug 3). The race line
-                // IS a complete ordered route, so prefer it as the AI path; fall
-                // back to the sidecar fragments only if there's no usable race line.
+                // Build BOTH sources into the same pool. The game's AISnowboarder
+                // .FindNewPath enumerates every AIPath under pathsParent and re-picks
+                // whenever the current one runs out, so a pool of overlapping branch
+                // fragments is what it actually wants — that is how the game's own
+                // courses are authored.
+                //
+                // This block used to build the race line ALONE, gating the sidecar
+                // behind `built == 0`, on the reasoning that SSX branch fragments
+                // don't span the course and would strand the AI (MECHANICS_DIAGNOSIS
+                // Bug 3). The fragments genuinely don't span the course; the stranding
+                // does not follow. Measured over all 121 deployed maps / 4191 paths,
+                // exactly FOUR fragment endpoints sit farther than GetTarget's
+                // 150-unit acquire radius from any other path. Pipedream is the case
+                // that settles it: 9 of its 18 fragment ends are out of range of the
+                // race line, and 18 of 18 are in range of another fragment. Dropping
+                // the fragments removed the very candidates a stranded rider needed.
+                //
+                // The race line is still built, and still first: it is the one route
+                // guaranteed to reach the finish, so it backstops any fragment whose
+                // successor is missing. Toggle MultiPathAI off to restore the old
+                // single-file behaviour without a rebuild.
                 int built = BuildAIPathFromRaceLine(AIParent.transform);
-                if (built == 0) built = BuildAIPathsFromSidecar(AIParent.transform);
-                if (built == 0)
+                int branches = 0;
+                if (multiPathAI.Value || built == 0)
+                    branches = BuildAIPathsFromSidecar(AIParent.transform);
+                if (built + branches == 0)
                     Log.LogWarning("[AIPaths] no AI path data (maker points empty, no usable race line, no sidecar); AI will hold the start gate but cannot race");
+                else
+                    Log.LogInfo($"[AIPaths] AI pool: {built} race-line path + {branches} branch path(s) = {built + branches} total"
+                        + (multiPathAI.Value ? "" : " (MultiPathAI off)"));
             }
             Traverse.Create(levelManager).Field("pathsParent").SetValue(AIParent.transform);
 
