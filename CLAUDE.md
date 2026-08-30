@@ -77,6 +77,17 @@ numbering.
   must `StripStops` before comparing, or every capture forks `lighting` into
   `Overrides.extra.json` and pins a stale ramp over the merge.
 
+- §25 The playtest start pin is **`--tm-pin` on the command line and nothing else** —
+  no config key, ever. A pin is wrong for every ordinary launch, and a config key
+  outlives the session that set it (next launch starts halfway down a course, cause
+  unfindable); a launch flag dies with the process. `--tm-map` scopes it to one track.
+  It moves `MakerSpawnPoint` BEFORE the ground-snap — that ordering is what makes the
+  gate prop, `startingGate`, the rider seat and `StartLaunchRedirect` all follow from
+  one write. ⚠️ It moves the START only: AI paths and the race line still begin at the
+  top, so the field rides down without you. `RescuePinY` is pin-only on purpose —
+  never widen `GroundSeat`'s narrow band, which is what keeps a bad respawn from
+  silently teleporting 500 m.
+
 ## Version drift
 
 `MenuManager.SelectLevel(LevelEntry)` was renamed to **`LoadScene(LevelEntry)`**
