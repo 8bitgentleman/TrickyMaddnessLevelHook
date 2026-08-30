@@ -1,4 +1,4 @@
-Tricky Madness Level Hook v2.4.0 — required for every custom map pack
+Tricky Madness Level Hook v2.5.0 — required for every custom map pack
 =======================================================================
 
 This is the plugin that makes custom map packs (SSX Tricky Ports, SSX 3 Ports,
@@ -18,15 +18,24 @@ adds the physics/collision fixes those maps rely on.
   installed. If a map pack you download in the future doesn't include a
   plugins/ folder, this is where its Hook comes from.
 
-WHAT'S NEW IN v2.4.0
+WHAT'S NEW IN v2.5.0
 ---------------------
-  - Fixes a respawn loop that could leave you stuck cycling through a reset
-    instead of landing.
-  - Adds a guard for getting stuck airborne indefinitely.
-  - Stops thin-surface handling from deleting the collision on tree trunks.
+  - AI riders now use the course's alternate routes. Every SSX game authored
+    several racing lines per course (SSX 3 ships around 88, Merqury City 152),
+    but the Hook was handing the CPU a single one, so the whole field ran the
+    same line nose-to-tail. They now get the branches as well, with the race
+    line kept underneath as a guaranteed fallback so nobody strands on a dead
+    end. If you preferred the old single-file racing, or you hit anything odd
+    with the AI, set MultiPathAI = false under [Gameplay] in
+    BepInEx/config/TrickyMaddnessLevelHook.cfg — no rebuild needed.
+  - New launch options for anyone testing or building courses: pass
+    --tm-map <map name> and --tm-pin <x,y,z[,yaw]> on the command line and the
+    game starts you at that spot on that map instead of at the start gate.
+    Command-line only on purpose, so it can never quietly persist into a normal
+    play session.
 
-  All three apply to every map, old and new — there's no reason to stay on an
-  older Hook once you've got this one.
+  Nothing here changes any map file, and the Hook stays compatible with every
+  course pack already released.
 
 WHAT'S IN THIS ZIP
 ------------------
