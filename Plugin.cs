@@ -221,6 +221,28 @@ namespace TrickyMaddnessLevelHook
         // so which one dominates is measured rather than guessed. Off in shipped builds.
         private static ConfigEntry<bool> perfHarness;
 
+        // Playtest start pin — the editor's SSX -> Playtest From Pin, and NOTHING else.
+        // Moves a custom map's START to an arbitrary point on the course, so a spot
+        // ninety seconds into a run can be tested without riding down to it on every
+        // launch. Applied in LoadLevelManager BEFORE the ground-snap, so exactly like
+        // an authored spawn marker only XZ and facing have to be right and Y is
+        // computed (a spawnsnap-off map keeps the pin's own Y).
+        //
+        // ⚠️ COMMAND LINE ONLY, deliberately — there is no config key for this and there
+        // must not be one. A pin is a debugging state that is WRONG for every ordinary
+        // launch, and a config key is exactly the kind of state that gets set once and
+        // silently outlives the session that wanted it. A launch flag cannot: Steam and
+        // a double-click both start the game without one, so normal play is untouched
+        // by construction rather than by remembering to clear something.
+        internal static Vector3? TestPin;
+        internal static float TestPinYaw;
+        internal static bool TestPinHasYaw;
+        // The track --tm-map named. The pin applies to THAT map only: a playtest run
+        // routinely ends with quitting to the menu and picking something else, and a
+        // pin from another course drops you in the sky above this one. --tm-pin without
+        // --tm-map is honoured on every custom map, but the editor always sends both.
+        internal static string TestPinMap;
+
         // Snapshot of the GAME's shaders, taken in the LoadScene prefix right
         // before the map bundle is loaded (so nothing bundle-origin can be in it).
         // Used to (a) resolve duplicate shader names to the game's platform-correct
@@ -446,12 +468,74 @@ namespace TrickyMaddnessLevelHook
             {
                 RunDebugBundleLoad();
             }
-            if (!string.IsNullOrEmpty(debugAutoLoadMap.Value))
+            // Launch flags first, so an editor playtest run overrides whatever the
+            // config happens to hold rather than fighting it.
+            string cliMap = ParseLaunchArgs();
+            if (TestPin != null && !string.IsNullOrEmpty(cliMap)) TestPinMap = cliMap;
+            if (TestPin != null)
+                Log.LogWarning(TestPinMap != null
+                    ? $"[TestPin] scoped to '{TestPinMap}' — every other map starts at its gate"
+                    : "[TestPin] no --tm-map given, so EVERY custom map this session starts at the pin");
+            string autoMap = !string.IsNullOrEmpty(cliMap) ? cliMap : debugAutoLoadMap.Value;
+            if (!string.IsNullOrEmpty(autoMap))
             {
-                StartCoroutine(AutoLoadMap(debugAutoLoadMap.Value));
+                StartCoroutine(AutoLoadMap(autoMap));
             }
 
             DoPatching();
+        }
+
+        // --tm-map <track> / --tm-pin <x,y,z[,yaw]> — what the editor's Playtest From
+        // Pin launches the game with, so a test run needs no config edit and leaves
+        // nothing behind when the process exits. Unity ignores args it does not know,
+        // and run_bepinex.sh execs the player with "$@" (its own first-arg special
+        // case only fires for an EXECUTABLE path), so these arrive intact.
+        private static string ParseLaunchArgs()
+        {
+            string map = null;
+            string[] argv;
+            try { argv = Environment.GetCommandLineArgs(); }
+            catch (Exception e) { Log.LogWarning($"[TestPin] command line unreadable: {e.Message}"); return null; }
+            for (int i = 0; i + 1 < argv.Length; i++)
+            {
+                if (argv[i] == "--tm-map") map = argv[i + 1];
+                else if (argv[i] == "--tm-pin") SetTestPin(argv[i + 1], "--tm-pin");
+            }
+            return map;
+        }
+
+        // "x,y,z" or "x,y,z,yaw", invariant culture — this arrives from a shell or a
+        // config file, never from the user's locale. A malformed spec logs and leaves
+        // the pin unset: starting at the gate is the right failure, since the
+        // alternative is teleporting the rider to a half-parsed coordinate.
+        private static void SetTestPin(string spec, string origin)
+        {
+            TestPin = null; TestPinHasYaw = false;
+            if (string.IsNullOrEmpty(spec)) return;
+            string[] f = spec.Split(',');
+            if (f.Length < 3 || f.Length > 4)
+            {
+                Log.LogError($"[TestPin] {origin} \"{spec}\" is not \"x,y,z\" or \"x,y,z,yaw\" — ignored");
+                return;
+            }
+            var v = new float[4];
+            for (int i = 0; i < f.Length; i++)
+                if (!float.TryParse(f[i].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out v[i]))
+                {
+                    Log.LogError($"[TestPin] {origin} \"{spec}\": field {i + 1} is not a number — ignored");
+                    return;
+                }
+            TestPin = new Vector3(v[0], v[1], v[2]);
+            TestPinHasYaw = f.Length == 4;
+            TestPinYaw = v[3];
+            // Warning, not Info: a pin left set is indistinguishable in-game from a map
+            // with a broken start marker, and this line is the whole difference.
+            // Scope is decided by the caller (Awake sets TestPinMap from --tm-map), so this
+            // only reports the parse. Warning, not Info: a run that starts somewhere other
+            // than the gate should be findable in the log without knowing to look for it.
+            Log.LogWarning($"[TestPin] {origin} parsed: {TestPin.Value.ToString("0.##", CultureInfo.InvariantCulture)}"
+                + (TestPinHasYaw ? $" facing {TestPinYaw.ToString("0.#", CultureInfo.InvariantCulture)} deg" : " (facing unchanged)")
+                + " — y is re-seated onto the terrain (RescuePinY), so only xz and facing matter.");
         }
 
         // GameRootPath points at the executable's folder. On macOS that is
@@ -1222,6 +1306,40 @@ namespace TrickyMaddnessLevelHook
             else Log.LogInfo($"[Spawn] {label} already seated (y={p.y:F2}, terrain y={terrainY:F2}, slope {Mathf.Acos(cosSlope) * Mathf.Rad2Deg:F0}deg)");
         }
 
+        // Pin-only Y rescue. A pin's Y comes from a raycast in the EDITOR scene, so it is
+        // ON the surface the moment it is placed — but it is stored per course and outlives
+        // a rebuild, and a hand-typed --tm-pin has no raycast behind it at all. The ordinary
+        // ground-snap probes a deliberately narrow band (marker y+20, 120 m down) and outside
+        // it leaves the marker exactly as authored: for a respawn, silently relocating one by
+        // 500 m would be a worse bug than the bad data that caused it. For a PIN the trade
+        // inverts — "left as authored" means the run starts in empty space with the course off
+        // somewhere else, which is the one thing a shorten-the-loop tool must not do. So when
+        // the narrow probe misses, cast the whole column and re-seat, loudly.
+        const float PinRescueUp   = 2000f;
+        const float PinRescueDown = 8000f;
+
+        static void RescuePinY(Transform t)
+        {
+            Vector3 p = t.position;
+            if (GroundSeat(p, out _, out _, out _)) return;      // in band; the snap below has it
+
+            if (!Physics.Raycast(new Vector3(p.x, p.y + PinRescueUp, p.z), Vector3.down,
+                                 out var hit, PinRescueUp + PinRescueDown, SpawnGroundMask,
+                                 QueryTriggerInteraction.Ignore))
+            {
+                Log.LogWarning($"[TestPin] nothing under the pin at x={p.x:F2} z={p.z:F2} in a "
+                    + $"{PinRescueUp + PinRescueDown:F0} m column — the pin is off the course "
+                    + "entirely, and the run WILL start in empty space");
+                return;
+            }
+            // +2 rather than exactly on it: the ground-snap below seats it properly, and this
+            // only has to land inside its band. A spawnsnap-off map keeps the 2 m as a drop.
+            t.position = new Vector3(p.x, hit.point.y + 2f, p.z);
+            Log.LogWarning($"[TestPin] pin y={p.y:F2} was off the surface (terrain here is "
+                + $"{hit.point.y:F2}) — re-seated. An editor-placed pin lands on the surface, so "
+                + "this usually means the pin predates a rebuild that moved this course's terrain.");
+        }
+
         public static void LoadLevelManager()
         {
             //Find Main Starting Objects
@@ -1229,6 +1347,30 @@ namespace TrickyMaddnessLevelHook
 
             var MakerSpawnPoint = FindAnyObjectByType<MakerSpawnPoint>();
             var MakerRespawnPoint = FindAnyObjectByType<MakerRespawnPoints>();
+
+            // Playtest start pin: relocate the START before anything reads it.
+            // Everything downstream comes off this one transform — the ground-snap
+            // below, the starting-gate prop, LevelManager.startingGate, the rider
+            // seat and StartLaunchRedirect — so moving it here moves the whole start
+            // sequence and nothing else has to know about pins. It deliberately does
+            // NOT move the AI paths or the race line: the field still starts at the
+            // top, which is why this is a testing tool and not a race setup.
+            string pinTrack = menuManager != null ? menuManager.lastLevelEntry.name : null;
+            if (TestPin != null && MakerSpawnPoint != null && TestPinMap != null
+                && !string.Equals(TestPinMap, pinTrack, StringComparison.OrdinalIgnoreCase))
+            {
+                Log.LogInfo($"[TestPin] pin belongs to '{TestPinMap}' and this is '{pinTrack}' — starting at the gate");
+            }
+            else if (TestPin != null && MakerSpawnPoint != null)
+            {
+                MakerSpawnPoint.transform.position = TestPin.Value;
+                if (TestPinHasYaw)
+                    MakerSpawnPoint.transform.rotation = Quaternion.Euler(0f, TestPinYaw, 0f);
+                Log.LogWarning($"[TestPin] start moved to {TestPin.Value.ToString("0.##", CultureInfo.InvariantCulture)}"
+                    + (TestPinHasYaw ? $" facing {TestPinYaw.ToString("0.#", CultureInfo.InvariantCulture)} deg" : "")
+                    + " — this map is NOT starting at its gate");
+                RescuePinY(MakerSpawnPoint.transform);
+            }
 
             // --- Spawn / respawn ground-snap -------------------------------------
             // The game seats the rider's CharacterController CENTER on the
