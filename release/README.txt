@@ -1,4 +1,4 @@
-Tricky Madness Level Hook v2.5.0 — required for every custom map pack
+Tricky Madness Level Hook v2.5.1 — required for every custom map pack
 =======================================================================
 
 This is the plugin that makes custom map packs (SSX Tricky Ports, SSX 3 Ports,
@@ -18,7 +18,23 @@ adds the physics/collision fixes those maps rely on.
   installed. If a map pack you download in the future doesn't include a
   plugins/ folder, this is where its Hook comes from.
 
-WHAT'S NEW IN v2.5.0
+WHAT'S NEW IN v2.5.1
+---------------------
+  A small fix, no new features.
+
+  - The starting gate now lines up with the riders. The gate is one wide bar,
+    and the Hook was always dropping it at the same fixed spot regardless of
+    how many racers turned up — so it sat noticeably off to one side, and if
+    you were racing a full field of nine (which happens once you have a large
+    character roster installed, like the CharacterHook one) the rider on the
+    end started past the end of the bar entirely. It's now centred on whoever
+    actually spawned.
+
+  Nothing here changes any map file, and the Hook stays compatible with every
+  course pack already released. If you're on v2.5.0, this is a straight
+  copy-over — no map re-download, no config changes.
+
+PREVIOUSLY, IN v2.5.0
 ---------------------
   - AI riders now use the course's alternate routes. Every SSX game authored
     several racing lines per course (SSX 3 ships around 88, Merqury City 152),
@@ -33,9 +49,6 @@ WHAT'S NEW IN v2.5.0
     game starts you at that spot on that map instead of at the start gate.
     Command-line only on purpose, so it can never quietly persist into a normal
     play session.
-
-  Nothing here changes any map file, and the Hook stays compatible with every
-  course pack already released.
 
 WHAT'S IN THIS ZIP
 ------------------
