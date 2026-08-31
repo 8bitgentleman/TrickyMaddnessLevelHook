@@ -1411,9 +1411,39 @@ namespace TrickyMaddnessLevelHook
             Traverse.Create(menuManager).Field("lastLevelEntry").SetValue(LevelEntry);
 
             //Insert Starting Gate
+            // The gate is ONE bar 11.94 units wide (child mesh "gate", local AABB
+            // x-extent 3.98, x the prefab's 1.5 root scale), symmetric about its own
+            // pivot — so where it lands is entirely down to this one offset, and it
+            // has no per-rider bays to run out of. What it has to span is not
+            // centred on the spawn point: LevelManager.Start seats AI i at
+            // x = -6.75 + 1.5i (plus another 1.5 once i passes the player's slot)
+            // and the player at x = -5.25 + 1.5*slot, which is lanes k = 1..N at
+            // x = -6.75 + 1.5k for N = racerEntries.Count. Mid-field is therefore
+            // 0.75N - 6, and the -0.5 this used to hardcode is not that for any N:
+            // at N = 8 it leaves 1.22 of spare bar on the left and 0.22 on the
+            // right (the misalignment visible on every custom map), and at N = 9
+            // the last rider starts 1.28 units past the end of the bar entirely.
+            //
+            // ⚠️ N = 9 is STOCK behaviour, not something a mod sets. SelectLevel
+            // adds the player and THEN Min(8, pool.Count) opponents, so any roster
+            // big enough to fill the pool (>= 10 entries — CharacterHook's is)
+            // fields nine. TM's own courses never show it because the stock roster
+            // is five, which leaves the pool short and the pad-to-8 loop in charge.
+            //
+            // Non-race modes spawn the player alone at the mode-locked slot 3 and
+            // leave racerEntries holding the PREVIOUS race's list, so the count is
+            // only meaningful when GetMode() == Race. Reading it unconditionally
+            // would drag the bar sideways on a freestyle run behind a 9-up race.
+            float gateX = -0.75f;   // lone rider at slot 3
+            if (menuManager != null && menuManager.GetMode() == MenuManager.Mode.Race)
+            {
+                var racers = menuManager.racerEntries;
+                int lanes = racers != null ? racers.Count : 0;
+                if (lanes > 0) gateX = 0.75f * lanes - 6f;
+            }
             var StartingGate = Resources.Load<GameObject>("game/startinggate");
             GameObject StartingGateObject = Instantiate(StartingGate);
-            StartingGateObject.transform.position = MakerSpawnPoint.transform.TransformPoint(new Vector3(-0.5f,0,0.5f));
+            StartingGateObject.transform.position = MakerSpawnPoint.transform.TransformPoint(new Vector3(gateX,0,0.5f));
             StartingGateObject.transform.rotation = MakerSpawnPoint.transform.rotation;
 
             // Custom-map start-launch fix: steer the human's launch down-course for
