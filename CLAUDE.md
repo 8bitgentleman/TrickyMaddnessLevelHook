@@ -88,6 +88,16 @@ numbering.
   never widen `GroundSeat`'s narrow band, which is what keeps a bad respawn from
   silently teleporting 500 m.
 
+- §26 The starting-gate offset is **computed from the field, not hardcoded** —
+  lanes are `x = -6.75 + 1.5k` for `k = 1..racerEntries.Count`, so mid-field is
+  `0.75N - 6` and the bar (11.94 units, one mesh, no bays) must be centred there.
+  ⚠️ Read `racerEntries.Count` **only when `GetMode() == Race`**: the other two
+  modes spawn the player alone at the mode-locked slot 3 and leave the list
+  holding the *previous* race's field, so an unguarded read shifts the bar
+  sideways on a freestyle run taken after a race. ⚠️ A full field is **9, not 8**
+  (stock `SelectLevel` adds the player and *then* `Min(8, pool.Count)`), which
+  only shows up on a roster of ≥ 10 — i.e. never in TM, always with CharacterHook.
+
 ## Version drift
 
 `MenuManager.SelectLevel(LevelEntry)` was renamed to **`LoadScene(LevelEntry)`**
