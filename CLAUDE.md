@@ -98,6 +98,14 @@ numbering.
   (stock `SelectLevel` adds the player and *then* `Min(8, pool.Count)`), which
   only shows up on a roster of ≥ 10 — i.e. never in TM, always with CharacterHook.
 
+- ⚠️ **`PlayAgain()` on a custom map silently unloads the bundle.** The
+  `LoadScene` prefix rewrites `levelEntry.sceneName` from the `$<bundle path>`
+  marker to the bundle's real scene name (`Plugin.cs:3154`) and the game keeps
+  that copy as `MenuManager.lastLevelEntry`; replaying it strips the `$`, so the
+  prefix takes the built-in branch instead. This is the game's own Play Again
+  button, on every custom map — workaround and full mechanism:
+  `AIMod-src/CLAUDE.md`.
+
 ## Version drift
 
 `MenuManager.SelectLevel(LevelEntry)` was renamed to **`LoadScene(LevelEntry)`**
