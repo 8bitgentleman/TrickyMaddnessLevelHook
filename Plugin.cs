@@ -4505,6 +4505,14 @@ namespace TrickyMaddnessLevelHook
             public Color fog;
             public float fogDen;
             public Color terr;       // terrain material tint
+            // Linear-fog support (Avalanche is GX_FOG_PERSP_LIN on every course; exp2 has no
+            // faithful equivalent — see avalanche/FORMAT_RE.md §20). "exp2" (default) keeps
+            // today's ExponentialSquared/fogDen behaviour; "linear" switches to
+            // fogStart/fogEnd and ignores fogDen. Legacy (12-token) markers parse to "exp2"
+            // with fogStart/fogEnd at 0, so an old marker is byte-identical to before.
+            public string fogMode;   // "exp2" | "linear"
+            public float fogStart;   // world units, linear mode only
+            public float fogEnd;     // world units, linear mode only
         }
 
         List<Stop> _stops;
@@ -4576,7 +4584,8 @@ namespace TrickyMaddnessLevelHook
             var domes = FindObjectsOfType<SkydomeFollow>();
             if (domes.Length > 0) _dome = domes[0];
 
-            foreach (var s in _stops) if (s.fogDen > 0f) { _anyFog = true; break; }
+            foreach (var s in _stops)
+                if (s.fogDen > 0f || (s.fogMode == "linear" && s.fogEnd > 0f)) { _anyFog = true; break; }
 
             Plugin.Log.LogInfo($"[LightingRamp] driving sun={(_sun != null ? _sun.name : "none")}, "
                 + $"{_domeMats.Length} skydome material(s), {_terrMats.Length} terrain material(s)");
@@ -4627,6 +4636,11 @@ namespace TrickyMaddnessLevelHook
                         fog = Color.Lerp(a.fog, b.fog, t),
                         fogDen = Mathf.Lerp(a.fogDen, b.fogDen, t),
                         terr = Color.Lerp(a.terr, b.terr, t),
+                        // Mode is discrete, like region — picked from the nearer stop rather
+                        // than blended; start/end lerp like every other float channel.
+                        fogMode = t < 0.5f ? a.fogMode : b.fogMode,
+                        fogStart = Mathf.Lerp(a.fogStart, b.fogStart, t),
+                        fogEnd = Mathf.Lerp(a.fogEnd, b.fogEnd, t),
                     };
                 }
             }
@@ -4652,9 +4666,18 @@ namespace TrickyMaddnessLevelHook
 
             if (_anyFog)
             {
-                RenderSettings.fog = g.fogDen > 0f;
-                RenderSettings.fogMode = FogMode.ExponentialSquared;
-                RenderSettings.fogDensity = g.fogDen;
+                bool linear = g.fogMode == "linear";
+                RenderSettings.fog = linear ? g.fogEnd > 0f : g.fogDen > 0f;
+                RenderSettings.fogMode = linear ? FogMode.Linear : FogMode.ExponentialSquared;
+                if (linear)
+                {
+                    RenderSettings.fogStartDistance = g.fogStart;
+                    RenderSettings.fogEndDistance = g.fogEnd;
+                }
+                else
+                {
+                    RenderSettings.fogDensity = g.fogDen;
+                }
                 RenderSettings.fogColor = g.fog;
             }
 
@@ -4689,21 +4712,24 @@ namespace TrickyMaddnessLevelHook
             {
                 _logCountdown = 600;   // ~10 s at 60 fps; enough to read the ramp in a log
                 Plugin.Log.LogDebug($"[LightingRamp] y={_y:F0} near={g.region} sun={g.sunI:F2} "
-                    + $"fog=#{ColorUtility.ToHtmlStringRGB(g.fog)}@{g.fogDen:F4} "
+                    + $"fog=#{ColorUtility.ToHtmlStringRGB(g.fog)}[{g.fogMode}]@{(g.fogMode == "linear" ? $"{g.fogStart:F0}-{g.fogEnd:F0}" : $"{g.fogDen:F4}")} "
                     + $"fill=#{ColorUtility.ToHtmlStringRGB(g.fill)}");
             }
         }
 
         // "LightStop_<region>_<y>_<sunI>_<sunHex>_<ambR>_<ambG>_<ambB>_<fillHex>_<fogHex>_
-        //  <fogDen>_<terrHex>" — 12 tokens, every channel fully resolved at import so there
-        // is nothing optional to branch on here. Anything short or unparseable is refused
-        // rather than defaulted: a stop that silently reads as black would be far worse than
-        // no ramp, and the caller disables the whole ramp when any stop fails.
+        //  <fogDen>_<terrHex>[_<fogMode>_<fogStart>_<fogEnd>]" — 12 tokens for the original
+        // exp2-only marker, or 15 with the linear-fog suffix appended. Every channel is fully
+        // resolved at import so there is nothing optional to branch on within a given length.
+        // Anything short, long, or unparseable is refused rather than defaulted: a stop that
+        // silently reads as black would be far worse than no ramp, and the caller disables the
+        // whole ramp when any stop fails. A 12-token marker (every marker emitted before this
+        // feature) parses to fogMode "exp2" with fogStart/fogEnd 0 — today's behaviour exactly.
         public static bool TryParse(string name, out Stop s)
         {
             s = new Stop();
             var t = name.Split('_');
-            if (t.Length != 12) return false;
+            if (t.Length != 12 && t.Length != 15) return false;
             var ic = CultureInfo.InvariantCulture;
             float y, sunI, ar, ag, ab, fogDen;
             Color sunC, fill, fog, terr;
@@ -4717,9 +4743,19 @@ namespace TrickyMaddnessLevelHook
             if (!ColorUtility.TryParseHtmlString("#" + t[9], out fog)) return false;
             if (!float.TryParse(t[10], NumberStyles.Float, ic, out fogDen)) return false;
             if (!ColorUtility.TryParseHtmlString("#" + t[11], out terr)) return false;
+            string fogMode = "exp2";
+            float fogStart = 0f, fogEnd = 0f;
+            if (t.Length == 15)
+            {
+                fogMode = t[12];
+                if (fogMode != "exp2" && fogMode != "linear") return false;
+                if (!float.TryParse(t[13], NumberStyles.Float, ic, out fogStart)) return false;
+                if (!float.TryParse(t[14], NumberStyles.Float, ic, out fogEnd)) return false;
+            }
             s.region = t[1]; s.y = y; s.sunI = sunI; s.sunC = sunC;
             s.amb = new Color(ar, ag, ab, 1f);
             s.fill = fill; s.fog = fog; s.fogDen = fogDen; s.terr = terr;
+            s.fogMode = fogMode; s.fogStart = fogStart; s.fogEnd = fogEnd;
             return true;
         }
     }
