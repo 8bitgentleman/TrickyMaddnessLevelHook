@@ -1,4 +1,4 @@
-Tricky Madness Level Hook v2.5.1 — required for every custom map pack
+Tricky Madness Level Hook v2.5.2 — required for every custom map pack
 =======================================================================
 
 This is the plugin that makes custom map packs (SSX Tricky Ports, SSX 3 Ports,
@@ -18,21 +18,29 @@ adds the physics/collision fixes those maps rely on.
   installed. If a map pack you download in the future doesn't include a
   plugins/ folder, this is where its Hook comes from.
 
-WHAT'S NEW IN v2.5.1
+WHAT'S NEW IN v2.5.2
 ---------------------
-  A small fix, no new features.
+  A fix for the starting gate. If you installed v2.5.1, please replace it with
+  this one — v2.5.1 made this worse, not better.
 
-  - The starting gate now lines up with the riders. The gate is one wide bar,
-    and the Hook was always dropping it at the same fixed spot regardless of
-    how many racers turned up — so it sat noticeably off to one side, and if
-    you were racing a full field of nine (which happens once you have a large
-    character roster installed, like the CharacterHook one) the rider on the
-    end started past the end of the bar entirely. It's now centred on whoever
-    actually spawned.
+  - The starting gate now lines up with the riders properly. The gate is a row
+    of upright posts with eight slots between them, one per rider, and the Hook
+    had always been dropping it at a fixed spot that didn't match where the
+    game actually puts anybody — so it sat visibly off to one side on every
+    custom map. v2.5.1 tried to fix that by centring the gate on the field,
+    which happens to be right for eight riders but is exactly half a slot out
+    for nine: every post ended up planted through a rider. It now snaps to the
+    rider spacing instead, so posts always land between riders, at any number.
+
+  - One thing that can't be fixed by moving it: the gate has eight slots and a
+    full field is nine. The ninth rider starts just past the right-hand end.
+    That's the prop the game itself ships, so the only options were "one rider
+    stands off the end" or "stretch the gate and misalign all nine" — the Hook
+    now also makes sure the rider left out is always a CPU racer and never you.
 
   Nothing here changes any map file, and the Hook stays compatible with every
-  course pack already released. If you're on v2.5.0, this is a straight
-  copy-over — no map re-download, no config changes.
+  course pack already released. If you're on v2.5.0 or v2.5.1, this is a
+  straight copy-over — no map re-download, no config changes.
 
 PREVIOUSLY, IN v2.5.0
 ---------------------

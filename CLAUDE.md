@@ -88,15 +88,25 @@ numbering.
   never widen `GroundSeat`'s narrow band, which is what keeps a bad respawn from
   silently teleporting 500 m.
 
-- §26 The starting-gate offset is **computed from the field, not hardcoded** —
-  lanes are `x = -6.75 + 1.5k` for `k = 1..racerEntries.Count`, so mid-field is
-  `0.75N - 6` and the bar (11.94 units, one mesh, no bays) must be centred there.
-  ⚠️ Read `racerEntries.Count` **only when `GetMode() == Race`**: the other two
-  modes spawn the player alone at the mode-locked slot 3 and leave the list
-  holding the *previous* race's field, so an unguarded read shifts the bar
-  sideways on a freestyle run taken after a race. ⚠️ A full field is **9, not 8**
-  (stock `SelectLevel` adds the player and *then* `Min(8, pool.Count)`), which
-  only shows up on a roster of ≥ 10 — i.e. never in TM, always with CharacterHook.
+- §26 The starting-gate offset must **snap to the lane-midpoint grid** — the
+  prop is a 7-post grid at pitch 1.5 with **8 bays** at `gateX ± 0.75, 2.25,
+  3.75, 5.25`, and lanes are `x = -6.75 + 1.5k` for `k = 1..racerEntries.Count`
+  off `MakerSpawnPoint` (which is what `LevelManager.startingGate` is set to,
+  `Plugin.cs:1471`). A bay lands on a lane only when `gateX` is a **multiple of
+  1.5**, so use `1.5f * (N / 2) - 6f` (int division), **not** mid-field
+  `0.75N - 6`. ⚠️ Mid-field is only a multiple of 1.5 for **even** N; at N = 9 it
+  is `+0.75` and drives all seven posts through seven riders — that shipped as
+  2.5.1. ⚠️ Never size this off the mesh **AABB**: a post grid and a solid bar
+  have the same AABB, and that is exactly how 2.5.1 got written. ⚠️ Read
+  `racerEntries.Count` **only when `GetMode() == Race`** (`Mode` is a plain enum,
+  `Race = 0`, never null): the other two modes spawn the player alone at the
+  mode-locked slot 3 and leave the list holding the *previous* race's field. The
+  non-race branch is `gateX = 0`, which puts slot 3's lane (`-0.75`) in a bay.
+  ⚠️ A full field is **9, not 8** (stock `SelectLevel` adds the player and *then*
+  `Min(8, pool.Count)`), which only shows up on a roster of ≥ 10 — i.e. never in
+  TM, always with CharacterHook — and **nine riders do not fit eight bays**: lane
+  9 stands off the right end by design, and snapping *down* is what guarantees
+  the one left out is an AI, never the human.
 
 - ⚠️ **`PlayAgain()` on a custom map silently unloads the bundle.** The
   `LoadScene` prefix rewrites `levelEntry.sceneName` from the `$<bundle path>`

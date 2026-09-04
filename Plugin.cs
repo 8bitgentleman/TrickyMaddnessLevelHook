@@ -1411,18 +1411,32 @@ namespace TrickyMaddnessLevelHook
             Traverse.Create(menuManager).Field("lastLevelEntry").SetValue(LevelEntry);
 
             //Insert Starting Gate
-            // The gate is ONE bar 11.94 units wide (child mesh "gate", local AABB
-            // x-extent 3.98, x the prefab's 1.5 root scale), symmetric about its own
-            // pivot — so where it lands is entirely down to this one offset, and it
-            // has no per-rider bays to run out of. What it has to span is not
-            // centred on the spawn point: LevelManager.Start seats AI i at
-            // x = -6.75 + 1.5i (plus another 1.5 once i passes the player's slot)
-            // and the player at x = -5.25 + 1.5*slot, which is lanes k = 1..N at
-            // x = -6.75 + 1.5k for N = racerEntries.Count. Mid-field is therefore
-            // 0.75N - 6, and the -0.5 this used to hardcode is not that for any N:
-            // at N = 8 it leaves 1.22 of spare bar on the left and 0.22 on the
-            // right (the misalignment visible on every custom map), and at N = 9
-            // the last rider starts 1.28 units past the end of the bar entirely.
+            // The gate is NOT a plain bar. Measured off the live prefab
+            // (resources.assets, GameObject "StartingGate", one child mesh "gate",
+            // 912 verts, 1.5 root scale): SEVEN posts at gate-local x = 0, +/-1.5,
+            // +/-3.0, +/-4.5 — pitch exactly 1.5 — plus end caps at +/-5.7/+/-5.963.
+            // The posts are the dividers BETWEEN riders, so a rider belongs in a
+            // bay at gateX +/- 0.75, 2.25, 3.75, 5.25. EIGHT bays, and that is the
+            // whole gate: it cannot hold nine.
+            //
+            // The lanes are pinned to MakerSpawnPoint, not to this prop — we hand
+            // LevelManager.startingGate the spawn point below, and LevelManager.Start
+            // seats every rider at startingGate.position + rotation * (x, 0.45, 0):
+            // AI i at x = -6.75 + 1.5i (plus another 1.5 once i passes the player's
+            // slot) and the player at x = -5.25 + 1.5*slot. Whatever the slot draw,
+            // the occupied set is always lanes k = 1..N at x = -6.75 + 1.5k for
+            // N = racerEntries.Count.
+            //
+            // So a bay lands on a lane only when gateX is a MULTIPLE OF 1.5. Mid-field
+            // is 0.75N - 6, which is a multiple of 1.5 for EVEN N only; at odd N it
+            // lands on a lane and every post spears a rider. Snap it down to the lane
+            // midpoint grid instead — exact for even N, one bay left at odd N.
+            //
+            // ⚠️ At N = 9 the field is 1.5 wider than the gate and lane 9 (x = +6.75)
+            // stands off the right end. That is geometry, not a tuning choice: eight
+            // bays, nine riders. Snapping DOWN rather than up is what makes the odd
+            // one out an AI every time — the player's slot is Random.Range(0,7), so
+            // the human is always in lanes 1..7 and never in the one left outside.
             //
             // ⚠️ N = 9 is STOCK behaviour, not something a mod sets. SelectLevel
             // adds the player and THEN Min(8, pool.Count) opponents, so any roster
@@ -1430,16 +1444,17 @@ namespace TrickyMaddnessLevelHook
             // fields nine. TM's own courses never show it because the stock roster
             // is five, which leaves the pool short and the pad-to-8 loop in charge.
             //
-            // Non-race modes spawn the player alone at the mode-locked slot 3 and
-            // leave racerEntries holding the PREVIOUS race's list, so the count is
-            // only meaningful when GetMode() == Race. Reading it unconditionally
-            // would drag the bar sideways on a freestyle run behind a 9-up race.
-            float gateX = -0.75f;   // lone rider at slot 3
+            // Non-race modes keep the mode-locked slot 3 (the Random.Range only runs
+            // when GetMode() is Race, which is 0 — the game brtrue's past it for
+            // Freestyle/TimeTrials) and leave racerEntries holding the PREVIOUS
+            // race's list, so the count is only meaningful in Race. A lone rider
+            // sits at -5.25 + 1.5*3 = -0.75, which is a bay when gateX is 0.
+            float gateX = 0f;   // lone rider at slot 3 (x = -0.75) => the -0.75 bay
             if (menuManager != null && menuManager.GetMode() == MenuManager.Mode.Race)
             {
                 var racers = menuManager.racerEntries;
                 int lanes = racers != null ? racers.Count : 0;
-                if (lanes > 0) gateX = 0.75f * lanes - 6f;
+                if (lanes > 0) gateX = 1.5f * (lanes / 2) - 6f;   // int division: snap down
             }
             var StartingGate = Resources.Load<GameObject>("game/startinggate");
             GameObject StartingGateObject = Instantiate(StartingGate);
