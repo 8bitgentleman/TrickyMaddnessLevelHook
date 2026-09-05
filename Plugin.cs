@@ -205,8 +205,9 @@ namespace TrickyMaddnessLevelHook
         // origin, isSupported, keywords, action taken). Off in shipped builds.
         private static ConfigEntry<bool> shaderDiagnostics;
         // Name of a registered track to auto-select shortly after boot, for
-        // deterministic headless testing (attract mode picks maps at random).
-        // Empty in shipped builds.
+        // deterministic headless testing. Empty in shipped builds.
+        // ⚠️ The ONLY way into a map without a menu click: the game has no
+        // attract mode, whatever these comments used to say. HOOK_NOTES.md §10.
         private static ConfigEntry<string> debugAutoLoadMap;
         // When true, after building rail colliders a SphereCast probe verifies the
         // game-side grind-detection contract (layer-9 hit + GetComponent<Rail>).
@@ -216,9 +217,15 @@ namespace TrickyMaddnessLevelHook
         // the complete race-line path, so riders pick among alternate routes instead
         // of running single file. See AI_PATHS_PLAN.md.
         private static ConfigEntry<bool> multiPathAI;
-        // When true, custom maps spawn PerfHarness: an on-screen frame-rate readout
-        // plus hotkeys that switch each suspected frame-rate cost on and off mid-ride,
-        // so which one dominates is measured rather than guessed. Off in shipped builds.
+        // When true, custom maps spawn PerfHarness: respawn / out-of-bounds
+        // instrumentation, reported to the log on level exit or on demand with
+        // Ctrl+U. Off in shipped builds.
+        //
+        // ⚠️ The rendering half this used to describe — an on-screen frame-rate
+        // readout plus hotkeys toggling each suspected cost mid-ride — is GONE.
+        // Every ablation it measured came back inside the noise floor and the
+        // answer was on the physics side; the class header says why it must not
+        // come back.
         private static ConfigEntry<bool> perfHarness;
 
         // Playtest start pin — the editor's SSX -> Playtest From Pin, and NOTHING else.
@@ -590,8 +597,13 @@ namespace TrickyMaddnessLevelHook
 
         // Headless test hook: selects a named track through the game's own
         // SelectLevel(index) — the exact path a real menu click takes (racer
-        // setup, LoadScene coroutine, our prefix), unlike attract mode which
-        // picks maps at random.
+        // setup, LoadScene coroutine, our prefix), so what this exercises is what
+        // a player exercises.
+        //
+        // ⚠️ It is also the only no-menu route in. This comment used to contrast
+        // it with a vanilla "attract mode" picking maps at random; there is no such
+        // thing — SelectLevel and PlayAgain are LoadScene's only callers in the
+        // whole assembly. HOOK_NOTES.md §10 carries the disassembly evidence.
         private static System.Collections.IEnumerator AutoLoadMap(string trackName)
         {
             float deadline = Time.realtimeSinceStartup + 60f;
