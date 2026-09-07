@@ -259,10 +259,19 @@ def main(argv):
                   "build target" % (os.path.basename(asset_path), platform,
                                     detected), file=sys.stderr)
         out_path = os.path.splitext(asset_path)[0] + ".aipaths.txt"
+        # Headers (scale/gravity/platform/...) are independent of whether the
+        # bundle has any real MakerAIPath data -- skipping the whole sidecar
+        # when paths is empty used to also drop every header silently. That
+        # is how a course with zero authored AI paths (no source data, e.g.
+        # every WildTangent course so far) shipped riding at the Hook's
+        # stock worldScale/gravity of 1.0 regardless of what --scale/--gravity
+        # this script was called with: BuildAIPathsFromSidecar already
+        # tolerates a header-only sidecar fine (falls through to
+        # BuildAIPathFromRaceLine), so there is nothing gated on `paths` here
+        # except the "path" blocks themselves.
         if not paths:
-            print(f"{os.path.basename(asset_path)}: no usable AI paths found, "
-                  f"not writing {os.path.basename(out_path)}")
-            continue
+            print(f"{os.path.basename(asset_path)}: no usable AI paths found "
+                  f"-- writing headers only to {os.path.basename(out_path)}")
         with open(out_path, "w") as f:
             f.write("# AI paths extracted from %s by gen_aipaths.py\n"
                     "# format: 'path' starts a path; then 'x z windup' per point\n"
@@ -289,9 +298,10 @@ def main(argv):
                 f.write("path\n")
                 for x, z, w in pts:
                     f.write("%r %r %d\n" % (x, z, w))
-        npts = sum(len(p) for p in paths)
-        print(f"{os.path.basename(asset_path)}: wrote {len(paths)} path(s), "
-              f"{npts} point(s) -> {out_path}")
+        if paths:
+            npts = sum(len(p) for p in paths)
+            print(f"{os.path.basename(asset_path)}: wrote {len(paths)} path(s), "
+                  f"{npts} point(s) -> {out_path}")
     return 0
 
 
