@@ -226,7 +226,12 @@ namespace TrickyMaddnessLevelHook
         // Every ablation it measured came back inside the noise floor and the
         // answer was on the physics side; the class header says why it must not
         // come back.
-        private static ConfigEntry<bool> perfHarness;
+        internal static ConfigEntry<bool> perfHarness;
+
+        // When true, custom maps sample the PLAYER's motion every physics step and
+        // write it to Telemetry/<map> <stamp>.csv on level exit. Off in shipped
+        // builds. Read it with authoring/tools/ride_report.py.
+        internal static ConfigEntry<bool> riderTelemetry;
 
         // Playtest start pin — the editor's SSX -> Playtest From Pin, and NOTHING else.
         // Moves a custom map's START to an arbitrary point on the course, so a spot
@@ -297,6 +302,12 @@ namespace TrickyMaddnessLevelHook
                 "racing and whether they are wedged or looping. Written to the log " +
                 "on level exit, or on demand with Ctrl+U. Diagnostic only; leave " +
                 "false for normal play.");
+            riderTelemetry = Config.Bind("Debug", "RiderTelemetry", false,
+                "On custom maps, sample the player's position, velocity and state " +
+                "every physics step and write them to Telemetry/<map> <stamp>.csv on " +
+                "level exit. This is how a course's rail spacing, jump sizing and " +
+                "landing zones get measured in seconds of riding rather than guessed " +
+                "from the level file. Diagnostic only; leave false for normal play.");
             levelSelectScroll = Config.Bind("UI", "LevelSelectScroll", true,
                 "Scroll the level-select card strip when more cards exist than fit " +
                 "on screen, auto-scrolling to the selected card. When all cards fit, " +
@@ -2333,7 +2344,11 @@ namespace TrickyMaddnessLevelHook
             // Respawn / OOB instrumentation. Last, so it belongs to the scene the
             // player will actually ride and dies with it (which is what guarantees
             // its report gets written).
-            if (perfHarness != null && perfHarness.Value)
+            // Either switch spawns it: the two halves are independent reports, but
+            // both need the same rider resolution (LevelManager.player), which is
+            // the one expensive thing the harness does.
+            if ((perfHarness != null && perfHarness.Value)
+                || (riderTelemetry != null && riderTelemetry.Value))
                 PerfHarness.Spawn();
 
             // NB: the open-top sky-fill is started from OnSceneLoaded (not here) —
@@ -6094,6 +6109,148 @@ namespace TrickyMaddnessLevelHook
             return -1;
         }
 
+        // ---- rider motion telemetry ---------------------------------------------
+        // What the rider DOES, sampled every physics step and written to a CSV.
+        // Everything else in this class records what goes wrong; this records what
+        // normal riding looks like, which turns out to be the number nobody had.
+        //
+        // It exists because every threshold in `authoring/tools/make_course.py` —
+        // rail length, rail gap, lateral jog, arch height — was fitted to the static
+        // GEOMETRY of TM's own four courses and none of it to the MOTION of a rider
+        // through them. "The rails are too close together for how fast we're going"
+        // cannot be answered from a level file: rail spacing is a distance, riding is
+        // a distance per second, and nothing here had ever measured the second.
+        // `authoring/tools/ride_report.py` turns this CSV into those seconds.
+        //
+        // ⚠️ Sampled in FixedUpdate, NOT Update. Snowboarder.FixedUpdate is what
+        // writes the state transitions (Grounded -> Airborne -> Grinding), so a
+        // render-rate sampler misses short airs outright and quantises the ones it
+        // does catch to the frame rate — which is the one quantity this exists for.
+        //
+        // ⚠️ The header carries gravity, world scale and the physics step, and the
+        // reader must use them. An air time is only a jump arc under a known g, and
+        // this repo ships maps at four world scales with per-map gravity multipliers
+        // on top (see ScaledGravity) — an analysis that assumes 20 is silently wrong
+        // on most of the library. The chains also run at 50 Hz, not 100.
+        //
+        // ⚠️ The PLAYER only. An AI rider is driven by a speed model that brakes for
+        // its own profiled limits (`AI_BRAIN_PLAN.md`), so its speed measures the AI,
+        // not the course. Sizing course geometry off it would close a loop between
+        // two of our own guesses.
+        struct Sample
+        {
+            public float t;
+            public Vector3 p, v;
+            public int state;
+        }
+
+        // 100 Hz x 40 min. A telemetry run is one descent, not a session; this is
+        // here so the key left set overnight cannot turn a diagnostic into a leak.
+        const int MaxSamples = 240000;
+        readonly List<Sample> _tel = new List<Sample>(16384);
+        bool _telFull;
+
+        static readonly System.Reflection.FieldInfo fTelState =
+            AccessTools.Field(typeof(Snowboarder), "state");
+        static readonly System.Reflection.FieldInfo fTelVel =
+            AccessTools.Field(typeof(Snowboarder), "velocity");
+
+        void FixedUpdate()
+        {
+            if (Plugin.riderTelemetry == null || !Plugin.riderTelemetry.Value) return;
+            if (_telFull || !_watchLocked || _sb == null) return;
+            if (_human < 0 || _human >= _sb.Length) return;
+            // A reflection miss records nothing rather than a column of zeroes: a CSV
+            // of plausible-looking constants is worse than no CSV at all.
+            if (fTelState == null || fTelVel == null) return;
+            var sb = _sb[_human];
+            if (sb == null) return;
+
+            object st = fTelState.GetValue(sb);
+            int state = st == null ? -1 : Convert.ToInt32(st);
+            // Starting (0) is the grid before the gun and Done (5) is a finished
+            // rider coasting out. Both are minutes of near-zero speed that would land
+            // in the speed percentiles as a fake slow tail.
+            if (state == 0 || state == 5 || state < 0) return;
+
+            object v = fTelVel.GetValue(sb);
+            _tel.Add(new Sample
+            {
+                t = Time.time,
+                p = sb.transform.position,
+                v = v is Vector3 ? (Vector3)v : Vector3.zero,
+                state = state,
+            });
+            if (_tel.Count >= MaxSamples)
+            {
+                _telFull = true;
+                Plugin.Log.LogWarning($"[Telemetry] sample cap ({MaxSamples}) hit — recording "
+                    + "stopped; the CSV holds the first part of this run only.");
+            }
+        }
+
+        static string StateName(int s)
+        {
+            return s == 1 ? "grounded" : s == 2 ? "airborne" : s == 3 ? "grinding"
+                 : s == 4 ? "dead" : s.ToString(CultureInfo.InvariantCulture);
+        }
+
+        void WriteTelemetry()
+        {
+            if (Plugin.riderTelemetry == null || !Plugin.riderTelemetry.Value) return;
+            if (_tel.Count == 0)
+            {
+                Plugin.Log.LogWarning("[Telemetry] armed but recorded 0 samples — the player "
+                    + "was never resolved, or the run never left the start gate.");
+                return;
+            }
+            try
+            {
+                string dir = Path.Combine(BepInEx.Paths.GameRootPath, "Telemetry");
+                Directory.CreateDirectory(dir);
+                string map = string.IsNullOrEmpty(Plugin.LoadedAssetBundle)
+                    ? "unknown"
+                    : Path.GetFileNameWithoutExtension(Plugin.LoadedAssetBundle);
+                string file = Path.Combine(dir,
+                    map + " " + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".csv");
+
+                // InvariantCulture everywhere. The game runs on whatever locale the
+                // machine has, and a European decimal comma would silently produce a
+                // CSV whose every field is two columns.
+                var inv = CultureInfo.InvariantCulture;
+                using (var w = new StreamWriter(file, false))
+                {
+                    w.WriteLine("# tm-rider-telemetry v1");
+                    w.WriteLine("# map=" + map);
+                    w.WriteLine("# worldScale=" + Plugin.WorldScale.ToString("R", inv));
+                    w.WriteLine("# gravity=" + Plugin.ScaledGravity(20f).ToString("R", inv));
+                    w.WriteLine("# gravityMultiplier=" + Plugin.MapGravityMultiplier.ToString("R", inv));
+                    w.WriteLine("# fixedDeltaTime=" + Time.fixedDeltaTime.ToString("R", inv));
+                    w.WriteLine("# samples=" + _tel.Count.ToString(inv)
+                        + (_telFull ? " (TRUNCATED at the cap)" : ""));
+                    w.WriteLine("t,x,y,z,vx,vy,vz,speed,state");
+                    for (int i = 0; i < _tel.Count; i++)
+                    {
+                        var s = _tel[i];
+                        w.WriteLine(string.Concat(
+                            s.t.ToString("F4", inv), ",",
+                            s.p.x.ToString("F3", inv), ",", s.p.y.ToString("F3", inv), ",",
+                            s.p.z.ToString("F3", inv), ",",
+                            s.v.x.ToString("F3", inv), ",", s.v.y.ToString("F3", inv), ",",
+                            s.v.z.ToString("F3", inv), ",",
+                            s.v.magnitude.ToString("F3", inv), ",", StateName(s.state)));
+                    }
+                }
+                Plugin.Log.LogInfo($"[Telemetry] {_tel.Count} sample(s) over "
+                    + $"{_tel[_tel.Count - 1].t - _tel[0].t:F1}s written to {file}");
+            }
+            catch (Exception e)
+            {
+                // A diagnostic must never take the level exit down with it.
+                Plugin.Log.LogError("[Telemetry] could not write the CSV: " + e);
+            }
+        }
+
         void DumpRespawns()
         {
             // Several reports, deliberately separate, because the first ride showed they
@@ -6175,7 +6332,12 @@ namespace TrickyMaddnessLevelHook
 
         void OnDestroy()
         {
-            DumpRespawns();   // free, and the whole reason the run was ridden
+            // Both halves report on the way out — the scene dying is what guarantees
+            // this runs at all — but each only when its own switch armed it, so a
+            // telemetry run does not bury its CSV line under a respawn report.
+            if (Plugin.perfHarness != null && Plugin.perfHarness.Value)
+                DumpRespawns();   // free, and the whole reason the run was ridden
+            WriteTelemetry();
             if (_inst == this) _inst = null;
         }
     }

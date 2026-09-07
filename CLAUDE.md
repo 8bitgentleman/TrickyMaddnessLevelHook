@@ -129,3 +129,21 @@ method + `LevelEntry`'s shape against `Plugin.cs`.
 resolves **every** `[HarmonyPatch]`/`AccessTools` target in all five mods against the
 installed game and names the ones that no longer bind, plus what else in the build
 moved. `tm_baseline/README.md`.
+
+- §27 `[Debug] RiderTelemetry` samples the **player**, in **FixedUpdate**, and
+  writes `<game root>/Telemetry/<map> <stamp>.csv` from `PerfHarness.OnDestroy`.
+  Each of those three is load-bearing. ⚠️ **The player, not an AI rider** — a
+  SmartAI rider brakes for its own profiled limits (`AI_BRAIN_PLAN.md`), so its
+  speed measures the AI, and sizing course geometry off it closes a loop between
+  two of our own guesses. ⚠️ **FixedUpdate, not Update** — `Snowboarder.FixedUpdate`
+  is what writes the state transitions, so a render-rate sampler misses short
+  airs outright and quantises the rest to the frame rate, which is the one
+  quantity this exists to measure. ⚠️ **`OnDestroy`, i.e. the harness must keep
+  dying with the scene** — that is what guarantees the CSV is written at all, and
+  it is the same reason `PerfHarness.Spawn` deliberately does not
+  `DontDestroyOnLoad`. The header carries `worldScale`, `gravity`,
+  `gravityMultiplier` and `fixedDeltaTime` because **none of them is constant
+  across this library** — four world scales, per-map gravity multipliers, and the
+  SSX 3 chains at 50 Hz — and a reader that assumes 20 and 100 is silently wrong
+  on most of it. Consumer + what the numbers mean:
+  `authoring/COURSE_FACTS.md` §2.3.
