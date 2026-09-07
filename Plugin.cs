@@ -5785,12 +5785,29 @@ namespace TrickyMaddnessLevelHook
         public static void Spawn() { Spawn(null); }
 
         // `sceneLabel` names the CSV on a built-in level, where LoadedAssetBundle
-        // is empty. It is captured HERE, not read at write time: OnDestroy runs
-        // while the scene is being torn down for the next one, so the active scene
-        // by then may already be the menu.
+        // is empty.
         public static void Spawn(string sceneLabel)
         {
-            if (_inst != null) return;
+            // One harness per LEVEL, and the level is what the key names. A plain
+            // `if (_inst != null) return` is wrong and shipped once: the harness is
+            // supposed to die with its scene, but on a ride of forest THEN braid01
+            // it did not, so braid01's Spawn silently returned onto the live forest
+            // harness and both laps landed in ONE CSV -- 99s of forest and 71s of
+            // braid01, under braid01's name and braid01's worldScale. The lap that
+            // was supposed to be measured is unrepeatable by then, so this does not
+            // trust the scene to have torn the old one down: a different key means
+            // flush now. DestroyImmediate, not Destroy, because a deferred destroy
+            // leaves two harnesses sampling the same frames and lets the outgoing
+            // one's OnDestroy run after the replacement has already registered.
+            string key = !string.IsNullOrEmpty(sceneLabel)
+                ? sceneLabel
+                : (Plugin.LoadedAssetBundle ?? "");
+            if (_inst != null)
+            {
+                if (_inst._ownerKey == key) return;
+                UnityEngine.Object.DestroyImmediate(_inst.gameObject);
+                _inst = null;
+            }
             // Static, so they outlive the harness they belong to: a second map would
             // otherwise open with the previous map's respawns already in the report.
             GameRespawns.Clear();
@@ -5800,7 +5817,7 @@ namespace TrickyMaddnessLevelHook
             // Deliberately NOT DontDestroyOnLoad: dying with the scene is what
             // guarantees OnDestroy runs and the report is written on level exit.
             _inst = go.AddComponent<PerfHarness>();
-            _inst._sceneLabel = sceneLabel;
+            _inst._ownerKey = key;
             // Say so at the START of the run. Otherwise the only evidence recording
             // ever happened is a line printed on the way out, i.e. after the lap
             // that was supposed to be measured is already unrepeatable.
@@ -6209,9 +6226,17 @@ namespace TrickyMaddnessLevelHook
         readonly List<Sample> _tel = new List<Sample>(16384);
         bool _telFull;
 
-        // Scene name for a built-in level's CSV; null on custom maps, where the
-        // bundle path names the file.
-        string _sceneLabel;
+        // The header's physics constants, snapshotted on this level's first sample
+        // rather than read when the CSV is written. See FixedUpdate.
+        float _hdrWorldScale = 1f, _hdrGravity = 20f, _hdrGravityMult = 1f, _hdrFixedDt = 0.02f;
+
+        // Which level this harness belongs to: the scene name on a built-in level,
+        // the bundle path on a custom map. It names the CSV *and* decides whether a
+        // later Spawn is the same level (ignore) or the next one (flush first), and
+        // it is captured at Spawn rather than read at write time -- OnDestroy runs
+        // while the following scene is loading, so by then the globals it would
+        // otherwise read already describe the wrong course.
+        string _ownerKey;
 
         static readonly System.Reflection.FieldInfo fTelState =
             AccessTools.Field(typeof(Snowboarder), "state");
@@ -6235,6 +6260,20 @@ namespace TrickyMaddnessLevelHook
             // rider coasting out. Both are minutes of near-zero speed that would land
             // in the speed percentiles as a fake slow tail.
             if (state == 0 || state == 5 || state < 0) return;
+
+            // Snapshot the level's own constants the first time this level is
+            // actually being ridden. They are all globals that the NEXT level
+            // overwrites, and OnDestroy can now run while that next level is
+            // loading, so reading them at write time stamps a lap with the wrong
+            // course's scale and gravity -- which is precisely how 99s of forest
+            // came to be filed under worldScale 2.5.
+            if (_tel.Count == 0)
+            {
+                _hdrWorldScale = Plugin.WorldScale;
+                _hdrGravity = Plugin.ScaledGravity(20f);
+                _hdrGravityMult = Plugin.MapGravityMultiplier;
+                _hdrFixedDt = Time.fixedDeltaTime;
+            }
 
             object v = fTelVel.GetValue(sb);
             _tel.Add(new Sample
@@ -6271,9 +6310,13 @@ namespace TrickyMaddnessLevelHook
             {
                 string dir = Path.Combine(BepInEx.Paths.GameRootPath, "Telemetry");
                 Directory.CreateDirectory(dir);
-                string map = !string.IsNullOrEmpty(Plugin.LoadedAssetBundle)
-                    ? Path.GetFileNameWithoutExtension(Plugin.LoadedAssetBundle)
-                    : (!string.IsNullOrEmpty(_sceneLabel) ? _sceneLabel : "unknown");
+                // Named from the key captured at Spawn, NEVER from
+                // Plugin.LoadedAssetBundle read here: a harness flushed because the
+                // NEXT level is already loading would take that level's name and
+                // file the lap under a course it was not ridden on.
+                string map = !string.IsNullOrEmpty(_ownerKey)
+                    ? Path.GetFileNameWithoutExtension(_ownerKey)
+                    : "unknown";
                 string file = Path.Combine(dir,
                     map + " " + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".csv");
 
@@ -6285,10 +6328,10 @@ namespace TrickyMaddnessLevelHook
                 {
                     w.WriteLine("# tm-rider-telemetry v1");
                     w.WriteLine("# map=" + map);
-                    w.WriteLine("# worldScale=" + Plugin.WorldScale.ToString("R", inv));
-                    w.WriteLine("# gravity=" + Plugin.ScaledGravity(20f).ToString("R", inv));
-                    w.WriteLine("# gravityMultiplier=" + Plugin.MapGravityMultiplier.ToString("R", inv));
-                    w.WriteLine("# fixedDeltaTime=" + Time.fixedDeltaTime.ToString("R", inv));
+                    w.WriteLine("# worldScale=" + _hdrWorldScale.ToString("R", inv));
+                    w.WriteLine("# gravity=" + _hdrGravity.ToString("R", inv));
+                    w.WriteLine("# gravityMultiplier=" + _hdrGravityMult.ToString("R", inv));
+                    w.WriteLine("# fixedDeltaTime=" + _hdrFixedDt.ToString("R", inv));
                     w.WriteLine("# samples=" + _tel.Count.ToString(inv)
                         + (_telFull ? " (TRUNCATED at the cap)" : ""));
                     w.WriteLine("t,x,y,z,vx,vy,vz,speed,state");
