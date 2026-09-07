@@ -49,6 +49,17 @@ numbering.
   position, which is why the grid works for somebody else's levels too. Sections
   are runs of *adjacent* maps sharing a `group`, so a third group ordered between
   two maps of one group splits that group into two identically-titled sections.
+- §22b `gen_aipaths.py` must write the sidecar's headers (`scale`/`gravity`/
+  `platform`/`source`/`group`/`order`) **unconditionally** — never gate the
+  whole file on whether the bundle has real `MakerAIPath` data. A course with
+  zero authored AI paths (any WildTangent course, so far) still needs its
+  headers; `BuildAIPathsFromSidecar` already tolerates a header-only sidecar
+  fine, falling through to `BuildAIPathFromRaceLine`. Skipping the file
+  entirely when `paths` is empty silently drops `WorldScale`/
+  `MapGravityMultiplier` to the Hook's stock 1.0 regardless of what the build
+  wrapper passed, since `ReadWorldScale`/`ReadGravityMultiplier` both
+  `return 1f` on `!File.Exists` — and it means `stamp_map_order.py` has
+  nothing to stamp `group`/`order` into either.
 - §22 `physicshz` is a **hand-set** header — a `gen_aipaths.py` regen that doesn't
   repeat it drops it silently. Chains only (50); never the per-peak courses.
   ⚠️ A heavy map's frame rate is the physics iteration count, **not** draw calls —
