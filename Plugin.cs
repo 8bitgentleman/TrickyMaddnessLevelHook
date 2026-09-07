@@ -634,7 +634,21 @@ namespace TrickyMaddnessLevelHook
             }
             if (index < 0)
             {
-                Log.LogError($"[Debug] AutoLoadMap: no registered level named '{trackName}'");
+                // Name the game's OWN courses on the way out. Custom maps are named
+                // by their file in Maps/ and are therefore discoverable on disk; the
+                // built-ins are named nowhere outside this list, which makes the one
+                // typo you cannot fix by looking at the filesystem also the one this
+                // error is least helpful about.
+                var builtins = new List<string>();
+                for (int i = 0; i < LevelEntries.GetLevelCount(); i++)
+                {
+                    var e = LevelEntries.GetEntry(i);
+                    if (e.sceneName != null && !e.sceneName.StartsWith("$"))
+                        builtins.Add("'" + e.name + "'");
+                }
+                Log.LogError($"[Debug] AutoLoadMap: no registered level named '{trackName}'"
+                    + " — the game's own courses are: "
+                    + (builtins.Count == 0 ? "(none found)" : string.Join(", ", builtins.ToArray())));
                 yield break;
             }
             Log.LogInfo($"[Debug] AutoLoadMap: selecting '{trackName}' (index {index})");
@@ -698,6 +712,18 @@ namespace TrickyMaddnessLevelHook
             // and only appears during activation — and then fix it.
             if (Instance != null) Instance.StartCoroutine(SkyboxWatch(isCustomScene));
 
+            // Rider telemetry on the game's OWN courses. LoadLevelManager runs for
+            // custom bundles only, so without this the instrument can measure the
+            // courses we author and none of the four the game ships — and the
+            // shipped courses are the calibration the authored ones get sized
+            // against ("match forest's rail gap in seconds" is only answerable if
+            // forest can be measured). Gated on riderTelemetry ALONE: the respawn
+            // half of the harness exists to fix OUR level data's out-of-bounds
+            // shell and has no business reporting on a built-in level.
+            if (!isCustomScene && riderTelemetry != null && riderTelemetry.Value
+                && Instance != null)
+                Instance.StartCoroutine(TelemetryOnBuiltIn(scene));
+
             if (!isCustomScene) return;
 
             // (The open-top sky-fill for domed maps is applied by SkydomeFollow directly
@@ -743,6 +769,26 @@ namespace TrickyMaddnessLevelHook
             catch (Exception e)
             {
                 Log.LogError($"[ShaderRemap] failed on scene '{scene.name}': {e}");
+            }
+        }
+
+        // A built-in level has nothing equivalent to LoadLevelManager to hang the
+        // harness off, and the menu is a scene like any other — so wait for a
+        // LevelManager to appear and spawn only if one does. No LevelManager, no
+        // ride, no CSV. The wait is frames rather than seconds because the harness
+        // must be alive before the rider leaves the gate; two seconds of frames is
+        // far past when LevelManager.Start has run and still finite, so a menu
+        // scene costs 120 no-op frames and then stops asking.
+        static System.Collections.IEnumerator TelemetryOnBuiltIn(Scene scene)
+        {
+            for (int i = 0; i < 120; i++)
+            {
+                if (UnityEngine.Object.FindObjectOfType<LevelManager>() != null)
+                {
+                    PerfHarness.Spawn(scene.name);
+                    yield break;
+                }
+                yield return null;
             }
         }
 
@@ -5736,7 +5782,13 @@ namespace TrickyMaddnessLevelHook
     {
         static PerfHarness _inst;
 
-        public static void Spawn()
+        public static void Spawn() { Spawn(null); }
+
+        // `sceneLabel` names the CSV on a built-in level, where LoadedAssetBundle
+        // is empty. It is captured HERE, not read at write time: OnDestroy runs
+        // while the scene is being torn down for the next one, so the active scene
+        // by then may already be the menu.
+        public static void Spawn(string sceneLabel)
         {
             if (_inst != null) return;
             // Static, so they outlive the harness they belong to: a second map would
@@ -5748,6 +5800,13 @@ namespace TrickyMaddnessLevelHook
             // Deliberately NOT DontDestroyOnLoad: dying with the scene is what
             // guarantees OnDestroy runs and the report is written on level exit.
             _inst = go.AddComponent<PerfHarness>();
+            _inst._sceneLabel = sceneLabel;
+            // Say so at the START of the run. Otherwise the only evidence recording
+            // ever happened is a line printed on the way out, i.e. after the lap
+            // that was supposed to be measured is already unrepeatable.
+            if (Plugin.riderTelemetry != null && Plugin.riderTelemetry.Value)
+                Plugin.Log.LogInfo("[Telemetry] armed — sampling the player every "
+                    + "physics step; the CSV is written when you leave this level.");
         }
 
         void Update()
@@ -6150,6 +6209,10 @@ namespace TrickyMaddnessLevelHook
         readonly List<Sample> _tel = new List<Sample>(16384);
         bool _telFull;
 
+        // Scene name for a built-in level's CSV; null on custom maps, where the
+        // bundle path names the file.
+        string _sceneLabel;
+
         static readonly System.Reflection.FieldInfo fTelState =
             AccessTools.Field(typeof(Snowboarder), "state");
         static readonly System.Reflection.FieldInfo fTelVel =
@@ -6208,9 +6271,9 @@ namespace TrickyMaddnessLevelHook
             {
                 string dir = Path.Combine(BepInEx.Paths.GameRootPath, "Telemetry");
                 Directory.CreateDirectory(dir);
-                string map = string.IsNullOrEmpty(Plugin.LoadedAssetBundle)
-                    ? "unknown"
-                    : Path.GetFileNameWithoutExtension(Plugin.LoadedAssetBundle);
+                string map = !string.IsNullOrEmpty(Plugin.LoadedAssetBundle)
+                    ? Path.GetFileNameWithoutExtension(Plugin.LoadedAssetBundle)
+                    : (!string.IsNullOrEmpty(_sceneLabel) ? _sceneLabel : "unknown");
                 string file = Path.Combine(dir,
                     map + " " + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".csv");
 

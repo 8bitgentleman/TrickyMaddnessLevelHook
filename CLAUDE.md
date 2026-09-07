@@ -147,3 +147,12 @@ moved. `tm_baseline/README.md`.
   SSX 3 chains at 50 Hz — and a reader that assumes 20 and 100 is silently wrong
   on most of it. Consumer + what the numbers mean:
   `authoring/COURSE_FACTS.md` §2.3.
+  ⚠️ **It spawns from TWO places and must keep doing so.** `LoadLevelManager`
+  runs for custom bundles only, so that call alone can measure the courses we
+  author and none of the four the game ships — which are the calibration the
+  authored ones get sized against. `OnSceneLoaded` spawns it on a built-in level
+  as well, gated on `riderTelemetry` **alone** (the respawn half is about our own
+  OOB data), after waiting for a `LevelManager` to exist so the menu is excluded.
+  The scene name is captured at **Spawn**, not read at write time: `OnDestroy`
+  runs while the scene is being torn down for the next one, so by then the active
+  scene can already be the menu.
