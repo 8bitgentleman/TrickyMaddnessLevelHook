@@ -156,3 +156,12 @@ moved. `tm_baseline/README.md`.
   The scene name is captured at **Spawn**, not read at write time: `OnDestroy`
   runs while the scene is being torn down for the next one, so by then the active
   scene can already be the menu.
+  ⚠️ **The harness does NOT reliably die with its scene, and `Spawn` must flush a
+  live one whose level differs** — `if (_inst != null) return` shipped once and a
+  ride of forest THEN braid01 put both laps in ONE CSV (99 s + 71 s), under
+  braid01's name and worldScale, with no second `armed` line because the early
+  return precedes the log. Keyed on scene name / bundle path, `DestroyImmediate`
+  so the outgoing harness cannot outlive its replacement. ⚠️ For the same reason
+  `worldScale`, `gravity`, `gravityMultiplier` and `fixedDeltaTime` are
+  snapshotted on the level's **first sample**, never read in `WriteTelemetry` —
+  they are globals the next level overwrites.
