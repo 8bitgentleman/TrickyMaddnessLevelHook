@@ -134,6 +134,25 @@ namespace TrickyMaddnessLevelHook
         // the feel of a course that never asked for it. Same lifetime rule as
         // WorldScale: reset on built-in selection and on menu return.
         internal static float MapPhysicsHz = 0f;
+        // Lateral catch half-width (METRES, absolute) the active custom map asks
+        // for, from the optional "railcatch <f>" header in its .aipaths.txt
+        // sidecar. 0 = no declaration, which keeps BuildRailCollider's original
+        // `0.25f * WorldScale` — i.e. every map that shipped before this header
+        // existed is bit-identical.
+        //
+        // WHY a map gets to ask: the WorldScale formula assumes a map's finished
+        // SIZE is proportional to its scale header, which holds across the SSX
+        // family only because the importer's S = scale/100 converts SSX
+        // CENTIMETRES to metres. WildTangent's raw units are already metres, so
+        // its scale header is 100 and S = 1.0 — the geometry passes through 1:1
+        // and the course comes out the same size as every 2.5x port, while the
+        // formula computes a 25 m catch radius for a 0.24 m rail. Absolute metres
+        // is the only unit that is right for both families, and the header lets a
+        // map say so without changing what the 153 already-deployed maps do.
+        //
+        // Same lifetime rule as WorldScale: reset on built-in selection and on
+        // menu return, so a built-in level can never inherit a custom map's value.
+        internal static float MapRailCatch = 0f;
         // The game's own fixedDeltaTime, captured once at Awake before anything
         // can have modified it. Restoring from a snapshot taken at apply time
         // would re-capture an already-overridden value if two custom maps loaded
@@ -691,11 +710,13 @@ namespace TrickyMaddnessLevelHook
             // (no scale, no gravity) would otherwise fail the condition and leave
             // its tick rate applied to every level loaded afterwards.
             if (!isCustomScene && pendingSceneName == null
-                && (WorldScale != 1f || MapGravityMultiplier != 1f || MapPhysicsHz != 0f))
+                && (WorldScale != 1f || MapGravityMultiplier != 1f || MapPhysicsHz != 0f
+                    || MapRailCatch != 0f))
             {
                 WorldScale = 1f;
                 MapGravityMultiplier = 1f;
                 MapPhysicsHz = 0f;
+                MapRailCatch = 0f;
                 ApplyPhysicsRate("left custom map");
                 Log.LogInfo("[Gravity] left custom map; world scale + gravity multiplier reset to 1");
             }
@@ -2532,8 +2553,16 @@ namespace TrickyMaddnessLevelHook
             // fatter, and a 0.2 m depth can't bridge 2.5x curve-chord sag → most
             // grind approaches miss. Multiplying by WorldScale restores the 1x
             // "target size relative to the visible rail". Inert at scale 1.
-            float HalfWidth = 0.25f * Plugin.WorldScale;
-            float Depth = 0.2f * Plugin.WorldScale;
+            // A map may declare an ABSOLUTE half-width instead (sidecar
+            // "railcatch <f>", metres). The WorldScale product below is only a
+            // proxy for finished map size and it is wrong wherever the source
+            // units are not centimetres — see Plugin.MapRailCatch. Depth keeps
+            // the same 0.8x ratio to the width it has always had, so a declaring
+            // map gets the identical collider SHAPE, just sized in real metres.
+            float HalfWidth = Plugin.MapRailCatch > 0f
+                ? Plugin.MapRailCatch : 0.25f * Plugin.WorldScale;
+            float Depth = Plugin.MapRailCatch > 0f
+                ? 0.8f * Plugin.MapRailCatch : 0.2f * Plugin.WorldScale;
 
             var verts = new List<Vector3>();
             var tris = new List<int>();
@@ -2721,7 +2750,8 @@ namespace TrickyMaddnessLevelHook
         // AI-path point line. Matched on the first token, so a point line can
         // never be mistaken for a header (or the reverse) on a prefix.
         private static readonly string[] SidecarHeaders =
-        { "scale", "gravity", "platform", "source", "spawnsnap", "mapversion", "group", "order" };
+        { "scale", "gravity", "physicshz", "railcatch", "platform", "source", "spawnsnap",
+          "mapversion", "group", "order" };
 
         private static bool IsHeaderLine(string line)
         {
@@ -2833,6 +2863,41 @@ namespace TrickyMaddnessLevelHook
             catch (Exception e)
             {
                 Log.LogError($"[Physics] failed reading physics rate sidecar for {bundlePath}: {e}");
+                return 0f;
+            }
+        }
+
+        // Reads the optional "railcatch <f>" header from a map's .aipaths.txt
+        // sidecar. Returns 0 (no declaration — keep the WorldScale formula) for a
+        // missing sidecar, no railcatch line, or a value outside 0.02-100 m.
+        //
+        // The bounds are a typo guard, not a tuning range. Below a couple of
+        // centimetres the strip is thinner than the rail art and no approach ever
+        // lands on it; above ~100 m the collider is a field the rider grinds by
+        // walking near it, which is exactly the bug this header exists to fix.
+        internal static float ReadRailCatch(string bundlePath)
+        {
+            try
+            {
+                string sidecarPath = Path.ChangeExtension(bundlePath, ".aipaths.txt");
+                if (!File.Exists(sidecarPath)) return 0f;
+                foreach (var raw in File.ReadAllLines(sidecarPath))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("#")) continue;
+                    var t = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (!HeaderMatches(t, "railcatch", Path.GetFileName(sidecarPath))) continue;
+                    float w = float.Parse(t[1], CultureInfo.InvariantCulture);
+                    if (w >= 0.02f && w <= 100f) return w;
+                    Log.LogWarning($"[Rails] sidecar {Path.GetFileName(sidecarPath)} declares railcatch {t[1]} "
+                        + "(must be 0.02-100 m); ignoring, using 0.25 * worldScale");
+                    return 0f;
+                }
+                return 0f;
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"[Rails] failed reading rail catch sidecar for {bundlePath}: {e}");
                 return 0f;
             }
         }
@@ -3145,6 +3210,7 @@ namespace TrickyMaddnessLevelHook
                 Plugin.WorldScale = 1f;
                 Plugin.MapGravityMultiplier = 1f;
                 Plugin.MapPhysicsHz = 0f;
+                Plugin.MapRailCatch = 0f;
                 Plugin.ApplyPhysicsRate("built-in level selected");
                 Plugin.BundleNativePlatform = null;
                 Plugin.BundleSource = Plugin.DefaultSource;
@@ -3242,6 +3308,13 @@ namespace TrickyMaddnessLevelHook
                 if (Plugin.MapPhysicsHz > 0f && !Plugin.mapPhysicsRate.Value)
                     Plugin.Log.LogInfo($"[Physics] map declares physicshz {Plugin.MapPhysicsHz.ToString(CultureInfo.InvariantCulture)} but MapPhysicsRate is off in config; keeping the game's rate");
                 Plugin.ApplyPhysicsRate($"map '{levelEntry.name}'");
+
+                // Per-map rail catch half-width from the same sidecar (0 = no
+                // declaration, keep the 0.25 * WorldScale formula).
+                Plugin.MapRailCatch = Plugin.ReadRailCatch(path);
+                if (Plugin.MapRailCatch > 0f)
+                    Plugin.Log.LogInfo($"[Rails] map declares railcatch {Plugin.MapRailCatch.ToString(CultureInfo.InvariantCulture)} m "
+                        + $"(absolute); ignoring the 0.25 * worldScale default of {(0.25f * Plugin.WorldScale).ToString(CultureInfo.InvariantCulture)} m");
 
                 // Native-platform declaration from the same sidecar (null when absent).
                 // Read on reuse too — the sidecar may have changed on disk.

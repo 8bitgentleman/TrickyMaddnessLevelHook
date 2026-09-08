@@ -23,6 +23,16 @@ Sidecar format (one token line per point, invariant-culture floats):
                           also Unity's own default rate). Costs collision
                           precision: a rider at speed is likelier to clip through
                           thin geometry, so this is for very large maps only.
+    railcatch <f>      <- optional rail grind-collider half-width, in METRES,
+                          0.02-100. Absent = the Hook's own 0.25 * scale, which
+                          is what every map shipped before this header existed
+                          uses. Only declare it when the map's `scale` header is
+                          NOT proportional to its finished size -- WildTangent
+                          is the whole population: its raw units are already
+                          metres, so scale 100 makes the importer pass geometry
+                          through 1:1 while 0.25 * 100 asks for a 25 m catch
+                          radius around a 0.24 m rail. The corpus value is 0.625
+                          (what a 2.5x SSX map gets).
     platform <p>       <- native-GPU platform: "mac" or "windows". Tells the Hook
                           the bundle's own shaders are native to that backend so
                           it trusts them (no shader remap). WITHOUT it every
@@ -67,6 +77,7 @@ Sidecar format (one token line per point, invariant-culture floats):
 
 Usage:
     python3 gen_aipaths.py [--scale <f>] [--gravity <f>] [--physics-hz <f>] \
+        [--rail-catch <f>] \
         [--platform <mac|windows|none>] [--source <slug>] \
         [--spawnsnap <both|raise|off>] [--mapversion <v>] \
         [--group <label>] [--order <n>] \
@@ -155,6 +166,7 @@ def main(argv):
     scale = None
     gravity = None
     physics_hz = None
+    rail_catch = None
     platform = None
     source = None
     spawnsnap = None
@@ -196,6 +208,19 @@ def main(argv):
             # build time rather than being silently ignored at load time.
             if not (10.0 <= physics_hz <= 1000.0):
                 print("--physics-hz must be 10-1000, got %r" % val,
+                      file=sys.stderr)
+                return 2
+        elif flag == "--rail-catch":
+            try:
+                rail_catch = float(val)
+            except ValueError:
+                print("--rail-catch value must be a float, got %r" % val,
+                      file=sys.stderr)
+                return 2
+            # Same bounds the Hook enforces on read, so a typo fails here at
+            # build time rather than being silently ignored at load time.
+            if not (0.02 <= rail_catch <= 100.0):
+                print("--rail-catch must be 0.02-100 metres, got %r" % val,
                       file=sys.stderr)
                 return 2
         elif flag == "--platform":
@@ -282,6 +307,8 @@ def main(argv):
                 f.write("gravity %r\n" % gravity)
             if physics_hz is not None:
                 f.write("physicshz %r\n" % physics_hz)
+            if rail_catch is not None:
+                f.write("railcatch %r\n" % rail_catch)
             if plat is not None and plat != "none":
                 f.write("platform %s\n" % plat)
             if source is not None:
