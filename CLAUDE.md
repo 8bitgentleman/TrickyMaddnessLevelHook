@@ -21,7 +21,7 @@ numbering.
   allow-list, or you get "blocky trees".
 - §6 The rail collider lives on the Rail GO **itself**, and segments come from
   `BuildRailSegments` — **never** `MakerRails.GetSegments()`, which drops each
-  rail's first point.
+  rail's first point. Its catch width is §28.
 - §7 `List<T>` of user-defined nested serializables arrives **EMPTY** under
   BepInEx runtime load — hence the plain-text sidecar.
 - §11 `WindVolume`'s BoxCollider is a geometry carrier ONLY, disabled at runtime.
@@ -176,3 +176,18 @@ moved. `tm_baseline/README.md`.
   `worldScale`, `gravity`, `gravityMultiplier` and `fixedDeltaTime` are
   snapshotted on the level's **first sample**, never read in `WriteTelemetry` —
   they are globals the next level overwrites.
+
+- §28 `railcatch <f>` sets the rail grind-collider catch half-width in **absolute
+  metres**; **absent (0) means the original `0.25f * WorldScale`**, and that
+  sentinel is load-bearing — it is what keeps all 153 already-deployed maps
+  bit-identical, so never give it a non-zero default. `0.25f * WorldScale` is not
+  a distance, it is a distance *proportional to `scale`*, which only reads as
+  metres because the SSX importer's `S = scale/100` converts centimetres. At
+  WildTangent's measured scale **100** (`S = 1.0`, raw units already metres) it
+  asks for a **25 m** catch around a 0.24 m rail. ⚠️ `MapRailCatch` has
+  `WorldScale`'s lifetime rule — reset it on built-in level selection AND on menu
+  return, including in the guard condition, or a custom map's value follows you
+  into the next level. ⚠️ Depth is derived (`0.8 *` the half-width) so the header
+  stays one number; don't split it. ⚠️ Every header `gen_aipaths.py` can emit must
+  also be listed in `SidecarHeaders` — omission is silent (it only inflates the
+  malformed-line counter), which is how `physicshz` sat missing from it.
