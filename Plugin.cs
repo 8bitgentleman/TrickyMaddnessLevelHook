@@ -2056,6 +2056,54 @@ namespace TrickyMaddnessLevelHook
             if (tpAttached > 0 || tpSkipped > 0)
                 Log.LogInfo($"[Teleport] attached {tpAttached} teleport volume(s), skipped {tpSkipped}");
 
+            // Phase 4 custom items — Launch volumes. Naming contract with
+            // SSXImporter.BuildItems: a GO named "Launch_<i>_<speed>" (plus an optional
+            // "_lap<N>") carries a BoxCollider (geometry only), AXIS-ALIGNED like SSX's own
+            // trigger, with the launch direction on a "Dir" child. LaunchVolume SETS the
+            // rider's velocity to that direction * speed the moment they cross in — the one-shot throw SSX Tricky's own
+            // SubType 15/18/24 verbs perform, and what makes megaple's fan shaft a lap
+            // course. "_lap<N>" caps it at N launches per rider so the final descent rides
+            // through to the finish; absent, the volume fires every time. Speed is parsed
+            // invariant-culture, matching the importer.
+            int launchAttached = 0, launchSkipped = 0;
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("Launch_")) continue;
+                    var lnGO = t.gameObject;
+                    if (lnGO.GetComponent<LaunchVolume>() != null) continue; // already attached
+                    if (lnGO.GetComponent<BoxCollider>() == null)
+                    { launchSkipped++; Log.LogDebug($"[Launch] '{lnGO.name}' skipped: no BoxCollider"); continue; }
+
+                    var seg = t.name.Split('_');
+                    float speed;
+                    if (seg.Length < 3 ||
+                        !float.TryParse(seg[2], NumberStyles.Float, CultureInfo.InvariantCulture, out speed) ||
+                        speed <= 0f)
+                    { launchSkipped++; Log.LogWarning($"[Launch] '{lnGO.name}' skipped: no parseable speed in the name"); continue; }
+
+                    int laps = 0;   // 0 = fires every time
+                    if (seg.Length >= 4 && seg[3].StartsWith("lap"))
+                    {
+                        if (!int.TryParse(seg[3].Substring(3), NumberStyles.Integer, CultureInfo.InvariantCulture, out laps) || laps < 1)
+                        { laps = 0; Log.LogWarning($"[Launch] '{lnGO.name}': '{seg[3]}' is not a lap count — firing every time"); }
+                    }
+
+                    var lv = lnGO.AddComponent<LaunchVolume>();
+                    // Launch direction: an optional "Dir" child overrides the box's own
+                    // forward, same channel WindVolume uses for the SSX boost fields whose
+                    // push vector is independent of the volume's orientation.
+                    var lnDir = t.Find("Dir");
+                    lv.WorldDir = lnDir != null ? lnDir.forward : t.forward;
+                    lv.Speed = speed;
+                    lv.Laps = laps;
+                    launchAttached++;
+                }
+            }
+            if (launchAttached > 0 || launchSkipped > 0)
+                Log.LogInfo($"[Launch] attached {launchAttached} launch volume(s), skipped {launchSkipped}");
+
             // Phase 4 custom items — TriggerAnim ("door") volumes. Naming contract with
             // SSXImporter.BuildItems: a GO named "TriggerAnim_*" ships fully authored —
             // LIVE trigger BoxCollider (layer 2), legacy Animation with the baked
@@ -5484,6 +5532,106 @@ namespace TrickyMaddnessLevelHook
             if (!_vel.TryGetValue(sb, out var velT))
             { velT = Traverse.Create(sb).Field("velocity"); _vel[sb] = velT; }
             velT.SetValue(Vector3.zero);
+        }
+    }
+
+    // A LAUNCH VOLUME — the rider's velocity is SET to WorldDir * Speed the moment they
+    // cross into the box, replaced rather than added to. This is Tokyo Megaplex's fan
+    // shaft, and it is a general primitive: SSX Tricky's own lap and boost verbs are all
+    // one-shot launches off an invisible collision box, never sustained fields.
+    //
+    // WHY. megaple is not a single descent. In SSX Tricky you ride almost to the bottom, a
+    // glass fan shaft blasts you back up to the top of the course, you do that twice, and
+    // on the THIRD descent the lift is off and you ride through to the finish. All of that
+    // is recovered, measured, from the course's own data (ssx/SSFLOGIC_FINDINGS.md):
+    //   * Mdl_Endboost_Lap_1000 — an invisible PlayerCollision box at the FOOT of the glass
+    //     shaft (raw elev -46,894..-43,814) carrying SSFLogic MainType 0 / SubType 15, the
+    //     lap verb. The finishing race line runs straight through it (19 densified samples
+    //     inside), which is exactly the gimmick: crossing it launches you on passes 1 and 2,
+    //     and on pass 3 it is disarmed so the same line carries you to the finish.
+    //   * Mdl_Endboost_Z_1000 — SubType 18, the mid-shaft second-stage launch (U6 400000).
+    //   * Mdl_Endboost_End_1000 — SubType 24 at the TOP (+1,772), carrying three unit
+    //     direction vectors and three speeds (27/35/35). All three aim at
+    //     Mdl_EndholeCover_A_1000, the rideable deck at the course start. So "back to the
+    //     top" is a ballistic throw across open air, not a teleport: megaple contains ZERO
+    //     top-level MainType-24 teleport records.
+    // The caps over the shaft (Mdl_Cap_A/B_1000) are PlayerCollision:false — render-only
+    // lids you pass straight through — and all three Endboost boxes are invisible, so the
+    // importer's invisible-barrier drop removes them and nothing is there in the converted
+    // map. These volumes put the mechanism back.
+    //
+    // WHY SET, NOT PUSH. A native AirStream (§11) replaces gravity while you are inside it,
+    // which sounds like the shaft but is not: over the shaft's ~1,146-unit height it spits
+    // the rider out at ~200 u/s and oscillates, and the entry impulse leaves enough residual
+    // sideways velocity to drift ~114 units over the climb — inside a tube of ~25-unit
+    // radius. Setting the velocity zeroes that drift, so the rider goes straight up the
+    // axis, and it matches what the source game's own verbs do.
+    //
+    // COUNTING. Per RIDER (Dictionary<Snowboarder,int>), so an AI cannot consume the
+    // player's allowance and every rider gets the same run. Laps <= 0 means the volume
+    // fires every time (an ordinary boost pad); Laps = N disarms after N launches for that
+    // rider. Edge-triggered on the outside->inside transition, so sitting in the box does
+    // not re-fire, and a rider who leaves and comes back gets the next launch.
+    //
+    // The box is a BoxCollider on this GO, DISABLED at runtime for the same reason
+    // WindVolume disables its own: the game's ground SphereCast hits triggers by default
+    // (Caster.Cast uses the layerMask-only overload), so a live trigger on a cast-included
+    // layer reads as ground and floats the rider. Containment is the analytic OBB test.
+    public class LaunchVolume : MonoBehaviour
+    {
+        public Vector3 WorldDir;   // world launch direction (normalized in Awake)
+        public float Speed;        // magnitude the velocity is SET to, Unity units/s
+        public int Laps;           // launches per rider before disarming; <= 0 = unlimited
+
+        Vector3 _halfLocal = new Vector3(0.5f, 0.5f, 0.5f);
+        Snowboarder[] _riders;
+        readonly Dictionary<Snowboarder, Traverse> _vel = new Dictionary<Snowboarder, Traverse>();
+        readonly Dictionary<Snowboarder, int> _fired = new Dictionary<Snowboarder, int>();
+        readonly HashSet<Snowboarder> _inside = new HashSet<Snowboarder>();
+
+        void Awake()
+        {
+            WorldDir = WorldDir.sqrMagnitude > 1e-8f ? WorldDir.normalized : transform.forward;
+            var box = GetComponent<BoxCollider>();
+            if (box != null)
+            {
+                _halfLocal = box.size * 0.5f;
+                box.enabled = false; // geometry carrier only — never a live collider at runtime
+            }
+        }
+
+        void FixedUpdate()
+        {
+            if (_riders == null || _riders.Length == 0)
+            {
+                _riders = UnityEngine.Object.FindObjectsOfType<Snowboarder>();
+                if (_riders.Length == 0) return; // riders not spawned yet
+            }
+            foreach (var sb in _riders)
+            {
+                if (sb == null) continue;
+                Vector3 local = transform.InverseTransformPoint(sb.transform.position);
+                bool inside = Mathf.Abs(local.x) <= _halfLocal.x
+                           && Mathf.Abs(local.y) <= _halfLocal.y
+                           && Mathf.Abs(local.z) <= _halfLocal.z;
+                if (!inside) { _inside.Remove(sb); continue; }
+                if (!_inside.Add(sb)) continue;      // already in the box — not a new entry
+
+                int n;
+                _fired.TryGetValue(sb, out n);
+                if (Laps > 0 && n >= Laps) continue; // spent for this rider — ride on through
+                _fired[sb] = n + 1;
+
+                if (!_vel.TryGetValue(sb, out var t))
+                {
+                    t = Traverse.Create(sb).Field("velocity");
+                    _vel[sb] = t;
+                }
+                t.SetValue(WorldDir * Speed);
+                Plugin.Log.LogInfo(Laps > 0
+                    ? $"[Launch] '{name}': fired {n + 1} of {Laps} for '{sb.name}' at {Speed:0.#} u/s"
+                    : $"[Launch] '{name}': fired for '{sb.name}' at {Speed:0.#} u/s");
+            }
         }
     }
 
