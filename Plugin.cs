@@ -2083,11 +2083,17 @@ namespace TrickyMaddnessLevelHook
                         speed <= 0f)
                     { launchSkipped++; Log.LogWarning($"[Launch] '{lnGO.name}' skipped: no parseable speed in the name"); continue; }
 
-                    int laps = 0;   // 0 = fires every time
-                    if (seg.Length >= 4 && seg[3].StartsWith("lap"))
+                    // Trailing option tokens are SCANNED, not indexed by position — "_lap<N>"
+                    // and "_ctr" are independent and either may be absent, so seg[3] is not
+                    // a fixed slot. (The editor-side parsers scan the same way.)
+                    int laps = 0;      // 0 = fires every time
+                    bool center = false;
+                    for (int si = 3; si < seg.Length; si++)
                     {
-                        if (!int.TryParse(seg[3].Substring(3), NumberStyles.Integer, CultureInfo.InvariantCulture, out laps) || laps < 1)
-                        { laps = 0; Log.LogWarning($"[Launch] '{lnGO.name}': '{seg[3]}' is not a lap count — firing every time"); }
+                        if (seg[si] == "ctr") { center = true; continue; }
+                        if (!seg[si].StartsWith("lap")) continue;
+                        if (!int.TryParse(seg[si].Substring(3), NumberStyles.Integer, CultureInfo.InvariantCulture, out laps) || laps < 1)
+                        { laps = 0; Log.LogWarning($"[Launch] '{lnGO.name}': '{seg[si]}' is not a lap count — firing every time"); }
                     }
 
                     var lv = lnGO.AddComponent<LaunchVolume>();
@@ -2098,6 +2104,7 @@ namespace TrickyMaddnessLevelHook
                     lv.WorldDir = lnDir != null ? lnDir.forward : t.forward;
                     lv.Speed = speed;
                     lv.Laps = laps;
+                    lv.Center = center;
                     launchAttached++;
                 }
             }
@@ -5582,8 +5589,10 @@ namespace TrickyMaddnessLevelHook
         public Vector3 WorldDir;   // world launch direction (normalized in Awake)
         public float Speed;        // magnitude the velocity is SET to, Unity units/s
         public int Laps;           // launches per rider before disarming; <= 0 = unlimited
+        public bool Center;        // slide the rider onto the box axis before throwing
 
         Vector3 _halfLocal = new Vector3(0.5f, 0.5f, 0.5f);
+        Vector3 _centerLocal = Vector3.zero;
         Snowboarder[] _riders;
         readonly Dictionary<Snowboarder, Traverse> _vel = new Dictionary<Snowboarder, Traverse>();
         readonly Dictionary<Snowboarder, int> _fired = new Dictionary<Snowboarder, int>();
@@ -5596,6 +5605,7 @@ namespace TrickyMaddnessLevelHook
             if (box != null)
             {
                 _halfLocal = box.size * 0.5f;
+                _centerLocal = box.center;
                 box.enabled = false; // geometry carrier only — never a live collider at runtime
             }
         }
@@ -5627,10 +5637,53 @@ namespace TrickyMaddnessLevelHook
                     t = Traverse.Create(sb).Field("velocity");
                     _vel[sb] = t;
                 }
+                // Setting velocity zeroes the rider's lateral SPEED but not their lateral
+                // OFFSET, and the offset is what decides where the throw lands. On megaple
+                // the entry offset was measured at 21.89 units against a box half-extent of
+                // 21.94 — the rider entered hugging the wall, rode straight up it, and the
+                // solved exit arc (aimed from the box axis) would have missed its deck by
+                // ~23 units. Centring drops the component of the offset PERPENDICULAR to the
+                // throw, so the arc always starts on the axis the direction was solved from,
+                // and leaves the along-axis component alone so the volume still fires and
+                // lands where the author aimed it.
+                float centred = 0f;
+                if (Center)
+                {
+                    Vector3 c = transform.TransformPoint(_centerLocal);
+                    Vector3 off = sb.transform.position - c;
+                    Vector3 target = c + Vector3.Project(off, WorldDir);
+                    centred = Vector3.Distance(sb.transform.position, target);
+                    // A CharacterController owns its transform; writing position with it
+                    // enabled is fought or ignored (same rule as the respawn teleport, §23).
+                    var cc = sb.GetComponent<CharacterController>();
+                    bool wasEnabled = cc != null && cc.enabled;
+                    if (wasEnabled) cc.enabled = false;
+                    sb.transform.position = target;
+                    if (wasEnabled) cc.enabled = true;
+                }
+
                 t.SetValue(WorldDir * Speed);
-                Plugin.Log.LogInfo(Laps > 0
+
+                // Leave the ground the way the game's own LaunchPad tag does. Telemetry shows
+                // the rider goes airborne unaided on the next step, but Integrate()'s grounded
+                // branch can project velocity onto the ground plane before that, and we have
+                // just moved the rider — so make the transition explicit rather than racing it.
+                // All three members are private on Snowboarder; a miss must not kill the volume.
+                if (Traverse.Create(sb).Method("Grounded").GetValue<bool>())
+                {
+                    try
+                    {
+                        Traverse.Create(sb).Field("tookOffFromGround").SetValue(true);
+                        Traverse.Create(sb).Method("ResetCaster").GetValue();
+                        Traverse.Create(sb).Method("Takeoff").GetValue();
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[Launch] '{name}': takeoff relay failed: {ex.Message}"); }
+                }
+
+                Plugin.Log.LogInfo((Laps > 0
                     ? $"[Launch] '{name}': fired {n + 1} of {Laps} for '{sb.name}' at {Speed:0.#} u/s"
-                    : $"[Launch] '{name}': fired for '{sb.name}' at {Speed:0.#} u/s");
+                    : $"[Launch] '{name}': fired for '{sb.name}' at {Speed:0.#} u/s")
+                    + (Center ? $" (centred {centred:0.##} u onto the box axis)" : ""));
             }
         }
     }
