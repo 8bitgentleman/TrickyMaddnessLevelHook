@@ -162,6 +162,32 @@ numbering.
   9 stands off the right end by design, and snapping *down* is what guarantees
   the one left out is an AI, never the human.
 
+- ⚠️ **`MenuManager.LoadScene` is ADDITIVE and unloads NOTHING — so the bundle
+  `Unload(true)` at `Plugin.cs:3364-3376` rests on an assumption its own comment
+  states and the game does not guarantee.** IL:
+  `LoadSceneAsync(sceneName, LoadSceneMode.Additive)`, with no unload anywhere in
+  the coroutine; the game's unloads live in the sibling coroutines `UnloadLevel`
+  and `RestartScene`, which `LoadScene` never invokes and **only the MENU path
+  reaches**. `PlayAgain()` and `SelectLevel(int)` are thin wrappers over
+  `LoadScene`. So the comment's "level scenes are unloaded while in the menu" is
+  true *of the menu path only* — anything that reloads from **inside a live
+  level** leaves the outgoing scene loaded, and the `Unload(true)` then destroys
+  bundle assets the live scene is still referencing. That is how a course came up
+  with `RenderSettings.skybox` pointing at a destroyed `Skybox/Procedural`, i.e.
+  `Hidden/InternalErrorShader`, i.e. a solid magenta sky.
+  ⚠️ Worse, the stacked scene makes every `FindAnyObjectByType` /
+  `FindObjectsByType` in this file ambiguous — they are **global across all
+  loaded scenes**, so `LoadLevelManager`'s ~18 lookups each pick a winner
+  independently and the incoming course silently inherits the outgoing one's
+  race line, respawn markers and sky fill. The offender here was the AI harness
+  (fixed in `AIMod-src`, `dd047af`, by unloading first); **the game's own Play
+  Again button has NOT been checked** and would hit the same path if it routes
+  to `PlayAgain()`. Full account with the measured numbers:
+  `AI_BRAIN_PLAN.md` §5.1.
+  ⚠️ And `SkyboxWatch` cannot see any of it: `ShaderLooksBroken` (`:840`)
+  short-circuits on `gameOrigin`, and `Hidden/InternalErrorShader` is
+  permanently resident in a built player, so it is in the menu-time
+  `GameShaderIds` snapshot and gets logged `is usable, untouched`.
 - ⚠️ **`PlayAgain()` on a custom map silently unloads the bundle.** The
   `LoadScene` prefix rewrites `levelEntry.sceneName` from the `$<bundle path>`
   marker to the bundle's real scene name (`Plugin.cs:3154`) and the game keeps
