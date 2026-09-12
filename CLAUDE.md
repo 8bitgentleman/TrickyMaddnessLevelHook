@@ -27,11 +27,22 @@ numbering.
 - §11 `WindVolume`'s BoxCollider is a geometry carrier ONLY, disabled at runtime.
   `AirStream`/`LowGravity` are the game's own tags — zero Hook code.
   **`Launch` DOES have Hook code** (`LaunchVolume`, one-shot velocity SET on
-  entry; `_lap<N>` in the name caps how many times it fires per rider). Its box
+  entry; `_lap<N>` in the name caps how many times it fires per rider, `_ctr`
+  first slides the rider onto the box axis). Its box
   is **AXIS-ALIGNED and its direction lives on a `"Dir"` child** — orienting the
   box instead permutes which raw axis `MakeItemBox`'s `box.size = P(size)` puts
   on the vertical, which floats the volume off the terrain and it silently
-  never fires.
+  never fires. The trailing name tokens are **scanned, not positionally
+  indexed** — `_lap<N>` and `_ctr` are independent and either may be absent, so
+  `seg[3]` is not a fixed slot; all three readers scan, and
+  `LevelOverridesWindow.SetLaunchName` must re-emit every token it parsed or the
+  editor's capture round-trip silently drops it. Fires at the **entry point,
+  not the box centre** — solve arcs from where the rider crosses in.
+  ⚠️ **Size a launch against TM's measured drag, never drag-free ballistics:**
+  `Integrate()` runs `velocity /= (1 + 0.14·Δt)` every step on the whole vector,
+  so `dv/dt = −(g + 0.1399·|v|)` with g = 17 rising / 20 falling. The old
+  `apex = v²/34` over-predicts ~2× at launch speeds and shipped a broken
+  megaple. `HOOK_NOTES.md` §11 has the numbers.
 - §12 Teleport volumes: do NOT reintroduce a rotation-comparison "has facing"
   sentinel — it both false-positives and false-negatives.
 - §13 Skydome follow runs in `beginCameraRendering`, NOT LateUpdate (else the
