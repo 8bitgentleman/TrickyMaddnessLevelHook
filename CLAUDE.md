@@ -25,15 +25,20 @@ numbering.
 - §7 `List<T>` of user-defined nested serializables arrives **EMPTY** under
   BepInEx runtime load — hence the plain-text sidecar.
 - §11 `WindVolume`'s BoxCollider is a geometry carrier ONLY, disabled at runtime.
-  ⚠️ **The number in `Wind_<speed>` is a TARGET SPEED (u/s), not an acceleration**
-  (changed 2026-09-12). The volume ramps the rider toward it along the push
-  direction and stops; it never brakes a faster rider and boxes in series do not
-  stack. SSX's own `BoostAmount` passes through 1:1, so **there is no global curve
-  to tune any more** — retune a course by editing the rating on the volume.
-  ⚠️ A hand-authored `items[]` wind box does **not** convert itself: a strength
-  that was a fine acceleration is a silent no-op as a target speed if it sits
-  below riding speed (alaska shipped two at 10). Check every `items[]` wind box
-  when adding one.
+  ⚠️ **The number in `Wind_<accel>` is an ACCELERATION (u/s²)** — SSX's own
+  `BoostAmount`, 1:1, with **no curve and no cap**, so effect scales with time in
+  the box and overlapping boxes SUM. **There is no global knob** — retune a course
+  by editing the rating on the volume. A 2026-09-12 build read the number as a
+  target speed; that is retired (HOOK_NOTES §11.1 has why, and the geometry that
+  refutes it).
+  ⚠️ A hand-authored `items[]` wind box does **not** convert itself, and it does
+  not know about the game's volumes either: alaska shipped one INSIDE the SSX end
+  shaft pushing the opposite way horizontally, which only showed up once boxes
+  stopped blending. Check every `items[]` wind box against the SSX volumes near it.
+  ⚠️ A weak updraft on a GROUNDED rider can be projected away entirely by
+  `Snowboarder.Integrate` (it strips the away-from-ground component when
+  `WillCatchAir()` predicts no real arc); a horizontal push along the slope is
+  untouched. Suspect that before the rating if a vent feels dead.
   `AirStream`/`LowGravity` are the game's own tags — zero Hook code.
   **`Launch` DOES have Hook code** (`LaunchVolume`, one-shot velocity SET on
   entry; `_lap<N>` in the name caps how many times it fires per rider, `_ctr`
@@ -48,8 +53,11 @@ numbering.
   editor's capture round-trip silently drops it. Fires at the **entry point,
   not the box centre** — solve arcs from where the rider crosses in.
   ⚠️ **Size a launch against TM's measured drag, never drag-free ballistics:**
-  `Integrate()` runs `velocity /= (1 + 0.14·Δt)` every step on the whole vector,
-  so `dv/dt = −(g + 0.1399·|v|)` with g = 17 rising / 20 falling. The old
+  `Integrate()` runs `velocity /= (1 + k·Δt)` every step on the whole vector,
+  so `dv/dt ≈ −(g + k·|v|)` with g = 17 rising / 20 falling. **k is 0.14
+  airborne but per-material while grounded — Snow 0.14, Rock 0.3, Ice 0.12,
+  Metal 0.12** (MEASURED, IL), so the familiar `−0.1399|v|` figure is exact only
+  in the air and on snow; on rock the rider bleeds speed twice as fast. The old
   `apex = v²/34` over-predicts ~2× at launch speeds and shipped a broken
   megaple. `HOOK_NOTES.md` §11 has the numbers.
 - §12 Teleport volumes: do NOT reintroduce a rotation-comparison "has facing"
