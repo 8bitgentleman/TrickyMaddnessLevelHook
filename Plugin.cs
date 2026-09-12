@@ -3223,6 +3223,41 @@ namespace TrickyMaddnessLevelHook
         {
             return segmentDelta.normalized * distanceAlong;
         }
+
+        // Scales an absolute-world-unit game constant by WorldScale. Unlike
+        // ScaledGravity this is unconditional, no config gate — the constants
+        // routed through it (AIPath.GetTarget's acquire radius, so far) are
+        // correctness bugs on a scaled map, not a gameplay knob, matching how
+        // the rail-catch-width default is already applied unconditionally
+        // (§28). Inert at scale 1, so built-in levels are untouched.
+        public static float ScaledByWorldScale(float baseValue)
+        {
+            return baseValue * WorldScale;
+        }
+
+        // Routes matching ldc.r4 literals through ScaledByWorldScale. Same
+        // idiom as ScaleGravityLiterals, for constants that are a world
+        // distance rather than gravity.
+        internal static IEnumerable<CodeInstruction> ScaleWorldUnitLiterals(
+            IEnumerable<CodeInstruction> instructions, string label, float[] values)
+        {
+            var scaled = AccessTools.Method(typeof(Plugin), nameof(ScaledByWorldScale));
+            int patched = 0;
+            foreach (var ins in instructions)
+            {
+                yield return ins;
+                if (ins.opcode == OpCodes.Ldc_R4 && ins.operand is float f
+                    && Array.IndexOf(values, f) >= 0)
+                {
+                    yield return new CodeInstruction(OpCodes.Call, scaled);
+                    patched++;
+                }
+            }
+            if (patched == 0)
+                Log.LogWarning($"[AIPath] {label}: no world-unit literal found to patch — game update changed the method?");
+            else
+                Log.LogDebug($"[AIPath] {label}: routed {patched} world-unit literal(s) through ScaledByWorldScale");
+        }
     }
 
 
@@ -3883,6 +3918,26 @@ namespace TrickyMaddnessLevelHook
         public static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
         {
             return Plugin.ScaleGravityLiterals(instructions, "Caster.Cast", new[] { 20f, 17f });
+        }
+    }
+
+    // AIPath.GetTarget's "can I see a point on this path" cutoff is a
+    // hardcoded 150-unit literal — never scaled, unlike everything else a
+    // converted map resizes. On a 2.5–5x scaled map that is a 150-unit radius
+    // in a world where the paths themselves are 2.5–5x farther apart, so a
+    // rider who drifts off-path stalls: every AIPath fails GetTarget,
+    // FindNewPath returns the NewPathReturnValue sentinel, m_noPathTime climbs
+    // past 1.5s, and Snowboarder.Respawn() teleports them to the nearest
+    // marker — a stall/teleport loop with no cooldown. Built-in levels run at
+    // WorldScale 1 and are provably unaffected. Unconditional, like the
+    // rail-catch default (§28): this is a correctness fix, not a knob.
+    [HarmonyPatch(typeof(AIPath), "GetTarget")]
+    public class AIPath_GetTarget_AcquireRadius
+    {
+        [HarmonyTranspiler]
+        public static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+        {
+            return Plugin.ScaleWorldUnitLiterals(instructions, "AIPath.GetTarget", new[] { 150f });
         }
     }
 
