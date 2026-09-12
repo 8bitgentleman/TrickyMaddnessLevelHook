@@ -31,10 +31,19 @@ numbering.
   by editing the rating on the volume. A 2026-09-12 build read the number as a
   target speed; that is retired (HOOK_NOTES §11.1 has why, and the geometry that
   refutes it).
+  ⚠️ **The push direction is the `"Dir"` CHILD's forward, not the `Wind_` box's
+  own forward** (`Plugin.cs` ~2051) — the importer orients the BOX to the source
+  volume so OBB containment matches, and carries the push vector on the child
+  because the two are unrelated. Reading the box's own `transform.forward` out of
+  a built bundle yields a confidently wrong direction that still looks plausible:
+  it made every megaple vent read as horizontal when 14 of them push straight up,
+  and inverted the sign of alaska's shaft curve. Editor-drawn volumes have no
+  `Dir` child and DO use the box forward, so a scan must check for the child.
   ⚠️ A hand-authored `items[]` wind box does **not** convert itself, and it does
   not know about the game's volumes either: alaska shipped one INSIDE the SSX end
-  shaft pushing the opposite way horizontally, which only showed up once boxes
-  stopped blending. Check every `items[]` wind box against the SSX volumes near it.
+  shaft, pointing ~80° off it (80% up / 59% +X against a tunnel pushing 98% +Z),
+  which only showed up once boxes stopped blending. Check every `items[]` wind box
+  against the SSX volumes near it.
   ⚠️ A weak updraft on a GROUNDED rider can be projected away entirely by
   `Snowboarder.Integrate` (it strips the away-from-ground component when
   `WillCatchAir()` predicts no real arc); a horizontal push along the slope is
