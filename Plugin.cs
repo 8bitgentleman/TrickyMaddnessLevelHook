@@ -1430,6 +1430,20 @@ namespace TrickyMaddnessLevelHook
                 + "this usually means the pin predates a rebuild that moved this course's terrain.");
         }
 
+        // True for anything living under an AnimDoor_* / MoveSurf_* subtree. Those
+        // GOs are emitted by the importer's animDoors / movingColliders passes and
+        // their part colliders ARE the gameplay: the door is meant to block the
+        // rider until its trigger opens it. The bundle nests parts one level deep,
+        // but walk the whole chain so a future importer change can't quietly
+        // reintroduce the pass-through.
+        static bool IsAnimatedSurfacePart(Transform t)
+        {
+            for (var cur = t; cur != null; cur = cur.parent)
+                if (cur.name.StartsWith("AnimDoor_") || cur.name.StartsWith("MoveSurf_"))
+                    return true;
+            return false;
+        }
+
         public static void LoadLevelManager()
         {
             //Find Main Starting Objects
@@ -1855,6 +1869,15 @@ namespace TrickyMaddnessLevelHook
                 {
                     var go = mc.gameObject;
                     if (go.layer != 8 || mc.convex || mc.sharedMesh == null) continue;
+                    // A door pane is geometrically INDISTINGUISHABLE from a glass
+                    // pane here: it is thin, layer 8, and vertical by definition.
+                    // Without this exemption the strip deletes every AnimDoor part
+                    // collider (48 of 48 on megaple) at load, long before
+                    // AnimDoorTrigger ever fires, so the doors animate perfectly and
+                    // the rider drives straight through them. MoveSurf parts are
+                    // exempted for the same reason (megaple's closest is only 0.24
+                    // off the horizontal-thin-axis threshold today).
+                    if (IsAnimatedSurfacePart(go.transform)) continue;
                     Vector3 ext = mc.sharedMesh.bounds.size;
                     int thin = 0;
                     if (ext.y < ext[thin]) thin = 1;
