@@ -26,6 +26,12 @@ numbering.
   BepInEx runtime load — hence the plain-text sidecar.
 - §11 `WindVolume`'s BoxCollider is a geometry carrier ONLY, disabled at runtime.
   `AirStream`/`LowGravity` are the game's own tags — zero Hook code.
+  **`Launch` DOES have Hook code** (`LaunchVolume`, one-shot velocity SET on
+  entry; `_lap<N>` in the name caps how many times it fires per rider). Its box
+  is **AXIS-ALIGNED and its direction lives on a `"Dir"` child** — orienting the
+  box instead permutes which raw axis `MakeItemBox`'s `box.size = P(size)` puts
+  on the vertical, which floats the volume off the terrain and it silently
+  never fires.
 - §12 Teleport volumes: do NOT reintroduce a rotation-comparison "has facing"
   sentinel — it both false-positives and false-negatives.
 - §13 Skydome follow runs in `beginCameraRendering`, NOT LateUpdate (else the
