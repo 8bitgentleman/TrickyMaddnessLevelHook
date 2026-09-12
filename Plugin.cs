@@ -2012,15 +2012,16 @@ namespace TrickyMaddnessLevelHook
                 Log.LogInfo($"[Snowflakes] converted {flakes} pickup(s) to the game's Snowflake behaviour, {flakeSpheres} sphere trigger(s)");
 
             // Phase 4 custom items — Wind volumes. Naming contract with SSXImporter.BuildItems:
-            // a GO named "Wind_<strength>" carries a BoxCollider (geometry only) and is oriented
+            // a GO named "Wind_<speed>" carries a BoxCollider (geometry only) and is oriented
             // so its forward (+Z) is the world push direction. We attach a WindVolume behavior
-            // that, while a Snowboarder is inside the box, adds forward*strength*dt to that
-            // rider's private Snowboarder.velocity each physics step (the exact field
-            // UpdateGrounded feeds to CharacterController.Move). Containment is done analytically
-            // (OBB test in WindVolume) and the collider is DISABLED at runtime — so a wind box
-            // never blocks the rider and is never mistaken for ground by the game's ground
-            // SphereCast (which hits triggers by default). Strength (m/s^2) is parsed from the
-            // name, invariant culture, matching the importer.
+            // that, while a Snowboarder is inside the box, ramps that rider's velocity component
+            // along the push direction TOWARD the named speed and no further (Snowboarder.velocity
+            // is the exact field UpdateGrounded feeds to CharacterController.Move). Containment is
+            // done analytically (OBB test in WindVolume) and the collider is DISABLED at runtime —
+            // so a wind box never blocks the rider and is never mistaken for ground by the game's
+            // ground SphereCast (which hits triggers by default). The number is a TARGET SPEED in
+            // Unity units/s, parsed invariant-culture, matching the importer — NOT the m/s^2
+            // acceleration it was before 2026-09-12 (WindVolume's header has the why).
             int windAttached = 0, windSkipped = 0;
             foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
             {
@@ -2031,12 +2032,15 @@ namespace TrickyMaddnessLevelHook
                     if (windGO.GetComponent<WindVolume>() != null) continue; // already attached
                     if (windGO.GetComponent<BoxCollider>() == null)
                     { windSkipped++; Log.LogDebug($"[Wind] '{windGO.name}' skipped: no BoxCollider"); continue; }
-                    float strength;
+                    float target;
                     string tail = t.name.Substring("Wind_".Length);
-                    if (!float.TryParse(tail, NumberStyles.Float, CultureInfo.InvariantCulture, out strength))
+                    if (!float.TryParse(tail, NumberStyles.Float, CultureInfo.InvariantCulture, out target))
                     {
-                        strength = 10f; // default when the name has no parseable strength
-                        Log.LogDebug($"[Wind] '{windGO.name}' name has no parseable strength -> default {strength}");
+                        // Shouldn't happen — the importer always bakes a number. 60 is SSX's own
+                        // conveyor rating, i.e. a mild push, so a malformed name degrades to
+                        // something harmless rather than to a no-op or a rocket.
+                        target = 60f;
+                        Log.LogDebug($"[Wind] '{windGO.name}' name has no parseable target speed -> default {target}");
                     }
                     var wv = windGO.AddComponent<WindVolume>();
                     // Push direction: an optional "Dir" child (importer emits it for SSX boost
@@ -2045,7 +2049,7 @@ namespace TrickyMaddnessLevelHook
                     // Dir child (editor-drawn wind volumes) => the box's own forward, as before.
                     var windDir = t.Find("Dir");
                     wv.WorldDir = windDir != null ? windDir.forward : t.forward;
-                    wv.Strength = strength;
+                    wv.TargetSpeed = target;
                     windAttached++;
                 }
             }
@@ -5267,10 +5271,31 @@ namespace TrickyMaddnessLevelHook
         void OnDestroy() { Active = false; }
     }
 
-    // A wind push volume. Attached by the Hook's scene scan to every "Wind_<strength>" GO
-    // the importer emits. While a Snowboarder's origin is inside the (oriented) box, each
-    // physics step adds WorldDir * Strength * dt to that rider's private Snowboarder.velocity
-    // — the field Integrate() writes and UpdateGrounded() feeds to CharacterController.Move.
+    // A wind push volume. Attached by the Hook's scene scan to every "Wind_<speed>" GO the
+    // importer emits. The number in the name is a TARGET SPEED along the push direction, not
+    // an acceleration: while a Snowboarder's origin is inside the (oriented) box, each physics
+    // step ramps that rider's velocity component along WorldDir up toward TargetSpeed and then
+    // leaves it alone. Snowboarder.velocity is the field Integrate() writes and UpdateGrounded()
+    // feeds to CharacterController.Move.
+    //
+    // Two consequences, both deliberate. The volume never BRAKES a rider already travelling
+    // faster than the target along that axis, and it never pushes past the target — so volumes
+    // in series cannot stack (megaple's end conveyors are three rows deep) and no rider can be
+    // wound up to an arbitrary speed by sitting in one.
+    //
+    // WHY a target and not an acceleration. SSX rates its own boost volumes 45..200, and read as
+    // SPEEDS those ratings describe the courses that use them: against megaple's measured ride
+    // profile (median 41 u/s, p90 65) the conveyors rate 60, the exhaust vents 100, the end and
+    // sand boosts 200, the updrafts 45..120 against gravity 20. Read as accelerations they
+    // describe nothing, and the importer had to invent a playable curve on top — a curve that was
+    // quadratic across 50..100 and so turned megaple's SECOND-WEAKEST rating into 270 u/s^2, i.e.
+    // 13x gravity, in a course whose normal cruise is 41. That is the "Wind_270 is WAY too strong"
+    // report. HOOK_NOTES.md §11.
+    //
+    // RampPerTarget is a JUDGMENT call, not a measurement: 4.5 is exactly the acceleration the old
+    // curve handed megaple's conveyors, kept so the instant of catching a boost still feels the
+    // way it did. Keeping the ramp brisk is safe precisely because it is now capped — it cannot
+    // overshoot — so the knob to reach for after a playtest is the rating, not this.
     //
     // The box is described by a BoxCollider on this GO, but we do NOT use it as a physics
     // trigger: the game's ground SphereCast hits triggers by default (Caster.Cast uses the
@@ -5282,7 +5307,11 @@ namespace TrickyMaddnessLevelHook
     public class WindVolume : MonoBehaviour
     {
         public Vector3 WorldDir;   // world push direction (normalized in Awake)
-        public float Strength;     // acceleration magnitude, m/s^2
+        public float TargetSpeed;  // speed along WorldDir this volume ramps a rider toward, u/s
+
+        // Acceleration used to close the gap, expressed as a multiple of TargetSpeed so a
+        // stronger volume also grabs harder. Never overshoots — the step is clamped to the gap.
+        const float RampPerTarget = 4.5f;
 
         Vector3 _halfLocal = new Vector3(0.5f, 0.5f, 0.5f); // local half-extents from the BoxCollider
         Snowboarder[] _riders;
@@ -5324,7 +5353,9 @@ namespace TrickyMaddnessLevelHook
                     _vel[sb] = t;
                 }
                 Vector3 v = t.GetValue<Vector3>();
-                v += WorldDir * Strength * dt;
+                float gap = TargetSpeed - Vector3.Dot(v, WorldDir);
+                if (gap <= 0f) continue; // already at or past the target on this axis — hands off
+                v += WorldDir * Mathf.Min(gap, TargetSpeed * RampPerTarget * dt);
                 t.SetValue(v);
             }
         }
