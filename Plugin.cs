@@ -1471,6 +1471,14 @@ namespace TrickyMaddnessLevelHook
             AccessTools.Field(typeof(LevelManager), "dividersParent");
         static readonly System.Reflection.FieldInfo fRaceLine =
             AccessTools.Field(typeof(LevelManager), "raceLine");
+        // NOT a field. `MenuManager.lastLevelEntry` is an auto-property with a
+        // private setter, so there is no member of that name to bind — only the
+        // accessors and a mangled `<lastLevelEntry>k__BackingField`. The old
+        // `Traverse.Create(menuManager).Field("lastLevelEntry")` therefore resolved
+        // to nothing and its SetValue was a no-op that logged nothing, for as long
+        // as it has been in the file. See the write-back site for what that cost.
+        static readonly System.Reflection.MethodInfo mSetLastLevelEntry =
+            AccessTools.PropertySetter(typeof(MenuManager), "lastLevelEntry");
         static readonly System.Reflection.FieldInfo fRailSegments =
             AccessTools.Field(typeof(Rail), "segments");
         static readonly System.Reflection.FieldInfo fPropSoundName =
@@ -1567,6 +1575,13 @@ namespace TrickyMaddnessLevelHook
             //Find AI Paths Object
 
             //Update Level Entry
+            // ⚠️ LevelEntry is a STRUCT, so this is a COPY. The threshold ARRAYS are
+            // reference fields and the copy shares them with the registered entry, so
+            // the six writes below land on the real entry in place — which is the only
+            // reason medals have worked at all while the write-back underneath was dead.
+            // Do NOT "tidy" these into `new float[] { ... }`: that would silently give
+            // every custom map the placeholder medal times from RegisterLevels back.
+            // freestyleTimeLimit is a plain float on the struct and does NOT alias.
             var LevelEntry = menuManager.lastLevelEntry;
 
             LevelEntry.timeThresholds[2] = levelManagerMaker.GoldTime;
@@ -1579,7 +1594,38 @@ namespace TrickyMaddnessLevelHook
 
             LevelEntry.freestyleTimeLimit = levelManagerMaker.TimeLeft;
 
-            Traverse.Create(menuManager).Field("lastLevelEntry").SetValue(LevelEntry);
+            // Seat the copy back through the property's setter. The `Traverse.Field`
+            // chain this replaces never resolved (see mSetLastLevelEntry) and said
+            // nothing about it, so the entry the menu keeps has always been the one
+            // RegisterLevels made up.
+            if (mSetLastLevelEntry == null)
+            {
+                Log.LogError("[Reflection] MenuManager.lastLevelEntry's setter no longer resolves — "
+                    + "the level entry is NOT updated; run `python3 tm_re_baseline.py check`.");
+            }
+            else
+            {
+                mSetLastLevelEntry.Invoke(menuManager, new object[] { LevelEntry });
+            }
+
+            // ...and the freestyle clock separately, because the write-back above is
+            // one load too late for it. MenuManager copies lastLevelEntry's limit into
+            // its own public `freestyleTimeLimit` during LoadScene, which is already
+            // done by the time this Awake postfix runs; LevelManager.Start then reads
+            // THAT field (`time = MenuManager.Instance.freestyleTimeLimit`) and Start
+            // has not run yet. Without this line the author's clock would only take
+            // effect on a second run of the map. The field is public — no reflection,
+            // and a TM rename is a compile error rather than a silent miss.
+            if (levelManagerMaker.TimeLeft > 0f)
+            {
+                menuManager.freestyleTimeLimit = levelManagerMaker.TimeLeft;
+            }
+            else
+            {
+                Log.LogWarning("[LevelEntry] this map's TimeLeft is 0, so the freestyle run would "
+                    + "start already expired — keeping the 150 s default instead. Set TimeLeft in "
+                    + "the map's level data to control the freestyle clock.");
+            }
 
             //Insert Starting Gate
             // The gate is NOT a plain bar. Measured off the live prefab
