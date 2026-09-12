@@ -25,6 +25,15 @@ numbering.
 - §7 `List<T>` of user-defined nested serializables arrives **EMPTY** under
   BepInEx runtime load — hence the plain-text sidecar.
 - §11 `WindVolume`'s BoxCollider is a geometry carrier ONLY, disabled at runtime.
+  ⚠️ **The number in `Wind_<speed>` is a TARGET SPEED (u/s), not an acceleration**
+  (changed 2026-09-12). The volume ramps the rider toward it along the push
+  direction and stops; it never brakes a faster rider and boxes in series do not
+  stack. SSX's own `BoostAmount` passes through 1:1, so **there is no global curve
+  to tune any more** — retune a course by editing the rating on the volume.
+  ⚠️ A hand-authored `items[]` wind box does **not** convert itself: a strength
+  that was a fine acceleration is a silent no-op as a target speed if it sits
+  below riding speed (alaska shipped two at 10). Check every `items[]` wind box
+  when adding one.
   `AirStream`/`LowGravity` are the game's own tags — zero Hook code.
   **`Launch` DOES have Hook code** (`LaunchVolume`, one-shot velocity SET on
   entry; `_lap<N>` in the name caps how many times it fires per rider, `_ctr`
