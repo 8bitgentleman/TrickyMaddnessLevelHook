@@ -1444,6 +1444,73 @@ namespace TrickyMaddnessLevelHook
             return false;
         }
 
+        // Private game members the custom-map rebuild seats, held as AccessTools
+        // handles rather than `Traverse.Create(x).Field("name")` string chains.
+        // Two reasons, both about SILENT failure:
+        //   1. `tm_re_baseline.py check`'s binding scan greps for AccessTools.* — a
+        //      Traverse string chain is INVISIBLE to it, so a TM rename reports
+        //      "clean" while the Hook quietly stops wiring the field. That is the
+        //      exact community-DLL failure mode the root CLAUDE.md describes.
+        //   2. Traverse.SetValue on a name that no longer resolves is a no-op with
+        //      no log at all; SetGameField/GetGameField below say so, loudly.
+        // `raceLine` is the one that costs most: AIMod's race terminator and its
+        // progress measurement both read LevelManager.raceLine and only warn in
+        // THEIR log when it is null, so an unwired field here reads as a broken AI
+        // mod several layers away.
+        static readonly System.Reflection.FieldInfo fStartingGate =
+            AccessTools.Field(typeof(LevelManager), "startingGate");
+        static readonly System.Reflection.FieldInfo fRespawnPointsParent =
+            AccessTools.Field(typeof(LevelManager), "respawnPointsParent");
+        static readonly System.Reflection.FieldInfo fSnowflakes =
+            AccessTools.Field(typeof(LevelManager), "snowflakes");
+        static readonly System.Reflection.FieldInfo fSpeedLabel =
+            AccessTools.Field(typeof(LevelManager), "speedLabel");
+        static readonly System.Reflection.FieldInfo fPathsParent =
+            AccessTools.Field(typeof(LevelManager), "pathsParent");
+        static readonly System.Reflection.FieldInfo fDividersParent =
+            AccessTools.Field(typeof(LevelManager), "dividersParent");
+        static readonly System.Reflection.FieldInfo fRaceLine =
+            AccessTools.Field(typeof(LevelManager), "raceLine");
+        static readonly System.Reflection.FieldInfo fRailSegments =
+            AccessTools.Field(typeof(Rail), "segments");
+        static readonly System.Reflection.FieldInfo fPropSoundName =
+            AccessTools.Field(typeof(PhysicsProp), "soundName");
+        static readonly System.Reflection.FieldInfo fDestrFragmentList =
+            AccessTools.Field(typeof(Destructible), "fragmentList");
+        static readonly System.Reflection.FieldInfo fDestrDisableList =
+            AccessTools.Field(typeof(Destructible), "disableList");
+        static readonly System.Reflection.FieldInfo fDestrHideSelf =
+            AccessTools.Field(typeof(Destructible), "hideSelf");
+        static readonly System.Reflection.FieldInfo fDestrSoundName =
+            AccessTools.Field(typeof(Destructible), "soundName");
+
+        // Assign through a handle, and say something if the handle is dead. Returns
+        // false so a caller with a fallback can take it. Logged as an ERROR on
+        // purpose: every one of these is load-bearing for a custom map, and a
+        // half-wired LevelManager is not a warning-level event.
+        static bool SetGameField(System.Reflection.FieldInfo f, string label, object target, object value)
+        {
+            if (f == null)
+            {
+                Log.LogError($"[Reflection] {label} no longer resolves — NOT wired. "
+                    + "TM has almost certainly renamed it; run `python3 tm_re_baseline.py check`.");
+                return false;
+            }
+            f.SetValue(target, value);
+            return true;
+        }
+
+        static object GetGameField(System.Reflection.FieldInfo f, string label, object target)
+        {
+            if (f == null)
+            {
+                Log.LogError($"[Reflection] {label} no longer resolves — read as null. "
+                    + "TM has almost certainly renamed it; run `python3 tm_re_baseline.py check`.");
+                return null;
+            }
+            return f.GetValue(target);
+        }
+
         public static void LoadLevelManager()
         {
             //Find Main Starting Objects
@@ -1587,12 +1654,12 @@ namespace TrickyMaddnessLevelHook
             var levelManager = gameObject.GetComponent<LevelManager>();
 
             //Set Level Manager Data Points
-            Traverse.Create(levelManager).Field("startingGate").SetValue(MakerSpawnPoint.transform);
-            Traverse.Create(levelManager).Field("respawnPointsParent").SetValue(MakerRespawnPoint.transform);
-            Traverse.Create(levelManager).Field("snowflakes").SetValue(new GameObject("Temp")); //FIX to get all snowflakes and apply
+            SetGameField(fStartingGate, "LevelManager.startingGate", levelManager, MakerSpawnPoint.transform);
+            SetGameField(fRespawnPointsParent, "LevelManager.respawnPointsParent", levelManager, MakerRespawnPoint.transform);
+            SetGameField(fSnowflakes, "LevelManager.snowflakes", levelManager, new GameObject("Temp")); //FIX to get all snowflakes and apply
 
             //Create UI Hooks
-            var TempObject = Traverse.Create(levelManager).Field("speedLabel").GetValue() as TextMeshProUGUI;
+            var TempObject = GetGameField(fSpeedLabel, "LevelManager.speedLabel", levelManager) as TextMeshProUGUI;
             var CanvasObjects = FindObjectsByType(typeof(MakerCanvas), FindObjectsSortMode.None) as MakerCanvas[];
             for (int i = 0; i < CanvasObjects.Length; i++)
             {
@@ -1624,7 +1691,7 @@ namespace TrickyMaddnessLevelHook
 
                 NewRail.material = material1;
 
-                Traverse.Create(NewRail).Field("segments").SetValue(NewSegments);
+                SetGameField(fRailSegments, "Rail.segments", NewRail, NewSegments);
 
                 // Grind detection BoxCast/SphereCasts layer 9 ("Rail") and then does
                 // GetComponent<Rail>() on the collider's OWN GameObject — so a rail
@@ -1735,7 +1802,7 @@ namespace TrickyMaddnessLevelHook
                     Log.LogInfo($"[AIPaths] AI pool: {built} race-line path + {branches} branch path(s) = {built + branches} total"
                         + (multiPathAI.Value ? "" : " (MultiPathAI off)"));
             }
-            Traverse.Create(levelManager).Field("pathsParent").SetValue(AIParent.transform);
+            SetGameField(fPathsParent, "LevelManager.pathsParent", levelManager, AIParent.transform);
 
 
             GameObject AIPDividerParent = new GameObject("AI Paths Divider Parent");
@@ -1753,25 +1820,48 @@ namespace TrickyMaddnessLevelHook
 
                 NewPath.m_points = MakerAIPathsDivider[i].m_points;
             }
-            Traverse.Create(levelManager).Field("dividersParent").SetValue(AIPDividerParent.transform);
+            SetGameField(fDividersParent, "LevelManager.dividersParent", levelManager, AIPDividerParent.transform);
 
+            // ⚠️ A map with no MakerRaceLine is legal — this lookup can and does
+            // return null, and dereferencing it threw an NRE straight out of a Unity
+            // Awake postfix. That lands in Player.log and NOWHERE in the BepInEx log
+            // (root CLAUDE.md, HOOK_NOTES §23), and it aborted the REST of
+            // LoadLevelManager: no respawn markers, no glass strip, no wind volumes,
+            // no skydome, no destructibles — a half-imported map with a clean log.
+            // BuildAIPathFromRaceLine already null-checks the same lookup; this is
+            // the other half of that guard.
             var TempMakerRaceLine = FindAnyObjectByType<MakerRaceLine>();
-            var TempRaceLine = TempMakerRaceLine.gameObject.AddComponent<RaceLine>();
-
-            TempRaceLine.m_points = new List<RaceLine.Point>();
-
-            for (int i = 0;i < TempMakerRaceLine.m_points.Count;i++)
+            RaceLine TempRaceLine = null;
+            if (TempMakerRaceLine == null || TempMakerRaceLine.m_points == null
+                || TempMakerRaceLine.m_points.Count == 0)
             {
-                var RaceLinePoint = new RaceLine.Point();
-
-                RaceLinePoint.position = TempMakerRaceLine.m_points[i];
-
-                TempRaceLine.m_points.Add(RaceLinePoint);
+                Log.LogWarning("[RaceLine] no usable MakerRaceLine in this map ("
+                    + (TempMakerRaceLine == null
+                        ? "no MakerRaceLine component anywhere in the scene"
+                        : "MakerRaceLine present but its m_points list is empty")
+                    + ") — LevelManager.raceLine stays NULL. Rank/position, race-line respawn "
+                    + "markers and the AI mod's race terminator are all off for this course; the "
+                    + "rest of the level build continues.");
             }
+            else
+            {
+                TempRaceLine = TempMakerRaceLine.gameObject.AddComponent<RaceLine>();
 
-            TempRaceLine.CalculateSegments();
+                TempRaceLine.m_points = new List<RaceLine.Point>();
 
-            Traverse.Create(levelManager).Field("raceLine").SetValue(TempRaceLine);
+                for (int i = 0;i < TempMakerRaceLine.m_points.Count;i++)
+                {
+                    var RaceLinePoint = new RaceLine.Point();
+
+                    RaceLinePoint.position = TempMakerRaceLine.m_points[i];
+
+                    TempRaceLine.m_points.Add(RaceLinePoint);
+                }
+
+                TempRaceLine.CalculateSegments();
+
+                SetGameField(fRaceLine, "LevelManager.raceLine", levelManager, TempRaceLine);
+            }
 
             // Respawn markers ALONG the race line (MECHANICS_DIAGNOSIS Bug 2).
             // The maker respawn points are SSX per-racer branch-line HEADS,
@@ -1800,7 +1890,7 @@ namespace TrickyMaddnessLevelHook
             // markers, so it must still be cleared on a map that has no race line.
             Snowboarder_AirborneStuckGuard.ResetState();
             AvalancheHazard.ResetState();
-            if (TempRaceLine.m_points != null && TempRaceLine.m_points.Count >= 2)
+            if (TempRaceLine != null && TempRaceLine.m_points != null && TempRaceLine.m_points.Count >= 2)
             {
                 var respawnParent = new GameObject("Respawn Points (race line)");
                 respawnParent.transform.parent = levelManager.transform;
@@ -1838,7 +1928,7 @@ namespace TrickyMaddnessLevelHook
                 // the game an empty parent, which would strand a fallen rider.
                 if (made > 0)
                 {
-                    Traverse.Create(levelManager).Field("respawnPointsParent").SetValue(respawnParent.transform);
+                    SetGameField(fRespawnPointsParent, "LevelManager.respawnPointsParent", levelManager, respawnParent.transform);
                     Log.LogInfo($"[Respawn] built {made} race-line respawn marker(s) ({moved} seated on ground, {dropped} dropped as airborne), replacing maker branch-head markers");
                 }
                 else
@@ -1933,7 +2023,7 @@ namespace TrickyMaddnessLevelHook
                     propGO.AddComponent<Rigidbody>();
                     var prop = propGO.AddComponent<PhysicsProp>();
                     propGO.layer = 15;
-                    Traverse.Create(prop).Field("soundName").SetValue("");
+                    SetGameField(fPropSoundName, "PhysicsProp.soundName", prop, "");
                     propsConverted++;
                 }
             }
@@ -2398,11 +2488,10 @@ namespace TrickyMaddnessLevelHook
                         }
                     }
                     var destr = dGO.AddComponent<Destructible>();
-                    var trav = Traverse.Create(destr);
-                    trav.Field("fragmentList").SetValue(frags);
-                    trav.Field("disableList").SetValue(disables);
-                    trav.Field("hideSelf").SetValue(true);
-                    trav.Field("soundName").SetValue("Play_GlassSmash_Large");
+                    SetGameField(fDestrFragmentList, "Destructible.fragmentList", destr, frags);
+                    SetGameField(fDestrDisableList, "Destructible.disableList", destr, disables);
+                    SetGameField(fDestrHideSelf, "Destructible.hideSelf", destr, true);
+                    SetGameField(fDestrSoundName, "Destructible.soundName", destr, "Play_GlassSmash_Large");
                     dGO.AddComponent<Smashable>(); // drives Break via swept detection; disables the box
                     smashWired++; smashFrags += frags.Count;
                 }
@@ -2709,7 +2798,7 @@ namespace TrickyMaddnessLevelHook
             }
             var rail = hit.collider.gameObject.GetComponent<Rail>();
             var segs = rail == null ? null
-                : Traverse.Create(rail).Field("segments").GetValue() as List<Rail.Segment>;
+                : GetGameField(fRailSegments, "Rail.segments", rail) as List<Rail.Segment>;
             Log.LogInfo($"[Rails] probe hit '{hit.collider.gameObject.name}' (layer {hit.collider.gameObject.layer}): Rail={(rail != null)}, segments={(segs == null ? 0 : segs.Count)}");
         }
 
@@ -4051,11 +4140,22 @@ namespace TrickyMaddnessLevelHook
     [HarmonyPatch(typeof(SnowTrail), "Start")]
     public class SnowTrail_Start_LayerMask
     {
+        // AccessTools, not a Traverse string chain, so tm_re_baseline.py's binding
+        // scan can see it — Plugin.SetGameField has the why.
+        static readonly System.Reflection.FieldInfo fLayerMask =
+            AccessTools.Field(typeof(SnowTrail), "layerMask");
+
         [HarmonyPostfix]
         public static void Postfix()
         {
+            if (fLayerMask == null)
+            {
+                Plugin.Log.LogError("[Reflection] SnowTrail.layerMask no longer resolves — snow trails "
+                    + "left on the game's own layers; run `python3 tm_re_baseline.py check`.");
+                return;
+            }
             int rideableMask = (1 << 0) | (1 << 6) | (1 << 7) | (1 << 14);
-            Traverse.Create(typeof(SnowTrail)).Field("layerMask").SetValue(rideableMask);
+            fLayerMask.SetValue(null, rideableMask);   // private STATIC field
         }
     }
 
@@ -4070,11 +4170,21 @@ namespace TrickyMaddnessLevelHook
         // Cache so we don't re-read the file / leak textures every time the menu opens.
         private static readonly Dictionary<string, Sprite> cache = new Dictionary<string, Sprite>();
 
+        // AccessTools, not a Traverse string chain, so tm_re_baseline.py's binding
+        // scan can see it — Plugin.SetGameField has the why.
+        static readonly System.Reflection.FieldInfo fEntries =
+            AccessTools.Field(typeof(LevelSelectMenu), "levelSelectEntries");
+
         [HarmonyPostfix]
         public static void Postfix(LevelSelectMenu __instance)
         {
-            var entries = Traverse.Create(__instance).Field("levelSelectEntries")
-                .GetValue() as List<LevelSelectEntry>;
+            if (fEntries == null)
+            {
+                Plugin.Log.LogError("[Reflection] LevelSelectMenu.levelSelectEntries no longer resolves — "
+                    + "custom-map menu thumbnails are off; run `python3 tm_re_baseline.py check`.");
+                return;
+            }
+            var entries = fEntries.GetValue(__instance) as List<LevelSelectEntry>;
             if (entries == null) return;
 
             int count = LevelEntries.GetLevelCount();
