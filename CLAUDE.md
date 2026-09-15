@@ -260,3 +260,15 @@ moved. `tm_baseline/README.md`.
   stays one number; don't split it. ⚠️ Every header `gen_aipaths.py` can emit must
   also be listed in `SidecarHeaders` — omission is silent (it only inflates the
   malformed-line counter), which is how `physicshz` sat missing from it.
+
+- §29 `displayname <text>` replaces the file stem as `LevelEntry.name`, and that
+  field is **three things at once**: the level-select tile, the results-screen
+  title, and the game's best-times file (`SaveManager` → `Records/<name>.pbs`, no
+  sanitising). ⚠️ Setting or changing it on a map someone has already played
+  orphans their times, and two maps sharing one share a records file — keep
+  displaynames unique. ⚠️ Every *file* lookup (bundle, sidecar, thumbnail) keys off
+  the path, never the name; anything that looks a map up **by name** must go
+  through `EntryIsTrack` (name OR stem), because the editor's Playtest From Pin
+  sends the stem. ⚠️ It is wrapper-set, so a regen that doesn't carry it forward
+  retitles the map AND orphans its records — `BuildBundle` carries it from the
+  live sidecar like `mapversion`.
