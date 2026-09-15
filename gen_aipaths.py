@@ -64,7 +64,7 @@ Sidecar format (one token line per point, invariant-culture floats):
                           which is what the game's own built-in courses are.
     group <label>      <- optional level-select section heading, e.g. "SSX 3".
                           Everything after the key is the label, so it MAY
-                          contain spaces (the only header that may). Absent ==
+                          contain spaces (so may displayname). Absent ==
                           the Hook's DefaultGroup, "CUSTOM".
     order <n>          <- optional level-select sort key, a whole number, GLOBAL
                           across every map in Maps/ (not per group). Sections are
@@ -72,6 +72,13 @@ Sidecar format (one token line per point, invariant-culture floats):
                           one group must not have another group's map ordered
                           between them. Absent == sorts after every map that
                           declares one, by name.
+    displayname <text> <- optional level-select + results-screen title, when it
+                          should differ from the .asset filename (X-Games' arcade
+                          names: file "X-Games - Falps", shown "FRANCE"). Free
+                          text like group. ⚠️ It is ALSO the game's best-times
+                          file name (Records/<text>.pbs), so setting it on a map
+                          already played orphans its times, and two maps sharing
+                          one share records. Absent == the filename.
     path               <- starts a new path
     <x> <z> <0|1>      <- world XZ position + windup flag
 
@@ -80,7 +87,7 @@ Usage:
         [--rail-catch <f>] \
         [--platform <mac|windows|none>] [--source <slug>] \
         [--spawnsnap <both|raise|off>] [--mapversion <v>] \
-        [--group <label>] [--order <n>] \
+        [--group <label>] [--order <n>] [--displayname <text>] \
         <map1.asset> [map2.asset ...]
 
 All flags apply to every asset in the same invocation.
@@ -173,6 +180,7 @@ def main(argv):
     mapversion = None
     group = None
     order = None
+    displayname = None
     while args and args[0].startswith("--"):
         flag = args[0]
         if len(args) < 2:
@@ -259,6 +267,15 @@ def main(argv):
                 print("--group must not be blank", file=sys.stderr)
                 return 2
             group = val
+        elif flag == "--displayname":
+            # Free prose like --group: the level-select/results title when it
+            # should differ from the .asset filename. Also the game's best-times
+            # key, so don't reuse one across maps.
+            val = " ".join(val.split())
+            if not val:
+                print("--displayname must not be blank", file=sys.stderr)
+                return 2
+            displayname = val
         elif flag == "--order":
             try:
                 order = int(val)
@@ -321,6 +338,8 @@ def main(argv):
                 f.write("group %s\n" % group)
             if order is not None:
                 f.write("order %d\n" % order)
+            if displayname is not None:
+                f.write("displayname %s\n" % displayname)
             for pts in paths:
                 f.write("path\n")
                 for x, z, w in pts:
