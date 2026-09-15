@@ -1236,7 +1236,12 @@ namespace TrickyMaddnessLevelHook
             for (int i = 0; i < List.Length; i++)
             {
                 Paths.Add(List[i]);
-                TrackNames.Add(Path.GetFileNameWithoutExtension(List[i]));
+                // LevelEntry.name is BOTH the tile/results text AND the game's
+                // best-times key (SaveManager: Records/<name>.pbs), so a
+                // displayname retrofitted onto a played map orphans its times,
+                // and two maps sharing one share a record file.
+                string shown = ReadBundleDisplayName(List[i]);
+                TrackNames.Add(shown ?? Path.GetFileNameWithoutExtension(List[i]));
             }
 
             // Per-group counts in registration order, so a map that lost its headers
@@ -3005,7 +3010,7 @@ namespace TrickyMaddnessLevelHook
         // never be mistaken for a header (or the reverse) on a prefix.
         private static readonly string[] SidecarHeaders =
         { "scale", "gravity", "physicshz", "railcatch", "platform", "source", "spawnsnap",
-          "mapversion", "group", "order" };
+          "mapversion", "group", "order", "displayname" };
 
         private static bool IsHeaderLine(string line)
         {
@@ -3237,6 +3242,41 @@ namespace TrickyMaddnessLevelHook
             {
                 Log.LogError($"[Sidecar] failed reading group sidecar for {bundlePath}: {e}");
                 return DefaultGroup;
+            }
+        }
+
+        // Reads the optional "displayname <text>" header — the level-select and
+        // results-screen title, when it should differ from the .asset filename.
+        // Returns null (use the filename) for a missing sidecar or no such line.
+        // Free text like `group`, so it bypasses HeaderMatches the same way. Every
+        // file lookup (bundle, sidecar, thumbnail) keys off the path, never this.
+        internal static string ReadBundleDisplayName(string bundlePath)
+        {
+            try
+            {
+                string sidecarPath = Path.ChangeExtension(bundlePath, ".aipaths.txt");
+                if (!File.Exists(sidecarPath)) return null;
+                foreach (var raw in File.ReadAllLines(sidecarPath))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("#")) continue;
+                    var t = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (t.Length == 0 || !string.Equals(t[0], "displayname", StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (t.Length < 2)
+                    {
+                        Log.LogWarning($"[Sidecar] {Path.GetFileName(sidecarPath)}: 'displayname' header has "
+                            + "no text — IGNORED, the menu shows the filename.");
+                        return null;
+                    }
+                    return string.Join(" ", t, 1, t.Length - 1);
+                }
+                return null;
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"[Sidecar] failed reading displayname for {bundlePath}: {e}");
+                return null;
             }
         }
 
