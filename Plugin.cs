@@ -649,7 +649,7 @@ namespace TrickyMaddnessLevelHook
             int index = -1;
             for (int i = 0; i < LevelEntries.GetLevelCount(); i++)
             {
-                if (LevelEntries.GetEntry(i).name == trackName) { index = i; break; }
+                if (EntryIsTrack(LevelEntries.GetEntry(i), trackName)) { index = i; break; }
             }
             if (index < 0)
             {
@@ -672,6 +672,19 @@ namespace TrickyMaddnessLevelHook
             }
             Log.LogInfo($"[Debug] AutoLoadMap: selecting '{trackName}' (index {index})");
             MenuManager.Instance.SelectLevel(index);
+        }
+
+        // Does this level entry answer to `track`? Its registered name, or — for a
+        // custom map — the Maps/ file stem. A `displayname` sidecar header makes those
+        // two differ, and the editor's Playtest From Pin sends the stem (it only knows
+        // BuildBundle.DisplayNames), so matching the name alone loses X-Games maps.
+        internal static bool EntryIsTrack(LevelEntry entry, string track)
+        {
+            if (string.IsNullOrEmpty(track)) return false;
+            if (string.Equals(entry.name, track, StringComparison.OrdinalIgnoreCase)) return true;
+            return entry.sceneName != null && entry.sceneName.StartsWith("$")
+                && string.Equals(Path.GetFileNameWithoutExtension(entry.sceneName.Substring(1)),
+                                 track, StringComparison.OrdinalIgnoreCase);
         }
 
         // Scene name of the active custom map, derived from LoadedTrack the same
@@ -1541,7 +1554,7 @@ namespace TrickyMaddnessLevelHook
             // top, which is why this is a testing tool and not a race setup.
             string pinTrack = menuManager != null ? menuManager.lastLevelEntry.name : null;
             if (TestPin != null && MakerSpawnPoint != null && TestPinMap != null
-                && !string.Equals(TestPinMap, pinTrack, StringComparison.OrdinalIgnoreCase))
+                && (menuManager == null || !EntryIsTrack(menuManager.lastLevelEntry, TestPinMap)))
             {
                 Log.LogInfo($"[TestPin] pin belongs to '{TestPinMap}' and this is '{pinTrack}' — starting at the gate");
             }
