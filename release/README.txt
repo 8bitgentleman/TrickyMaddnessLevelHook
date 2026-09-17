@@ -18,6 +18,34 @@ adds the physics/collision fixes those maps rely on.
   installed. If a map pack you download in the future doesn't include a
   plugins/ folder, this is where its Hook comes from.
 
+WHAT IT DOES
+------------
+  - Loads custom course packs and gets them running in Tricky Madness's normal
+    menu and level flow.
+  - Fixes materials that would otherwise render bright pink or blocky, caused
+    by shaders built for a different graphics API than the one your OS uses.
+  - Adds proper sky handling for custom maps — a plain-color fallback when a
+    course has no sky of its own, and full custom sky domes when it does.
+  - Plays animated textures (waterfalls, banners, screens) at the speed they
+    were authored to scroll, instead of sitting still.
+  - Adds a day/night-style lighting change over long multi-peak descents,
+    instead of one flat lighting look for the whole run.
+  - Builds working grind rails, since course packs don't ship with rail
+    collision built in.
+  - Simulates wind zones, teleport zones, and launch pads that a course's
+    level data defines.
+  - Makes breakable props and glass, moving obstacles (kickers, pinball-style
+    bumpers), and avalanche hazards actually interact with your rider.
+  - Lets a course use different gravity, physics speed, or overall scale than
+    the original game it came from.
+  - Guards against riders getting stuck in endless respawn loops or wedged in
+    the air.
+  - Gives AI racers a course's alternate racing lines instead of making every
+    CPU rider run nose-to-tail on one single line.
+  - Shows a proper thumbnail image for each course on the level-select screen,
+    with an optional grid layout (grouped by source game) for once you've got
+    a lot of custom courses installed.
+
 WHAT'S NEW IN v2.5.2
 ---------------------
   A fix for the starting gate. If you installed v2.5.1, please replace it with
