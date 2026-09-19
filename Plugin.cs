@@ -153,6 +153,16 @@ namespace TrickyMaddnessLevelHook
         // Same lifetime rule as WorldScale: reset on built-in selection and on
         // menu return, so a built-in level can never inherit a custom map's value.
         internal static float MapRailCatch = 0f;
+        // Per-map gold PACE in world units/second, from the sidecar's `ridepace`
+        // header. 0 = the map does not declare one, and then the medal rescue below
+        // falls back to TB_RIDE_SPEED (45) — the number every already-deployed map
+        // was built with. That sentinel is load-bearing for the same reason
+        // MapRailCatch's is: it keeps the rescue a no-op on maps that never asked.
+        //
+        // The number itself is measured per course from real telemetry, by
+        // ssx/make_pace_table.py; gen_aipaths.py copies it into the sidecar. Same
+        // lifetime rule as WorldScale — reset on built-in selection and menu return.
+        internal static float MapRidePace = 0f;
         // The game's own fixedDeltaTime, captured once at Awake before anything
         // can have modified it. Restoring from a snapshot taken at apply time
         // would re-capture an already-overridden value if two custom maps loaded
@@ -724,12 +734,13 @@ namespace TrickyMaddnessLevelHook
             // its tick rate applied to every level loaded afterwards.
             if (!isCustomScene && pendingSceneName == null
                 && (WorldScale != 1f || MapGravityMultiplier != 1f || MapPhysicsHz != 0f
-                    || MapRailCatch != 0f))
+                    || MapRailCatch != 0f || MapRidePace != 0f))
             {
                 WorldScale = 1f;
                 MapGravityMultiplier = 1f;
                 MapPhysicsHz = 0f;
                 MapRailCatch = 0f;
+                MapRidePace = 0f;
                 ApplyPhysicsRate("left custom map");
                 Log.LogInfo("[Gravity] left custom map; world scale + gravity multiplier reset to 1");
             }
@@ -3064,6 +3075,24 @@ namespace TrickyMaddnessLevelHook
                 && Mathf.Abs(ld.TimeLeft   / ld.GoldTime - 200f / 105f) < 0.01f;
         }
 
+        // Arc position along a polyline of the point closest to q, plus how far q sits
+        // off the line. The distance is what lets the caller REFUSE to clip to a marker
+        // that is not on the route. Mirrors SSXImporter.ProjectOnRoute.
+        private static void ProjectOnRoute(List<Vector3> pts, Vector3 q, out float arc, out float off)
+        {
+            arc = 0f; off = float.MaxValue;
+            float run = 0f;
+            for (int i = 0; i < pts.Count - 1; i++)
+            {
+                Vector3 a = pts[i], ab = pts[i + 1] - a;
+                float seg = ab.magnitude;
+                float t = seg > 1e-6f ? Mathf.Clamp01(Vector3.Dot(q - a, ab) / (seg * seg)) : 0f;
+                float d = Vector3.Distance(a + ab * t, q);
+                if (d < off) { off = d; arc = run + seg * t; }
+                run += seg;
+            }
+        }
+
         private static void DeriveBudgets(MakerLevelData ld)
         {
             if (ld == null) return;
@@ -3094,13 +3123,50 @@ namespace TrickyMaddnessLevelHook
             for (int i = 1; i < raceLine.m_points.Count; i++)
                 len += Vector3.Distance(raceLine.m_points[i - 1], raceLine.m_points[i]);
 
+            var spawn = FindInScene<MakerSpawnPoint>(scene);
+            var finish = FindInScene<MakerFinishLine>(scene);
+
+            // Clip the polyline to the stretch actually ridden. Mirrors the block in
+            // SSXImporter.BuildMakers — a race line is not required to start at the
+            // spawn or stop at the finish, and on several source games it demonstrably
+            // does neither: SSX 3 events start 38-60% of the way down their line, and
+            // an SSX 2012 ghost that ran the lap twice made africa0302 measure a 253 s
+            // course at 480 s. Timing the whole polyline hands those courses a gold
+            // nobody can reach.
+            //
+            // ⚠️ Each end is clipped ONLY if the marker is actually ON the line. A
+            // course whose spawn sits hundreds of units off-route (megaple) would
+            // otherwise project onto some arbitrary nearest point and lose 80% of its
+            // route to a clip that measured nothing. The tolerance is the same
+            // proportional one the importer uses, with Plugin.WorldScale standing in
+            // for the importer's S * 100 — they are the same number, which is what
+            // lets both halves agree without a shared constant.
+            float clipped = len;
+            if (spawn != null && finish != null && len > 1f)
+            {
+                float clipTol = Mathf.Max(15f * (WorldScale > 0f ? WorldScale : 1f), 0.02f * len);
+                float sSpawn, dSpawn, sFinish, dFinish;
+                ProjectOnRoute(raceLine.m_points, spawn.transform.position, out sSpawn, out dSpawn);
+                ProjectOnRoute(raceLine.m_points, finish.transform.position, out sFinish, out dFinish);
+                float a0 = dSpawn  <= clipTol ? sSpawn  : 0f;
+                float b0 = dFinish <= clipTol ? sFinish : len;
+                // Wrap when the finish projects BEFORE the spawn — that is a lap
+                // course, where the ridden stretch runs off the end and back.
+                float c = b0 >= a0 ? (b0 - a0) : (len - a0) + b0;
+                if (c > 1f && c < len - 1f)
+                {
+                    Log.LogInfo($"[TimeBudget] route clip: {len:0} u -> {c:0} u "
+                        + $"(spawn {dSpawn:0} u off route, finish {dFinish:0} u, tol {clipTol:0})");
+                    clipped = c;
+                }
+            }
+            len = clipped;
+
             // Same floor the importer applies: the rider has to get from the start to
             // the finish trigger whatever the race line says, so the straight line
             // between those two markers bounds the ridden distance from below (times
             // SINUOSITY, since no ridden line is straight). Raises the budget only, and
             // on a course whose race line is intact the polyline already dwarfs it.
-            var spawn = FindInScene<MakerSpawnPoint>(scene);
-            var finish = FindInScene<MakerFinishLine>(scene);
             float chord = 0f;
             if (spawn != null && finish != null)
             {
@@ -3108,7 +3174,9 @@ namespace TrickyMaddnessLevelHook
                 len = Mathf.Max(len, chord * TB_SINUOSITY);
             }
 
-            float gold = Mathf.Max(TB_MIN_GOLD, len / TB_RIDE_SPEED);
+            // Per-course pace when the sidecar declares one, else the old flat 45 u/s.
+            float pace = MapRidePace > 0f ? MapRidePace : TB_RIDE_SPEED;
+            float gold = Mathf.Max(TB_MIN_GOLD, len / pace);
             if (wantTimes)
             {
                 ld.GoldTime   = gold;
@@ -3117,9 +3185,9 @@ namespace TrickyMaddnessLevelHook
                 ld.TimeLeft   = Mathf.Max(TB_MIN_FREE, gold * TB_FREE_RATIO);
 
                 Log.LogInfo($"[TimeBudget] old scale-derived times replaced: route {len:0} u "
-                    + $"({raceLine.m_points.Count} pts, spawn->finish {chord:0} u) => gold "
-                    + $"{ld.GoldTime:0.0}s / silver {ld.SilverTime:0.0}s / bronze {ld.BronzeTime:0.0}s, "
-                    + $"freestyle {ld.TimeLeft:0}s. Rebuild the map to bake these in.");
+                    + $"({raceLine.m_points.Count} pts, spawn->finish {chord:0} u) at {pace:0.0} u/s "
+                    + $"=> gold {ld.GoldTime:0.0}s / silver {ld.SilverTime:0.0}s / bronze "
+                    + $"{ld.BronzeTime:0.0}s, freestyle {ld.TimeLeft:0}s. Rebuild the map to bake these in.");
             }
 
             // Freestyle score thresholds. A map built before 2026-09-19 baked 0/0/0,
@@ -3197,7 +3265,7 @@ namespace TrickyMaddnessLevelHook
         // AI-path point line. Matched on the first token, so a point line can
         // never be mistaken for a header (or the reverse) on a prefix.
         private static readonly string[] SidecarHeaders =
-        { "scale", "gravity", "physicshz", "railcatch", "platform", "source", "spawnsnap",
+        { "scale", "gravity", "physicshz", "railcatch", "ridepace", "platform", "source", "spawnsnap",
           "mapversion", "group", "order", "displayname" };
 
         private static bool IsHeaderLine(string line)
@@ -3345,6 +3413,41 @@ namespace TrickyMaddnessLevelHook
             catch (Exception e)
             {
                 Log.LogError($"[Rails] failed reading rail catch sidecar for {bundlePath}: {e}");
+                return 0f;
+            }
+        }
+
+        // Per-map gold PACE in world units/second (see Plugin.MapRidePace).
+        //
+        // The bounds are a typo guard, not a tuning range: the measured spread across
+        // this library's seven source games is ~45 (SSX Tricky) to ~70 (X-Games) u/s,
+        // so anything outside 5-500 is a unit mistake rather than a fast course. A
+        // pace an order of magnitude high hands out a gold nobody can reach, which is
+        // exactly the failure this header exists to fix — so refuse it loudly and keep
+        // the 45 fallback rather than trusting the file.
+        internal static float ReadRidePace(string bundlePath)
+        {
+            try
+            {
+                string sidecarPath = Path.ChangeExtension(bundlePath, ".aipaths.txt");
+                if (!File.Exists(sidecarPath)) return 0f;
+                foreach (var raw in File.ReadAllLines(sidecarPath))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("#")) continue;
+                    var t = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (!HeaderMatches(t, "ridepace", Path.GetFileName(sidecarPath))) continue;
+                    float v = float.Parse(t[1], CultureInfo.InvariantCulture);
+                    if (v >= 5f && v <= 500f) return v;
+                    Log.LogWarning($"[TimeBudget] sidecar {Path.GetFileName(sidecarPath)} declares ridepace {t[1]} "
+                        + "(must be 5-500 u/s); ignoring, using the 45 u/s fallback");
+                    return 0f;
+                }
+                return 0f;
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"[TimeBudget] failed reading ride pace sidecar for {bundlePath}: {e}");
                 return 0f;
             }
         }
@@ -3728,6 +3831,7 @@ namespace TrickyMaddnessLevelHook
                 Plugin.MapGravityMultiplier = 1f;
                 Plugin.MapPhysicsHz = 0f;
                 Plugin.MapRailCatch = 0f;
+                Plugin.MapRidePace = 0f;
                 Plugin.ApplyPhysicsRate("built-in level selected");
                 Plugin.BundleNativePlatform = null;
                 Plugin.BundleSource = Plugin.DefaultSource;
@@ -3832,6 +3936,13 @@ namespace TrickyMaddnessLevelHook
                 if (Plugin.MapRailCatch > 0f)
                     Plugin.Log.LogInfo($"[Rails] map declares railcatch {Plugin.MapRailCatch.ToString(CultureInfo.InvariantCulture)} m "
                         + $"(absolute); ignoring the 0.25 * worldScale default of {(0.25f * Plugin.WorldScale).ToString(CultureInfo.InvariantCulture)} m");
+
+                // Per-map gold pace from the same sidecar (0 = no declaration, keep
+                // the 45 u/s fallback). Only the medal rescue in DeriveBudgets reads
+                // it, and only on a map still carrying the old placeholder times.
+                Plugin.MapRidePace = Plugin.ReadRidePace(path);
+                if (Plugin.MapRidePace > 0f)
+                    Plugin.Log.LogInfo($"[TimeBudget] map declares ridepace {Plugin.MapRidePace.ToString(CultureInfo.InvariantCulture)} u/s");
 
                 // Native-platform declaration from the same sidecar (null when absent).
                 // Read on reuse too — the sidecar may have changed on disk.
