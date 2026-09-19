@@ -1610,7 +1610,17 @@ namespace TrickyMaddnessLevelHook
             LevelEntry.scoreThresholds[1] = levelManagerMaker.SilverPoints;
             LevelEntry.scoreThresholds[0] = levelManagerMaker.BronzePoints;
 
-            LevelEntry.freestyleTimeLimit = levelManagerMaker.TimeLeft;
+            // ⚠️ HELD OUT OF 2.7.1 ON PURPOSE — do NOT restore without a playtest.
+            // `LevelEntry.freestyleTimeLimit = levelManagerMaker.TimeLeft;` belongs
+            // here and is correct in principle: the map author's clock should win.
+            // But the write-back underneath it was dead until 2026-09-12, so NO custom
+            // map has ever run on its own clock, and the values the importer bakes are
+            // labelled placeholders (SSXImporter.cs:7274, `TimeLeft = 200f * scale`)
+            // that nobody has ridden. Applying it takes a 2.5-scale course from the
+            // 150 s every player has actually experienced to 500 s, sight unseen.
+            // Medals below are unaffected: the threshold ARRAYS alias, so they have
+            // always landed. Restore this line (and its twin further down) once the
+            // baked TimeLeft values have been tuned against a real freestyle run.
 
             // Seat the copy back through the property's setter. The `Traverse.Field`
             // chain this replaces never resolved (see mSetLastLevelEntry) and said
@@ -1634,15 +1644,17 @@ namespace TrickyMaddnessLevelHook
             // has not run yet. Without this line the author's clock would only take
             // effect on a second run of the map. The field is public — no reflection,
             // and a TM rename is a compile error rather than a silent miss.
-            if (levelManagerMaker.TimeLeft > 0f)
+            // ⚠️ The twin of the held-out write above — see that comment for why.
+            // When restoring, BOTH lines are needed: the write-back above is one load
+            // too late on its own, because MenuManager has already copied
+            // lastLevelEntry's limit into this public field during LoadScene and
+            // LevelManager.Start reads THIS field, not the entry.
+            if (levelManagerMaker.TimeLeft > 0f
+                && !Mathf.Approximately(levelManagerMaker.TimeLeft, menuManager.freestyleTimeLimit))
             {
-                menuManager.freestyleTimeLimit = levelManagerMaker.TimeLeft;
-            }
-            else
-            {
-                Log.LogWarning("[LevelEntry] this map's TimeLeft is 0, so the freestyle run would "
-                    + "start already expired — keeping the 150 s default instead. Set TimeLeft in "
-                    + "the map's level data to control the freestyle clock.");
+                Log.LogInfo($"[LevelEntry] this map asks for a {levelManagerMaker.TimeLeft:0} s "
+                    + $"freestyle clock; the Hook is holding it at {menuManager.freestyleTimeLimit:0} s "
+                    + "until the authored times have been playtested.");
             }
 
             //Insert Starting Gate
