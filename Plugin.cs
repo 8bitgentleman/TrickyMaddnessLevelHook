@@ -3019,6 +3019,28 @@ namespace TrickyMaddnessLevelHook
         // (the Hook does not reference the editor assembly). Keep them in step with
         // SSXImporter.BuildMakers — a divergence shows up as a map whose medals change
         // when it is rebuilt.
+        // Scene-scoped component lookups. See the warning in DeriveBudgets: the global
+        // Find* family is unsafe here because loaded scenes stack and never unload.
+        private static T FindInScene<T>(Scene scene) where T : Component
+        {
+            if (!scene.IsValid()) return null;
+            foreach (var go in scene.GetRootGameObjects())
+            {
+                var hit = go.GetComponentInChildren<T>(true);
+                if (hit != null) return hit;
+            }
+            return null;
+        }
+
+        private static List<T> FindAllInScene<T>(Scene scene) where T : Component
+        {
+            var all = new List<T>();
+            if (!scene.IsValid()) return all;
+            foreach (var go in scene.GetRootGameObjects())
+                all.AddRange(go.GetComponentsInChildren<T>(true));
+            return all;
+        }
+
         private const float TB_RIDE_SPEED   = 45f;    // u/s over the whole route
         private const float TB_SILVER_RATIO = 1.06f;  // measured on TM's four courses
         private const float TB_BRONZE_RATIO = 1.15f;
@@ -3049,7 +3071,16 @@ namespace TrickyMaddnessLevelHook
             bool wantScore = ld.GoldPoints <= 0f && ld.SilverPoints <= 0f && ld.BronzePoints <= 0f;
             if (!wantTimes && !wantScore) return;
 
-            var raceLine = FindAnyObjectByType<MakerRaceLine>();
+            // ⚠️ Scene-SCOPED, not FindAnyObjectByType. MenuManager.LoadScene stacks
+            // scenes additively and never unloads the outgoing one (see
+            // LevelHook-src/CLAUDE.md), so a global lookup on a second load hands back
+            // the PREVIOUS course's race line, spawn and finish — and would derive
+            // this map's medals off the last map's route, silently. Everything here is
+            // looked up inside the LevelData's OWN scene, the same way the snowflake
+            // conversion in LoadLevel already does it. (BuildAIPathFromRaceLine below
+            // still uses the global lookup; it predates this and is untouched here.)
+            var scene = ld.gameObject.scene;
+            var raceLine = FindInScene<MakerRaceLine>(scene);
             if (raceLine == null || raceLine.m_points == null || raceLine.m_points.Count < 2)
             {
                 Log.LogWarning("[TimeBudget] this map carries the old placeholder medal times "
@@ -3068,8 +3099,8 @@ namespace TrickyMaddnessLevelHook
             // between those two markers bounds the ridden distance from below (times
             // SINUOSITY, since no ridden line is straight). Raises the budget only, and
             // on a course whose race line is intact the polyline already dwarfs it.
-            var spawn = FindAnyObjectByType<MakerSpawnPoint>();
-            var finish = FindAnyObjectByType<MakerFinishLine>();
+            var spawn = FindInScene<MakerSpawnPoint>(scene);
+            var finish = FindInScene<MakerFinishLine>(scene);
             float chord = 0f;
             if (spawn != null && finish != null)
             {
@@ -3101,7 +3132,7 @@ namespace TrickyMaddnessLevelHook
             if (wantScore)
             {
                 int gemValue = 0, gemCount = 0;
-                foreach (var flake in FindObjectsByType<MakerSnowflake>(FindObjectsSortMode.None))
+                foreach (var flake in FindAllInScene<MakerSnowflake>(scene))
                 {
                     gemCount++;
                     gemValue += flake.snowFlakeType == MakerSnowflake.SnowFlakeType.Snowflake5 ? 5
