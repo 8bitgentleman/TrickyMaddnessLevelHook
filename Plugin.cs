@@ -1600,6 +1600,11 @@ namespace TrickyMaddnessLevelHook
             // Do NOT "tidy" these into `new float[] { ... }`: that would silently give
             // every custom map the placeholder medal times from RegisterLevels back.
             // freestyleTimeLimit is a plain float on the struct and does NOT alias.
+            // Rescue the medal times, freestyle clock and score thresholds on maps
+            // built before the importer learned to derive them (see DeriveBudgets).
+            // Runs BEFORE the six writes below, so the rescued values are what lands.
+            DeriveBudgets(levelManagerMaker);
+
             var LevelEntry = menuManager.lastLevelEntry;
 
             LevelEntry.timeThresholds[2] = levelManagerMaker.GoldTime;
@@ -1610,17 +1615,18 @@ namespace TrickyMaddnessLevelHook
             LevelEntry.scoreThresholds[1] = levelManagerMaker.SilverPoints;
             LevelEntry.scoreThresholds[0] = levelManagerMaker.BronzePoints;
 
-            // ⚠️ HELD OUT OF 2.7.1 ON PURPOSE — do NOT restore without a playtest.
-            // `LevelEntry.freestyleTimeLimit = levelManagerMaker.TimeLeft;` belongs
-            // here and is correct in principle: the map author's clock should win.
-            // But the write-back underneath it was dead until 2026-09-12, so NO custom
-            // map has ever run on its own clock, and the values the importer bakes are
-            // labelled placeholders (SSXImporter.cs:7274, `TimeLeft = 200f * scale`)
-            // that nobody has ridden. Applying it takes a 2.5-scale course from the
-            // 150 s every player has actually experienced to 500 s, sight unseen.
-            // Medals below are unaffected: the threshold ARRAYS alias, so they have
-            // always landed. Restore this line (and its twin further down) once the
-            // baked TimeLeft values have been tuned against a real freestyle run.
+            // The map's own freestyle clock. Held out of 2.7.1 because the baked
+            // TimeLeft was `200f * build scale` — a placeholder nobody had ridden,
+            // which would have taken a 2.5-scale course from the 150 s every player
+            // has actually experienced to 500 s, sight unseen. That reason is now
+            // spent: TimeLeft is DERIVED from the measured route (importer) or
+            // rescued from it at load (DeriveBudgets), and both floor it at TM's
+            // stock 150 s. So no map's clock can get SHORTER than what players ride
+            // today — only the long courses that currently run out of time halfway
+            // down move at all, and only upward. (The one way past that floor is a
+            // course explicitly pinning gameplay.freestyleTime in its Overrides.json,
+            // which is a deliberate act by whoever set it.)
+            LevelEntry.freestyleTimeLimit = levelManagerMaker.TimeLeft;
 
             // Seat the copy back through the property's setter. The `Traverse.Field`
             // chain this replaces never resolved (see mSetLastLevelEntry) and said
@@ -1644,17 +1650,16 @@ namespace TrickyMaddnessLevelHook
             // has not run yet. Without this line the author's clock would only take
             // effect on a second run of the map. The field is public — no reflection,
             // and a TM rename is a compile error rather than a silent miss.
-            // ⚠️ The twin of the held-out write above — see that comment for why.
-            // When restoring, BOTH lines are needed: the write-back above is one load
-            // too late on its own, because MenuManager has already copied
-            // lastLevelEntry's limit into this public field during LoadScene and
-            // LevelManager.Start reads THIS field, not the entry.
-            if (levelManagerMaker.TimeLeft > 0f
-                && !Mathf.Approximately(levelManagerMaker.TimeLeft, menuManager.freestyleTimeLimit))
+            // ⚠️ The twin of the write above, and BOTH are needed: the write-back
+            // above is one load too late on its own, because MenuManager has already
+            // copied lastLevelEntry's limit into this public field during LoadScene
+            // and LevelManager.Start reads THIS field, not the entry.
+            if (levelManagerMaker.TimeLeft > 0f)
             {
-                Log.LogInfo($"[LevelEntry] this map asks for a {levelManagerMaker.TimeLeft:0} s "
-                    + $"freestyle clock; the Hook is holding it at {menuManager.freestyleTimeLimit:0} s "
-                    + "until the authored times have been playtested.");
+                if (!Mathf.Approximately(levelManagerMaker.TimeLeft, menuManager.freestyleTimeLimit))
+                    Log.LogInfo($"[LevelEntry] freestyle clock {menuManager.freestyleTimeLimit:0} s "
+                        + $"-> {levelManagerMaker.TimeLeft:0} s (this map's own)");
+                menuManager.freestyleTimeLimit = levelManagerMaker.TimeLeft;
             }
 
             //Insert Starting Gate
@@ -2990,6 +2995,133 @@ namespace TrickyMaddnessLevelHook
             {
                 Log.LogError($"[AIPaths] sidecar {sidecarPath} failed to load: {e}");
                 return 0;
+            }
+        }
+
+        // ---- time budget rescue -------------------------------------------------
+        // Medal times and the freestyle clock are baked into MakerLevelData by the
+        // importer. Until 2026-09-19 it baked `105/120/135/200 * (S*100)` — the BUILD
+        // SCALE, which is a source-unit conversion factor and says nothing about how
+        // long the course is. Every 2.5x map therefore shipped the same 337 s bronze
+        // whether its route was 610 units or 84,667; the X-Games maps (S ~ 1.4) shipped
+        // a 5.2-hour gold. Both failures are silent — an unreachable medal and an
+        // automatic one look identical from the menu — and they are baked into 150-odd
+        // ALREADY DEPLOYED bundles.
+        //
+        // So derive the same numbers here, at load, from the scene's own race line.
+        // That fixes the deployed maps with a DLL drop and no rebuilds; as maps are
+        // rebuilt the importer's values arrive correct and this stops firing, because
+        // the trigger is the old placeholder's RATIO SIGNATURE (silver/gold = 120/105,
+        // bronze/gold = 135/105, free/gold = 200/105) and the derived values do not
+        // have it. A hand-tuned map does not have it either, so this cannot stomp one.
+        //
+        // The constants are the importer's, deliberately duplicated rather than shared
+        // (the Hook does not reference the editor assembly). Keep them in step with
+        // SSXImporter.BuildMakers — a divergence shows up as a map whose medals change
+        // when it is rebuilt.
+        private const float TB_RIDE_SPEED   = 45f;    // u/s over the whole route
+        private const float TB_SILVER_RATIO = 1.06f;  // measured on TM's four courses
+        private const float TB_BRONZE_RATIO = 1.15f;
+        private const float TB_FREE_RATIO   = 1.5f;
+        private const float TB_MIN_GOLD     = 45f;    // s, floor for arena-sized maps
+        private const float TB_MIN_FREE     = 150f;   // s, TM's stock freestyle clock
+        private const float TB_SINUOSITY    = 1.15f;  // chord -> ridden distance
+        private const float TB_POINT_RATE   = 1500f;  // freestyle pts/s of clock at TM's pickup density
+        private const float TB_TM_GEM_DENS  = 42f;    // weighted pickup value per 1000 u (TM: 41-83)
+        private const float TB_MIN_CONTENT  = 0.5f;   // floor for a map with no pickups at all
+        private const float TB_SILVER_PTS   = 0.75f;  // measured, exact on TM's four courses
+        private const float TB_BRONZE_PTS   = 0.5f;   // measured, exact on TM's four courses
+        private const float TB_MIN_GOLD_PTS = 50000f;
+        private const float TB_PTS_ROUND    = 25000f;
+
+        private static bool LooksLikeScaledPlaceholder(MakerLevelData ld)
+        {
+            if (ld == null || ld.GoldTime <= 0f) return false;
+            return Mathf.Abs(ld.SilverTime / ld.GoldTime - 120f / 105f) < 0.01f
+                && Mathf.Abs(ld.BronzeTime / ld.GoldTime - 135f / 105f) < 0.01f
+                && Mathf.Abs(ld.TimeLeft   / ld.GoldTime - 200f / 105f) < 0.01f;
+        }
+
+        private static void DeriveBudgets(MakerLevelData ld)
+        {
+            if (ld == null) return;
+            bool wantTimes = LooksLikeScaledPlaceholder(ld);
+            bool wantScore = ld.GoldPoints <= 0f && ld.SilverPoints <= 0f && ld.BronzePoints <= 0f;
+            if (!wantTimes && !wantScore) return;
+
+            var raceLine = FindAnyObjectByType<MakerRaceLine>();
+            if (raceLine == null || raceLine.m_points == null || raceLine.m_points.Count < 2)
+            {
+                Log.LogWarning("[TimeBudget] this map carries the old placeholder medal times "
+                    + "and/or zeroed score thresholds, and has no race line to measure — leaving "
+                    + "them alone. Rebuild it, or pin gameplay.goldTime / goldPoints (and friends) "
+                    + "in its Overrides.json.");
+                return;
+            }
+
+            float len = 0f;
+            for (int i = 1; i < raceLine.m_points.Count; i++)
+                len += Vector3.Distance(raceLine.m_points[i - 1], raceLine.m_points[i]);
+
+            // Same floor the importer applies: the rider has to get from the start to
+            // the finish trigger whatever the race line says, so the straight line
+            // between those two markers bounds the ridden distance from below (times
+            // SINUOSITY, since no ridden line is straight). Raises the budget only, and
+            // on a course whose race line is intact the polyline already dwarfs it.
+            var spawn = FindAnyObjectByType<MakerSpawnPoint>();
+            var finish = FindAnyObjectByType<MakerFinishLine>();
+            float chord = 0f;
+            if (spawn != null && finish != null)
+            {
+                chord = Vector3.Distance(spawn.transform.position, finish.transform.position);
+                len = Mathf.Max(len, chord * TB_SINUOSITY);
+            }
+
+            float gold = Mathf.Max(TB_MIN_GOLD, len / TB_RIDE_SPEED);
+            if (wantTimes)
+            {
+                ld.GoldTime   = gold;
+                ld.SilverTime = gold * TB_SILVER_RATIO;
+                ld.BronzeTime = gold * TB_BRONZE_RATIO;
+                ld.TimeLeft   = Mathf.Max(TB_MIN_FREE, gold * TB_FREE_RATIO);
+
+                Log.LogInfo($"[TimeBudget] old scale-derived times replaced: route {len:0} u "
+                    + $"({raceLine.m_points.Count} pts, spawn->finish {chord:0} u) => gold "
+                    + $"{ld.GoldTime:0.0}s / silver {ld.SilverTime:0.0}s / bronze {ld.BronzeTime:0.0}s, "
+                    + $"freestyle {ld.TimeLeft:0}s. Rebuild the map to bake these in.");
+            }
+
+            // Freestyle score thresholds. A map built before 2026-09-19 baked 0/0/0,
+            // which LevelManager reads as "any score is gold" — so every freestyle run
+            // on every custom map has auto-golded off the start gate. Zero is also an
+            // unambiguous marker: no real threshold ladder starts at nothing, so this
+            // cannot stomp an authored one. Mirrors SSXImporter.BuildMakers' block —
+            // see it for what here is measured (the 0.75/0.5 ratios, exact on TM's
+            // four courses) and what is fitted (everything else).
+            if (wantScore)
+            {
+                int gemValue = 0, gemCount = 0;
+                foreach (var flake in FindObjectsByType<MakerSnowflake>(FindObjectsSortMode.None))
+                {
+                    gemCount++;
+                    gemValue += flake.snowFlakeType == MakerSnowflake.SnowFlakeType.Snowflake5 ? 5
+                              : flake.snowFlakeType == MakerSnowflake.SnowFlakeType.Snowflake3 ? 3 : 2;
+                }
+                float gemDensity = len > 1f ? gemValue * 1000f / len : 0f;
+                float content = Mathf.Clamp(gemDensity / TB_TM_GEM_DENS, TB_MIN_CONTENT, 1f);
+                // Off the map's OWN clock, whichever it ended up with above, so the
+                // bar tracks how long the rider actually gets to bank points.
+                float goldPts = Mathf.Round(TB_POINT_RATE * ld.TimeLeft * content / TB_PTS_ROUND) * TB_PTS_ROUND;
+                goldPts = Mathf.Max(TB_MIN_GOLD_PTS, goldPts);
+
+                ld.GoldPoints   = goldPts;
+                ld.SilverPoints = goldPts * TB_SILVER_PTS;
+                ld.BronzePoints = goldPts * TB_BRONZE_PTS;
+
+                Log.LogInfo($"[TimeBudget] zeroed freestyle score thresholds replaced (they golded "
+                    + $"on any score): {gemCount} pickup(s) worth {gemValue} over {len:0} u = "
+                    + $"{gemDensity:0.0}/1000u => content x{content:0.00} on a {ld.TimeLeft:0} s clock "
+                    + $"=> gold {ld.GoldPoints:0} / silver {ld.SilverPoints:0} / bronze {ld.BronzePoints:0}.");
             }
         }
 
