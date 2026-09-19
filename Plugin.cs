@@ -6236,6 +6236,18 @@ namespace TrickyMaddnessLevelHook
         Material[][] _mats;
         Vector2[][] _base;
 
+        // URP's Particles/* shaders copy the vertex UV straight through and NEVER apply
+        // _BaseMap_ST (ParticlesUnlitForwardPass -> GetParticleTexcoords: `outputTexcoord =
+        // inputTexcoords.xy`; plain Unlit does `TRANSFORM_TEX`). The X-Games soft-edged
+        // planes use Particles/Unlit because it is the one game shader that multiplies
+        // vertex colour, so a material-offset scroll is written, read back correctly, and
+        // draws NOTHING. For those renderers the offset goes into a private clone of the
+        // mesh's UVs instead — shader-independent, and the material path is left alone
+        // for every other renderer so no other course changes behaviour.
+        Mesh[] _uvMesh;
+        Vector2[][] _uvBase;
+        Vector2[][] _uvTmp;
+
         // First-attached instance emits two one-line probes (~15s and ~30s into the
         // level) — shader name, written vs read-back offsets, and whether the renderer
         // still holds our instances. Cheap enough to leave on; it's the evidence for
@@ -6249,6 +6261,9 @@ namespace TrickyMaddnessLevelHook
             _rends = GetComponentsInChildren<Renderer>(true);
             _mats = new Material[_rends.Length][];
             _base = new Vector2[_rends.Length][];
+            _uvMesh = new Mesh[_rends.Length];
+            _uvBase = new Vector2[_rends.Length][];
+            _uvTmp = new Vector2[_rends.Length][];
             for (int i = 0; i < _rends.Length; i++)
                 Bind(i);
             if (_diag == null) _diag = this;
@@ -6268,6 +6283,41 @@ namespace TrickyMaddnessLevelHook
             _base[i] = new Vector2[_mats[i].Length];
             for (int j = 0; j < _mats[i].Length; j++)
                 _base[i][j] = _mats[i][j] != null ? _mats[i][j].mainTextureOffset : Vector2.zero;
+            BindMesh(i);
+        }
+
+        // Switches renderer i to UV-scrolling its own mesh copy when EVERY material on it
+        // is a Particles/* shader (all-or-nothing: shifting the mesh UVs would double-scroll
+        // any non-Particles material sharing the mesh, and the soft-edged planes are all
+        // single-segment). Idempotent — Bind() re-runs on self-heal, and must not re-clone.
+        void BindMesh(int i)
+        {
+            var mats = _mats[i];
+            bool allParticles = mats.Length > 0;
+            for (int j = 0; j < mats.Length && allParticles; j++)
+                allParticles = mats[j] != null && mats[j].shader != null &&
+                    mats[j].shader.name.IndexOf("Particles", StringComparison.OrdinalIgnoreCase) >= 0;
+            var mf = _rends[i].GetComponent<MeshFilter>();
+            if (!allParticles || mf == null || mf.sharedMesh == null)
+            {
+                _uvMesh[i] = null;
+                return;
+            }
+            if (ReferenceEquals(mf.sharedMesh, _uvMesh[i])) return;
+            var src = mf.sharedMesh;
+            if (!src.isReadable)
+            {
+                Plugin.Log.LogWarning("[UVScroll] '" + name + "': mesh '" + src.name +
+                    "' is not readable, cannot UV-scroll a Particles-shader material");
+                _uvMesh[i] = null;
+                return;
+            }
+            var clone = Instantiate(src);
+            clone.name = src.name + "_uvscroll";
+            mf.sharedMesh = clone;
+            _uvMesh[i] = clone;
+            _uvBase[i] = clone.uv;
+            _uvTmp[i] = new Vector2[_uvBase[i].Length];
         }
 
         void Update()
@@ -6286,6 +6336,18 @@ namespace TrickyMaddnessLevelHook
                 if (_mats[i].Length != shared.Length ||
                     (shared.Length > 0 && !ReferenceEquals(shared[0], _mats[i][0])))
                     Bind(i);
+                if (_uvMesh[i] != null)
+                {
+                    o = _base[i][0] + scroll;
+                    o.x -= Mathf.Floor(o.x);
+                    o.y -= Mathf.Floor(o.y);
+                    var ub = _uvBase[i];
+                    var ut = _uvTmp[i];
+                    for (int k = 0; k < ub.Length; k++)
+                        ut[k] = ub[k] + o;
+                    _uvMesh[i].uv = ut;
+                    continue;
+                }
                 for (int j = 0; j < _mats[i].Length; j++)
                 {
                     var m = _mats[i][j];
@@ -6314,10 +6376,11 @@ namespace TrickyMaddnessLevelHook
                     bool bound = shared.Length > 0 && ReferenceEquals(shared[0], m0);
                     Vector2 rb = m0.HasProperty("_BaseMap") ? m0.GetTextureOffset("_BaseMap") : new Vector2(-9, -9);
                     Plugin.Log.LogInfo(string.Format(CultureInfo.InvariantCulture,
-                        "[UVScroll] diag t={0:F0}s '{1}': shader='{2}' wrote=({3:F3},{4:F3}) baseMapST=({5:F3},{6:F3}) mainOfs=({7:F3},{8:F3}) bound={9} rate=({10:R},{11:R})",
+                        "[UVScroll] diag t={0:F0}s '{1}': shader='{2}' wrote=({3:F3},{4:F3}) baseMapST=({5:F3},{6:F3}) mainOfs=({7:F3},{8:F3}) bound={9} rate=({10:R},{11:R}) via={12}",
                         Time.timeSinceLevelLoad, name, m0.shader != null ? m0.shader.name : "null",
                         o.x, o.y, rb.x, rb.y, m0.mainTextureOffset.x, m0.mainTextureOffset.y,
-                        bound, RatePerFrame.x, RatePerFrame.y));
+                        bound, RatePerFrame.x, RatePerFrame.y,
+                        _uvMesh[0] != null ? "mesh-uv" : "material-offset"));
                 }
             }
         }
