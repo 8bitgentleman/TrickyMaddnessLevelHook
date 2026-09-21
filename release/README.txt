@@ -1,4 +1,4 @@
-Tricky Madness Level Hook v2.7.1 — required for every custom map pack
+Tricky Madness Level Hook v2.8.2 — required for every custom map pack
 =======================================================================
 
 This is the plugin that makes custom map packs (SSX Tricky Ports, SSX 3 Ports,
@@ -42,126 +42,139 @@ WHAT IT DOES
     the original game it came from.
   - Guards against riders getting stuck in endless respawn loops or wedged in
     the air.
+  - Sets medal times, freestyle score targets and the freestyle clock from how
+    long each converted course actually is, instead of one number for all of them.
   - Gives AI racers a course's alternate racing lines instead of making every
     CPU rider run nose-to-tail on one single line.
   - Shows a proper thumbnail image for each course on the level-select screen,
     with an optional grid layout (grouped by source game) for once you've got
     a lot of custom courses installed.
 
-WHAT'S NEW IN v2.7.1
+WHAT'S NEW IN v2.8.2
 ---------------------
-  A big one — this is three releases' worth of work (2.5.3, 2.6.0, 2.7.0 and
-  2.7.1) rolled into the first Hook update since September 4th.
+  Three releases' worth (2.8.0, 2.8.1, 2.8.2), nearly all of it about one
+  problem: medals on custom courses were quietly wrong, and nothing in the menu
+  told you.
 
-  Most of it needs nothing from you but the new DLL. Where something only shows
-  up on a course pack built after this, it says so.
+  It is all DLL-only — no map re-download. But two of the changes below alter how
+  courses you already have installed play (freestyle medals and the freestyle
+  clock), so read those first.
 
   THINGS THAT CHANGE ON MAPS YOU ALREADY HAVE INSTALLED
   (no map re-download — just drop in the new DLL)
 
-  - Fences, signs, billboards and barriers are solid again. The Hook strips
-    collision off thin upright panels so that smashable glass bounces you
-    instead of stopping you dead — but "thin upright panel" also describes a
-    chain-link fence, a road sign and a bridge support, so it had been quietly
-    removing collision from those too, and you could ride straight through
-    them. It now only does that to props whose name actually says glass or
-    window. Swept across all 159 courses: 132 objects still get the treatment,
-    and roughly 14,100 that used to be ghosts are solid again.
+  - Freestyle medals have to be earned now. Every custom map shipped with its
+    three freestyle score targets set to zero, and the game reads a zero target
+    as "any score is gold" — so every freestyle run on every custom course has
+    been an automatic gold from the moment you left the start gate. The Hook now
+    works out real targets when the course loads, from how long the course is
+    and how many pickups are on it. The one part that is exact rather than a
+    guess: bronze is half of gold and silver is three-quarters of it, which
+    holds to the point on all four of the game's own courses.
 
-    Worth knowing: if you had found a shortcut that ran through a fence, it
-    isn't there any more. That was a bug, not a feature, but it was your bug
-    and now it's gone.
+    Honest note: how high GOLD itself sits is our estimate, not recovered data.
+    The game's own four courses don't follow any formula (gold tracks neither
+    length nor clock time), so this is a judgment call that wants tuning against
+    real play. Most converted courses have few or no pickups placed on them, so
+    their targets land at the low end. Across the 166 converted courses we have,
+    gold works out to about 200,000 for the middle one, 100,000 for the lowest
+    and 2.1 million for the highest.
 
-  - Animated doors block you until they open. Same cause as above — the door
-    panels were having their collision removed at load, so the door would
-    animate perfectly while you rode through it. All 48 door parts on the
-    course that uses them work now.
+  - Medal times fit the course. The old medal times were computed from the
+    map's build scale — a conversion factor that says nothing about how long the
+    course is — so every 2.5x-scale course got the same 337-second bronze
+    whether its route was 610 units long or 84,667, and the X-Games courses got
+    a gold time of over five hours. The Hook now times the actual route between
+    the start and the finish.
 
-  - CPU riders stop stalling and teleporting on the big converted courses.
-    The game decides whether a racing line is usable by checking whether any
-    point on it is within 150 units — a number that made sense for its own
-    courses, but the converted ones are built at two and a half to five times
-    that size, so a CPU rider who drifted off the line could see no path at
-    all, and the game's own stuck-handler would respawn them. Over and over.
-    That distance now scales with the course, so they just carry on. The
-    game's own four courses run at normal scale and are unaffected.
+    Two details worth knowing. It only measures the stretch you really ride:
+    SSX 3's events start 38 to 60 percent of the way down their own line, and
+    one SSX 2012 course's recorded line laps the course twice, which had been
+    handing those courses a gold time nobody could reach. And a Time Trial has
+    no clock — these times are medal targets only; nothing cuts your run short.
 
-  - Avalanche debris actually wrecks you. On the two SSX 3 courses with an
-    avalanche, the rocks used to pass straight through you like scenery. Get
-    caught now and you go down properly — ragdoll, combo lost, the lot.
+  - The freestyle clock is now the one each course asks for. This is the thing
+    2.7.1 deliberately held back (see PREVIOUSLY below). What let it out: the
+    clock can no longer get SHORTER than the game's stock 150 seconds, so short
+    courses run exactly as before, and only the long ones — the ones that ran
+    out of time halfway down the mountain — get more. Across the 166 courses,
+    51 sit at 150 seconds and are unchanged; the very longest converted course
+    comes out at about 47 minutes.
 
-    Honest note: SSX 3 keeps its avalanche rules in a part of its data nobody
-    has decoded, so what being hit costs you is OUR decision, not the original
-    game's recovered behaviour. The debris stays non-solid on purpose (so a
-    descending avalanche wrecks you rather than shoving you around like a
-    moving wall), it's only dangerous while it's actually moving, and there's
-    a three-second grace period so you aren't flattened again the instant you
-    get up.
+    Honest note: those clock lengths are calculated from route length, not
+    played at that length. They only ever go up from 150 seconds, but if one
+    feels absurd, that is data we want.
 
-  THINGS THAT NEED A COURSE PACK BUILT AFTER THIS
+  - The X-Games courses' scrolling soft-edged planes actually scroll. Those
+    planes use one of the game's particle shaders, which ignores the
+    texture-offset the Hook was writing, so the scroll was recorded correctly
+    and drew nothing. For renderers that use ONLY that shader, the Hook now
+    shifts the mesh's own UVs instead. Every other course is untouched.
 
-  - Glowing halos on lamps and signs. Light sources can now carry proper
-    camera-facing glows that fade with distance, flash, and swell as you get
-    close, instead of being flat unlit geometry. Only the X-Games courses ship
-    this data today; every other course looks exactly as it did.
+  WHAT IT WILL AND WON'T TOUCH
 
-  - Launch pads. A course can now throw you with a one-shot burst of speed —
-    distinct from the wind zones it already had, which push continuously. This
-    is what turns the fan shaft on the arena map into a lap course. A course
-    can limit how many times it fires, counted per rider so a CPU racer can't
-    use up your go.
+  The Hook only rewrites a course's times or score targets when the course still
+  carries the old placeholder values. A course that was rebuilt with real values,
+  or tuned by hand, is left exactly as it is. A course with no race line to
+  measure is also left alone, with a warning in BepInEx/LogOutput.log. Look for
+  lines starting [TimeBudget] to see what the Hook decided for any given course.
 
-  - Short names on the level-select screen. A map file has to have a unique
-    name so two packs can't collide, but that makes for some ugly tiles. A
-    pack can now ship a display name, so an arcade course can read FRANCE on
-    the tile while its file stays uniquely named underneath.
+  THINGS THAT NEED A COURSE THAT DECLARES IT
 
-    >>> READ THIS IF YOU CARE ABOUT YOUR BEST TIMES <<<
-    The game files your best times under the name shown on the tile. So if a
-    course pack updates and renames a course you have already played, the game
-    will look for your records under the new name and not find them. The old
-    times aren't deleted, but they won't show. Nothing you can do about it
-    from this end — it's how the game stores them.
+  - A per-course pace. Gold time used to assume one riding speed for every
+    course (45 units a second, fitted to the game's own courses). It's really
+    about 45 for SSX Tricky-style courses and about 70 for the X-Games ones —
+    which is how X-Games Falps ended up with a 3:01 gold on a course its first
+    tester finished in 1:43. A course's map file can now carry its own measured
+    pace, and the Hook uses it. Courses that don't carry one fall back to the
+    flat 45, exactly as above. The Hook ignores any pace outside 5 to 500 as a
+    typo rather than a fast course.
 
-  FOR PEOPLE BUILDING OR TESTING COURSES
+  FOR PEOPLE BUILDING COURSES
 
-  - New setting: RiderTelemetry, under [Debug] in
-    BepInEx/config/TrickyMaddnessLevelHook.cfg, off by default. Turn it on and
-    the Hook records what your rider actually did — speed, position, airtime,
-    every physics step — to a CSV in a Telemetry folder next to the game, so
-    course geometry can be sized against real numbers instead of by eye. It
-    works on the game's own four courses too, so an authored course has
-    something to be measured against.
-  - The --tm-map launch option and the AutoLoadMap setting now also accept a
-    map's filename, and stopped caring about capitalisation. Anything that
-    worked before still works.
-  - If AutoLoadMap can't find what you asked for, it now lists the game's own
-    four course names, which aren't written down anywhere else.
-
-  ONE THING DELIBERATELY HELD BACK
-
-  - The freestyle clock stays at 150 seconds. While fixing something else we
-    found that custom maps had never once used the freestyle time their own
-    data asks for — the Hook's attempt to apply it had silently done nothing
-    since forever, so every custom course has always run the stock 150-second
-    clock. The fix works, but the times the courses carry were placeholder
-    values that nobody has ever ridden, and switching it on would have taken a
-    typical converted course from 150 seconds to 500 with no one having played
-    a single run at that length. It's staying off until those times have been
-    tuned against actual play. The Hook logs what the map asked for, so you
-    can see what it would have been. Medal times are unaffected and, unlike
-    the clock, have always worked.
+  - You can pin any of these yourself in a course's Overrides.json
+    (gameplay.goldTime, goldPoints and their silver/bronze siblings,
+    gameplay.freestyleTime), and a pinned value is used as given — including a
+    freestyle clock shorter than 150 seconds, since pinning is a deliberate act.
+    A zero or negative pin is refused at build time: a gold time of zero can't
+    be rescued by the Hook later, and it would ship an unwinnable medal.
 
   COMPATIBILITY
 
-  No map file changes, and the Hook still works with every course pack ever
-  released — no re-download of anything. Your config file is untouched too:
-  one new setting was added, nothing was renamed or removed.
+  No map file changes, no config changes, and the Hook still works with every
+  course pack ever released — no re-download of anything.
 
-  Be aware, though, that four of the fixes above change how courses you
-  already have installed actually play: solid fences and barriers, doors that
-  block you, CPU riders that no longer stall, and avalanche debris that hurts.
-  All improvements, but they are genuine changes, not just cosmetics.
+  But be aware that this one changes how courses you already have installed
+  play: freestyle stops being an automatic gold, and long courses get a longer
+  freestyle clock. Both are corrections, but you'll notice them.
+
+PREVIOUSLY, IN v2.7.1
+---------------------
+  (This was three releases' worth of work — 2.5.3, 2.6.0, 2.7.0 and 2.7.1.)
+  - Fences, signs, billboards and barriers are solid again. The pass that strips
+    collision off breakable glass had also been removing it from chain-link
+    fences, road signs and bridge supports, so you could ride straight through
+    them. It now only touches props whose name says glass or window: about
+    14,100 objects across all 159 courses are solid again, and 132 still get
+    the treatment.
+  - Animated doors block you until they open (their collision was being removed
+    the same way).
+  - CPU riders stop stalling and teleporting on the big converted courses: the
+    game's "is there a usable racing line near me" distance never scaled with
+    the course, so a CPU rider who drifted off the line was respawned over and
+    over. The game's own four courses are unaffected.
+  - Avalanche debris wrecks you on the two SSX 3 courses that have one. What
+    being hit costs is OUR decision, not recovered game behaviour: SSX 3 keeps
+    its avalanche rules in data nobody has decoded.
+  - New, needing a course pack built after that release: glowing halos on lamps
+    and signs, one-shot launch pads, and short display names on the level-select
+    screen. Heads-up on the last: the game files your best times under the name
+    shown on the tile, so a pack that RENAMES a course you have already played
+    won't find your old times (they aren't deleted, they just don't show).
+  - New setting RiderTelemetry, under [Debug] in
+    BepInEx/config/TrickyMaddnessLevelHook.cfg, off by default: records what
+    your rider did, every physics step, to a CSV next to the game. --tm-map and
+    AutoLoadMap also accept a map's filename and ignore capitalisation.
 
 PREVIOUSLY, IN v2.5.2
 ---------------------
