@@ -1817,8 +1817,12 @@ namespace TrickyMaddnessLevelHook
             if (railColliderProbe.Value && probeRailGO != null && Instance != null)
                 Instance.StartCoroutine(RailProbe(probeRailGO, probeSegments));
 
+            // World-space objects hang off LevelData, never levelManager: the game's
+            // LevelManager root is a Screen Space - Overlay Canvas, which Unity
+            // re-lays-out on any window resize/fullscreen toggle, dragging every
+            // child with it (respawns landed 1.35x-scaled about z=0, under the course).
             GameObject AIParent = new GameObject("AI Paths Parent");
-            AIParent.transform.parent = levelManager.transform;
+            AIParent.transform.parent = levelManagerMaker.transform;
 
             // MakerAIPath.m_points is a List of a user-defined [Serializable]
             // nested class, and Unity fails to deserialize those for
@@ -1898,7 +1902,7 @@ namespace TrickyMaddnessLevelHook
 
 
             GameObject AIPDividerParent = new GameObject("AI Paths Divider Parent");
-            AIPDividerParent.transform.parent = levelManager.transform;
+            AIPDividerParent.transform.parent = levelManagerMaker.transform;
             var MakerAIPathsDivider = FindObjectsByType(typeof(MakerAIPathDivider), FindObjectsSortMode.None) as MakerAIPathDivider[];
             for (int i = 0; i < MakerAIPathsDivider.Length; i++)
             {
@@ -1985,7 +1989,7 @@ namespace TrickyMaddnessLevelHook
             if (TempRaceLine != null && TempRaceLine.m_points != null && TempRaceLine.m_points.Count >= 2)
             {
                 var respawnParent = new GameObject("Respawn Points (race line)");
-                respawnParent.transform.parent = levelManager.transform;
+                respawnParent.transform.parent = levelManagerMaker.transform;
                 // Static, so it outlives the scene it belongs to: a second map would
                 // otherwise escalate riders onto the previous map's markers.
                 Plugin.RaceLineRespawns.Clear();
@@ -6807,13 +6811,22 @@ namespace TrickyMaddnessLevelHook
         void Fire()
         {
             _fired = true;
+            // SSX gives each fired group one SoundPlay (MT8) record, but its sound ids mean nothing
+            // to TM's Wwise banks. TM's own Fireworks posts Play_Firework (Snowboard_Bank, always
+            // loaded) on its GO, so each group borrows that, posted on the group for 3D position.
+            var groups = new HashSet<GameObject>();
             foreach (var ps in targets)
             {
                 if (ps == null) continue;
                 ps.Clear(false);
                 ps.Play(false);
+                var g = ps.transform.parent != null ? ps.transform.parent.gameObject : ps.gameObject;
+                groups.Add(g);
             }
-            Plugin.Log.LogInfo($"[ParticleTrig] trigger '{name}' fired -> {targets.Count} emitter(s)");
+            int nSound = 0;
+            foreach (var g in groups)
+                if (AkSoundEngine.PostEvent("Play_Firework", g) != 0) nSound++;   // 0 = AK_INVALID_PLAYING_ID
+            Plugin.Log.LogInfo($"[ParticleTrig] trigger '{name}' fired -> {targets.Count} emitter(s), Play_Firework {nSound}/{groups.Count} group(s)");
             enabled = false;
         }
     }
