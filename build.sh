@@ -38,6 +38,7 @@ mcs -target:library -out:"$HERE/TrickyMaddnessLevelHook.dll" \
   -r:"$MANAGED/UnityEngine.PhysicsModule.dll" \
   -r:"$MANAGED/UnityEngine.AnimationModule.dll" \
   -r:"$MANAGED/UnityEngine.ParticleSystemModule.dll" \
+  -r:"$MANAGED/AK.Wwise.Unity.API.dll" \
   -r:"$MANAGED/UnityEngine.ImageConversionModule.dll" \
   -r:"$MANAGED/UnityEngine.InputLegacyModule.dll" \
   -r:"$MANAGED/Unity.RenderPipelines.Core.Runtime.dll" \
