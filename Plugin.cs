@@ -2475,7 +2475,7 @@ namespace TrickyMaddnessLevelHook
                     + (msHaz > 0 ? $", {msHaz} hazard(s)" : ""));
 
             // ParticleTrigger (feature: lighting.particleTriggers). Contract on the class.
-            int ptTrig = 0, ptSys = 0, ptSkip = 0;
+            int ptTrig = 0, ptSys = 0, ptSkip = 0, ptImp = 0;
             var pfxShotByKey = new Dictionary<string, Transform>();
             foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
                 foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
@@ -2489,6 +2489,15 @@ namespace TrickyMaddnessLevelHook
                         var rel = t.gameObject.AddComponent<ParticleTrigger>();
                         foreach (Transform c in t)
                         {
+                            if (c.name.StartsWith("PfxImpact_"))
+                            {
+                                rel.impact = true;
+                                string ra = c.name.Substring("PfxImpact_".Length);
+                                rel.rearm = ra == "once" ? -1f
+                                    : float.TryParse(ra, System.Globalization.NumberStyles.Float,
+                                                     System.Globalization.CultureInfo.InvariantCulture, out var rs) ? rs : -1f;
+                                continue;
+                            }
                             if (!c.name.StartsWith("PfxTarget_")) continue;
                             if (!pfxShotByKey.TryGetValue(c.name.Substring("PfxTarget_".Length), out var shot))
                             { ptSkip++; Log.LogDebug($"[ParticleTrig] '{t.name}' target '{c.name}' has no matching PfxShot_ — skipped"); continue; }
@@ -2496,9 +2505,10 @@ namespace TrickyMaddnessLevelHook
                         }
                         ptSys += rel.targets.Count;
                         ptTrig++;
+                        if (rel.impact) ptImp++;
                     }
             if (pfxShotByKey.Count > 0 || ptSkip > 0)
-                Log.LogInfo($"[ParticleTrig] attached {ptTrig} trigger(s) over {pfxShotByKey.Count} group(s), {ptSys} emitter bind(s), skipped {ptSkip}");
+                Log.LogInfo($"[ParticleTrig] attached {ptTrig} trigger(s) ({ptImp} impact) over {pfxShotByKey.Count} group(s), {ptSys} emitter bind(s), skipped {ptSkip}");
 
             // Per-level sky-fill override. Naming contract with SSXImporter.BuildLighting:
             // an empty marker GO named "SkyFill_<RRGGBB>" (from Overrides.json
@@ -6767,9 +6777,21 @@ namespace TrickyMaddnessLevelHook
     // the volume on first contact (DeadNodeMode 0.5), so this fires ONCE per scene load, for
     // whichever rider (player or COM) crosses first — and, like the doors, nothing re-arms it
     // on a restart, which reloads the scene anyway.
+    //     PfxImpact_<rearm|once>  — contact-on-self host (lighting.particleImpacts: hydrants,
+    //                               bumpers, balloons). Fires on a fresh ENTRY only (a rider
+    //                               pressed against the host does not re-fire it), re-arms
+    //                               after <rearm> s (SSX's Debounce; 0 = next entry) or never
+    //                               ("once" = DeadNodeMode), and posts no sound — none of those
+    //                               headers carries an MT8, so borrowing Play_Firework would lie.
     public class ParticleTrigger : MonoBehaviour
     {
         public List<ParticleSystem> targets = new List<ParticleSystem>();
+        public bool impact;
+        public float rearm = -1f;   // impact only; < 0 = once
+        // Floor on rearm 0 so a rider grazing the box edge can't restart the burst every tick.
+        // Guessed, not measured.
+        const float MinRearm = 0.25f;
+        float _armAt;
 
         Vector3 _halfLocal = new Vector3(0.5f, 0.5f, 0.5f);
         Vector3 _center = Vector3.zero;
@@ -6803,14 +6825,37 @@ namespace TrickyMaddnessLevelHook
                 Vector3 prev = _prev.TryGetValue(sb, out var p) ? p : cur;
                 _prev[sb] = cur;
                 if (!AnimDoorTrigger.SegmentHitsBox(prev, cur, _center, _halfLocal)) continue;
+                if (impact && (Inside(prev) || Time.time < _armAt)) continue;
                 Fire();
                 return;
             }
         }
 
+        bool Inside(Vector3 q)
+        {
+            var d = q - _center;
+            return Mathf.Abs(d.x) <= _halfLocal.x && Mathf.Abs(d.y) <= _halfLocal.y && Mathf.Abs(d.z) <= _halfLocal.z;
+        }
+
         void Fire()
         {
+            if (impact && rearm >= 0f)
+            {
+                _armAt = Time.time + Mathf.Max(rearm, MinRearm);
+                foreach (var ps in targets)
+                    if (ps != null) { ps.Clear(false); ps.Play(false); }
+                Plugin.Log.LogDebug($"[ParticleTrig] impact '{name}' fired -> {targets.Count} emitter(s), re-arms in {Mathf.Max(rearm, MinRearm):F2} s");
+                return;
+            }
             _fired = true;
+            if (impact)
+            {
+                foreach (var ps in targets)
+                    if (ps != null) { ps.Clear(false); ps.Play(false); }
+                Plugin.Log.LogInfo($"[ParticleTrig] impact '{name}' fired once -> {targets.Count} emitter(s)");
+                enabled = false;
+                return;
+            }
             // SSX gives each fired group one SoundPlay (MT8) record, but its sound ids mean nothing
             // to TM's Wwise banks. TM's own Fireworks posts Play_Firework (Snowboard_Bank, always
             // loaded) on its GO, so each group borrows that, posted on the group for 3D position.
