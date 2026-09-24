@@ -2470,6 +2470,32 @@ namespace TrickyMaddnessLevelHook
                 Log.LogInfo($"[MoveSurf] attached {msTrig} trigger(s) driving {msSurf} mover(s), skipped {msSkip}"
                     + (msHaz > 0 ? $", {msHaz} hazard(s)" : ""));
 
+            // ParticleTrigger (feature: lighting.particleTriggers). Contract on the class.
+            int ptTrig = 0, ptSys = 0, ptSkip = 0;
+            var pfxShotByKey = new Dictionary<string, Transform>();
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                    if (t.name.StartsWith("PfxShot_")) pfxShotByKey[t.name.Substring("PfxShot_".Length)] = t;
+            if (pfxShotByKey.Count > 0)
+                foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+                    foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                    {
+                        if (!t.name.StartsWith("ParticleTrig_")) continue;
+                        if (t.GetComponent<ParticleTrigger>() != null) continue;   // already attached
+                        var rel = t.gameObject.AddComponent<ParticleTrigger>();
+                        foreach (Transform c in t)
+                        {
+                            if (!c.name.StartsWith("PfxTarget_")) continue;
+                            if (!pfxShotByKey.TryGetValue(c.name.Substring("PfxTarget_".Length), out var shot))
+                            { ptSkip++; Log.LogDebug($"[ParticleTrig] '{t.name}' target '{c.name}' has no matching PfxShot_ — skipped"); continue; }
+                            rel.targets.AddRange(shot.GetComponentsInChildren<ParticleSystem>(true));
+                        }
+                        ptSys += rel.targets.Count;
+                        ptTrig++;
+                    }
+            if (pfxShotByKey.Count > 0 || ptSkip > 0)
+                Log.LogInfo($"[ParticleTrig] attached {ptTrig} trigger(s) over {pfxShotByKey.Count} group(s), {ptSys} emitter bind(s), skipped {ptSkip}");
+
             // Per-level sky-fill override. Naming contract with SSXImporter.BuildLighting:
             // an empty marker GO named "SkyFill_<RRGGBB>" (from Overrides.json
             // lighting.skyFillColor). MUST be read before the SkydomeFollow attach below —
@@ -6702,7 +6728,7 @@ namespace TrickyMaddnessLevelHook
 
         // Segment p0->p1 vs axis-aligned box (center, half) in the box's own local space. Slab
         // method: clamp the [0,1] parametric interval against each axis' slab; empty => miss.
-        static bool SegmentHitsBox(Vector3 p0, Vector3 p1, Vector3 center, Vector3 half)
+        internal static bool SegmentHitsBox(Vector3 p0, Vector3 p1, Vector3 center, Vector3 half)
         {
             Vector3 d = p1 - p0;
             float tmin = 0f, tmax = 1f;
@@ -6725,6 +6751,70 @@ namespace TrickyMaddnessLevelHook
                 }
             }
             return true;
+        }
+    }
+
+    // Trigger-fired SSX particle effects (feature: lighting.particleTriggers — fireworks, pyro).
+    // Naming contract with SSXImporter.BuildParticleEmitters:
+    //   PfxShot_<host>_<hdr>     — group of stopped ParticleSystems at the SSX host instance.
+    //   ParticleTrig_<trig>      — trigger box (disabled BoxCollider = geometry only, layer 2).
+    //     PfxTarget_<host>_<hdr> — one child per group it fires; the join is by name, N:M.
+    // Detection is AnimDoorTrigger's swept segment for the same tunnelling reason. SSX consumes
+    // the volume on first contact (DeadNodeMode 0.5), so this fires ONCE per scene load, for
+    // whichever rider (player or COM) crosses first — and, like the doors, nothing re-arms it
+    // on a restart, which reloads the scene anyway.
+    public class ParticleTrigger : MonoBehaviour
+    {
+        public List<ParticleSystem> targets = new List<ParticleSystem>();
+
+        Vector3 _halfLocal = new Vector3(0.5f, 0.5f, 0.5f);
+        Vector3 _center = Vector3.zero;
+        Snowboarder[] _riders;
+        readonly Dictionary<Snowboarder, Vector3> _prev = new Dictionary<Snowboarder, Vector3>();
+        bool _fired;
+
+        void Awake()
+        {
+            var box = GetComponent<BoxCollider>();
+            if (box != null)
+            {
+                _halfLocal = box.size * 0.5f;
+                _center = box.center;
+                box.enabled = false;            // geometry carrier only
+            }
+        }
+
+        void FixedUpdate()
+        {
+            if (_fired || targets.Count == 0) return;
+            if (_riders == null || _riders.Length == 0)
+            {
+                _riders = UnityEngine.Object.FindObjectsOfType<Snowboarder>();
+                if (_riders.Length == 0) return; // riders not spawned yet
+            }
+            foreach (var sb in _riders)
+            {
+                if (sb == null) continue;
+                Vector3 cur = transform.InverseTransformPoint(sb.transform.position);
+                Vector3 prev = _prev.TryGetValue(sb, out var p) ? p : cur;
+                _prev[sb] = cur;
+                if (!AnimDoorTrigger.SegmentHitsBox(prev, cur, _center, _halfLocal)) continue;
+                Fire();
+                return;
+            }
+        }
+
+        void Fire()
+        {
+            _fired = true;
+            foreach (var ps in targets)
+            {
+                if (ps == null) continue;
+                ps.Clear(false);
+                ps.Play(false);
+            }
+            Plugin.Log.LogInfo($"[ParticleTrig] trigger '{name}' fired -> {targets.Count} emitter(s)");
+            enabled = false;
         }
     }
 
