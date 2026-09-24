@@ -2475,7 +2475,7 @@ namespace TrickyMaddnessLevelHook
                     + (msHaz > 0 ? $", {msHaz} hazard(s)" : ""));
 
             // ParticleTrigger (feature: lighting.particleTriggers). Contract on the class.
-            int ptTrig = 0, ptSys = 0, ptSkip = 0, ptImp = 0;
+            int ptTrig = 0, ptSys = 0, ptSkip = 0, ptImp = 0, ptHide = 0;
             var pfxShotByKey = new Dictionary<string, Transform>();
             foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
                 foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
@@ -2498,6 +2498,13 @@ namespace TrickyMaddnessLevelHook
                                                      System.Globalization.CultureInfo.InvariantCulture, out var rs) ? rs : -1f;
                                 continue;
                             }
+                            if (c.name.StartsWith("PfxHide_"))
+                            {
+                                var hideGO = FindSceneGOByInstanceName(t.gameObject.scene, c.name.Substring("PfxHide_".Length));
+                                if (hideGO != null) { rel.hides.Add(hideGO); ptHide++; }
+                                else { ptSkip++; Log.LogDebug($"[ParticleTrig] '{t.name}' hide '{c.name}' resolved to nothing — skipped"); }
+                                continue;
+                            }
                             if (!c.name.StartsWith("PfxTarget_")) continue;
                             if (!pfxShotByKey.TryGetValue(c.name.Substring("PfxTarget_".Length), out var shot))
                             { ptSkip++; Log.LogDebug($"[ParticleTrig] '{t.name}' target '{c.name}' has no matching PfxShot_ — skipped"); continue; }
@@ -2508,7 +2515,7 @@ namespace TrickyMaddnessLevelHook
                         if (rel.impact) ptImp++;
                     }
             if (pfxShotByKey.Count > 0 || ptSkip > 0)
-                Log.LogInfo($"[ParticleTrig] attached {ptTrig} trigger(s) ({ptImp} impact) over {pfxShotByKey.Count} group(s), {ptSys} emitter bind(s), skipped {ptSkip}");
+                Log.LogInfo($"[ParticleTrig] attached {ptTrig} trigger(s) ({ptImp} impact, {ptHide} hide) over {pfxShotByKey.Count} group(s), {ptSys} emitter bind(s), skipped {ptSkip}");
 
             // Per-level sky-fill override. Naming contract with SSXImporter.BuildLighting:
             // an empty marker GO named "SkyFill_<RRGGBB>" (from Overrides.json
@@ -2791,8 +2798,14 @@ namespace TrickyMaddnessLevelHook
             string suffix = "_" + instName;
             foreach (var root in scene.GetRootGameObjects())
                 foreach (var tr in root.GetComponentsInChildren<Transform>(true))
+                {
+                    // A marker naming the instance ("DisableRef_<name>", "PfxHide_<name>") also
+                    // ends in "_<name>" — never hand one back as its own target.
+                    if (tr.name.StartsWith("DisableRef_", StringComparison.Ordinal)
+                        || tr.name.StartsWith("PfxHide_", StringComparison.Ordinal)) continue;
                     if (tr.name == instName || tr.name.EndsWith(suffix, StringComparison.Ordinal))
                         return tr.gameObject;
+                }
             return null;
         }
 
@@ -6783,9 +6796,14 @@ namespace TrickyMaddnessLevelHook
     //                               after <rearm> s (SSX's Debounce; 0 = next entry) or never
     //                               ("once" = DeadNodeMode), and posts no sound — none of those
     //                               headers carries an MT8, so borrowing Play_Firework would lie.
+    //     PfxHide_<instance>      — impact only: a scene GO (resolved by original SSX instance
+    //                               name) to SetActive(false) when it fires — SSX's MT7 into a
+    //                               DeadNodeMode-only header, i.e. a model swap (merquer's
+    //                               Trigger_Highway consuming Highway_Good).
     public class ParticleTrigger : MonoBehaviour
     {
         public List<ParticleSystem> targets = new List<ParticleSystem>();
+        public List<GameObject> hides = new List<GameObject>();
         public bool impact;
         public float rearm = -1f;   // impact only; < 0 = once
         // Floor on rearm 0 so a rider grazing the box edge can't restart the burst every tick.
@@ -6831,6 +6849,12 @@ namespace TrickyMaddnessLevelHook
             }
         }
 
+        void Hide()
+        {
+            foreach (var g in hides)
+                if (g != null) g.SetActive(false);
+        }
+
         bool Inside(Vector3 q)
         {
             var d = q - _center;
@@ -6844,6 +6868,7 @@ namespace TrickyMaddnessLevelHook
                 _armAt = Time.time + Mathf.Max(rearm, MinRearm);
                 foreach (var ps in targets)
                     if (ps != null) { ps.Clear(false); ps.Play(false); }
+                Hide();
                 Plugin.Log.LogDebug($"[ParticleTrig] impact '{name}' fired -> {targets.Count} emitter(s), re-arms in {Mathf.Max(rearm, MinRearm):F2} s");
                 return;
             }
@@ -6852,7 +6877,8 @@ namespace TrickyMaddnessLevelHook
             {
                 foreach (var ps in targets)
                     if (ps != null) { ps.Clear(false); ps.Play(false); }
-                Plugin.Log.LogInfo($"[ParticleTrig] impact '{name}' fired once -> {targets.Count} emitter(s)");
+                Hide();
+                Plugin.Log.LogInfo($"[ParticleTrig] impact '{name}' fired once -> {targets.Count} emitter(s), hid {hides.Count}");
                 enabled = false;
                 return;
             }
