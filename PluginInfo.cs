@@ -15,6 +15,6 @@ namespace TrickyMaddnessLevelHook
         // map plays (2.2.0's per-map physics rate) has to be tellable from a build
         // without it, or the first "the chain feels different" report is
         // unattributable in exactly the way 1.0.0 was.
-        public const string PLUGIN_VERSION = "2.11.0";
+        public const string PLUGIN_VERSION = "2.12.0";
     }
 }

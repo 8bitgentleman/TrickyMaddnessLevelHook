@@ -2574,6 +2574,30 @@ namespace TrickyMaddnessLevelHook
                 }
             }
 
+            // Per-level camera draw distance. Naming contract with SSXImporter.BuildLighting:
+            // an empty marker GO named "DrawDist_<unity units>" (from Overrides.json
+            // lighting.drawDistanceRaw — SSX Tricky's per-course WorldConf terrain cull
+            // distance, ssx/NOTES.md). The component lives on the marker, so it dies with
+            // the level scene and restores the camera's far clip on the way out. MUST attach
+            // before SkydomeFollow below: both hook beginCameraRendering, and subscription
+            // order is call order, so the dome fits to the clipped far plane from frame one.
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("DrawDist_")) continue;
+                    if (t.GetComponent<DrawDistance>() != null) continue;
+                    if (float.TryParse(t.name.Substring("DrawDist_".Length), NumberStyles.Float,
+                                       CultureInfo.InvariantCulture, out float far) && far > 1f)
+                    {
+                        t.gameObject.AddComponent<DrawDistance>().far = far;
+                        Log.LogInfo($"[DrawDist] per-level camera far clip {far:F1}");
+                    }
+                    else
+                        Log.LogWarning($"[DrawDist] marker '{t.name}' not parseable; far clip left alone");
+                }
+            }
+
             // Skydome. Naming contract with SSXImporter.BuildSkybox: a GO named
             // "Skydome" carries the level's unlit, Background-queue, ZWrite-off dome
             // mesh (no collider). We attach SkydomeFollow so it stays centered on the
@@ -5329,6 +5353,41 @@ namespace TrickyMaddnessLevelHook
     // Also clears the camera to [Skydome] FillColor so looking up past the open rim (~+20
     // deg) reads as sky, not black. Done on the pipeline-supplied camera, NOT Camera.main
     // (null on these maps — the game camera isn't the enabled MainCamera the whole time).
+    // Clamps the main camera's far clip to a per-level draw distance (DrawDist_ marker).
+    // SSX Tricky drops terrain past a hardcoded per-course distance instead of fogging it
+    // (ssx/NOTES.md § Draw distance), which is what keeps Mesablanca's upper sections out of
+    // sight from the rails below them; TM's stock 2500 shows them. Unity clips per pixel
+    // where the PS2 drops whole .ltg cells, so the edge differs slightly — accepted.
+    // Re-asserted every frame (the game may reconfigure its camera), original restored
+    // on disable.
+    public class DrawDistance : MonoBehaviour
+    {
+        public float far;
+        Camera _cam;
+        float _orig;
+
+        void OnEnable()  { UnityEngine.Rendering.RenderPipelineManager.beginCameraRendering += OnBeginCamera; }
+        void OnDisable()
+        {
+            UnityEngine.Rendering.RenderPipelineManager.beginCameraRendering -= OnBeginCamera;
+            if (_cam != null) _cam.farClipPlane = _orig;
+            _cam = null;
+        }
+
+        void OnBeginCamera(UnityEngine.Rendering.ScriptableRenderContext ctx, Camera cam)
+        {
+            if (cam == null || !cam.CompareTag("MainCamera")) return;
+            if (cam != _cam)
+            {
+                if (_cam != null) _cam.farClipPlane = _orig;
+                _cam = cam;
+                _orig = cam.farClipPlane;
+                Plugin.Log.LogInfo($"[DrawDist] camera '{cam.name}' far clip {_orig:F0} -> {far:F1}");
+            }
+            if (cam.farClipPlane != far) cam.farClipPlane = far;
+        }
+    }
+
     public class SkydomeFollow : MonoBehaviour
     {
         Transform _cam;
