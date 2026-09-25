@@ -493,11 +493,12 @@ namespace TrickyMaddnessLevelHook
                 "from the game's own code; the size does not: SSX gives each flake a 5-7 that " +
                 "could be centimetres or screen pixels, and 1 reads it as 5-7 cm. Raise it if the " +
                 "flakes are too faint to see, lower it if they read as blobs. Relaunch to apply.");
-            ssx3SnowFlakeSize = Config.Bind("SnowFall", "Ssx3FlakeSize", 1f,
+            ssx3SnowFlakeSize = Config.Bind("SnowFall", "Ssx3FlakeSize", 5f,
                 "Multiplier on the flake size of SSX 3's per-zone weather snow (maps built with " +
                 "snowStyle ssx3). Counts, colours, wind and the zone map all come from the game's " +
                 "own data; the size does not: each zone gives a flake size (1-9) whose unit is " +
-                "unknown, and 1 reads it as a quad that many source units across. Raise it if the " +
+                "unknown: 1 reads it as a quad that many source units across, which rode as nearly " +
+                "invisible; 5 is the playtested default (6 read slightly big). Raise it if the " +
                 "flakes are too faint to see, lower it if they read as blobs. Relaunch to apply.");
             lightingRamp = Config.Bind("Visual", "TimeOfDayRamp", true,
                 "On whole-mountain chain maps, blend the lighting between each source " +
@@ -6098,7 +6099,7 @@ namespace TrickyMaddnessLevelHook
         static readonly float[] Defaults =
             { -99999f, 0f, 6f, 0f, 0f, 0f, 10f, 1f, 1f, 0f, 0f, 0f, 1f, 1f, 1f, 1f, 0.06f, 1f, 1f, 1f };
 
-        float _s, _x0, _y0, _px, _sizeScale = 1f;
+        float _s, _x0, _y0, _px, _sizeScale = 5f;
         int _w, _h;
         byte[] _map;
         float[][] _zones;
