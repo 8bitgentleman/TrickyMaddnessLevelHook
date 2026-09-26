@@ -517,12 +517,14 @@ namespace TrickyMaddnessLevelHook
                 "Maps without the file are untouched either way. Relaunch to apply.");
             ssx3FogReach = Config.Bind("Visual", "Ssx3FogReach", 0f,
                 "SSX 3 per-zone fog only. SSX 3's fog never gets thicker than a set amount " +
-                "(18-50% on most courses) however far away something is; Unity's fog always " +
-                "ends fully opaque. So the Hook makes the fog reach that set amount at this " +
-                "distance, in Unity units, and keeps thickening past it. 0 = the camera's " +
-                "draw distance, so nothing on screen is ever fogged harder than in SSX 3, but " +
-                "the middle distance is fogged less. Lower it (try 250-750) for more haze " +
-                "close up, at the cost of the far mountains fading out. Relaunch to apply.");
+                "(up to 86%, 18-50% in most areas) however far away something is; Unity's fog " +
+                "always ends fully opaque. So the Hook makes the fog reach that set amount at " +
+                "this distance, in Unity units, and keeps thickening past it. 0 = where the " +
+                "PS2 stopped drawing (750 on SSX 3 maps), which matches the original up close " +
+                "but fades terrain the PS2 never drew, and the sky dome, toward solid fog. " +
+                "Raise it (2500 = TM's draw distance) to keep far mountains and sky clearer, " +
+                "at the cost of less haze in the middle distance. It cannot go below the " +
+                "area's own fog distance. Relaunch to apply.");
             uvScrollFrameRate = Config.Bind("Visual", "UVScrollFrameRate", 60f,
                 "Playback speed for animated (UV-scrolling) textures on custom maps — " +
                 "LCD scanlines, jumbotrons, boost-pad chevrons, river water. The " +
@@ -5527,10 +5529,18 @@ namespace TrickyMaddnessLevelHook
                 }
             }
 
-            if (_fillValid && (cam.clearFlags != CameraClearFlags.SolidColor || cam.backgroundColor != _fill))
+            if (_fillValid)
             {
-                cam.clearFlags = CameraClearFlags.SolidColor;
-                cam.backgroundColor = _fill;
+                // SSX 3 per-zone fog (§37): the game fogs its sky at the zone's full cap, and
+                // Unity fogs the dome mesh but never the clear colour above its open rim. The
+                // PS2 blends in display space, so lerp the gamma-space colours.
+                Color fill = Ssx3Painter.SkyFogAmount > 0f
+                    ? Color.Lerp(_fill, Ssx3Painter.SkyFogColor, Ssx3Painter.SkyFogAmount) : _fill;
+                if (cam.clearFlags != CameraClearFlags.SolidColor || cam.backgroundColor != fill)
+                {
+                    cam.clearFlags = CameraClearFlags.SolidColor;
+                    cam.backgroundColor = fill;
+                }
             }
         }
 
@@ -5557,13 +5567,17 @@ namespace TrickyMaddnessLevelHook
     // ctor defaults there, but neither slot's defaults are decoded).
     //
     // FOG is an approximation, not the game's curve. SSX 3 fogs with a full-screen sprite pass
-    // reading view depth through a CLUT (ssx/rendering_re/README.md §4.5, VERIFIED):
-    //   fog(d) = 1 − exp(−D/10 · t),  t = clamp((1/Near − 1/d) / (1/Near − 1/Far), 0, 1)
-    // so it CAPS at 1 − e^(−D/10) (18–50% on the shipped courses) and rises in 1/d. Unity fog
-    // always reaches 100% and has no 1/d mode. We use Linear fog starting at Near and reaching
-    // the cap at the camera's far clip ([Visual] Ssx3FogReach overrides that distance), so no
-    // visible pixel is ever fogged harder than the game fogs it — which is the complaint the
-    // old flat exp2 fog earned — at the cost of under-fogging the middle distance.
+    // reading view depth through a CLUT; seven PS2 GS dumps measured it
+    // (ssx/rendering_re/README.md §4.5.1, VERIFIED):
+    //   fog(d) = 1 − exp(−D/10 · t),  t = clamp((1/d0 − 1/d) / (1/d0 − 1/Far), 0, 1)
+    // with d0 ≈ 6,120 raw the pass's Z cutoff (far clip 30,000) — the zone's Near is inert —
+    // so it is 0 inside d0, rises in 1/d, and CAPS at 1 − e^(−D/10) from Far on, sky
+    // included. Unity fog always reaches 100% and has no 1/d mode; Exp/Exp2 fog from d = 0
+    // and would fog the rider. So Linear from max(Near, 6000)·S, reaching the cap at the
+    // PS2's far clip (30,000 raw; [Visual] Ssx3FogReach overrides that distance): the
+    // least-squares optimum over the PS2's draw range among lines that never fog nearer than
+    // d0 and never exceed the cap anywhere the PS2 drew (HOOK_NOTES §37). The price is
+    // everything TM draws past the PS2's far clip, the skydome included, running on to 100%.
     //
     // TINT is the verified operator out = clamp(fb·Tint) + 0.5·Fill, in display (gamma) space,
     // done with URP's colour grading since the Hook can ship no shader (§4): ColorAdjustments
@@ -5575,8 +5589,15 @@ namespace TrickyMaddnessLevelHook
     public class Ssx3Painter : MonoBehaviour
     {
         public static bool Active, OwnsFog;
+        // The sky's share of the fog, read by SkydomeFollow for the unfogged clear colour above
+        // the dome's open rim (the game fogs its sky at the full cap; Unity fogs the dome mesh
+        // itself but never the clear colour). 0 = no painter fog.
+        public static float SkyFogAmount;
+        public static Color SkyFogColor;
         static Ssx3Painter _inst;
         const float Bucket = 8192f;            // raw units per lookup-grid bucket
+        const float FogZCutoffRaw = 6000f;     // d0 ≈ 6,120 raw (farclip 30k) / 5,550 (20k), rounded
+        const float PsFarClipRaw = 30000f;     // 20,000 in two forest dumps, cause unknown (README §4.5.1)
 
         class Slot
         {
@@ -5591,7 +5612,8 @@ namespace TrickyMaddnessLevelHook
         }
 
         Slot _fog, _tint;
-        float _s, _reach, _camFar;
+        float _s, _reach;
+        int _fogLogged = -2;
         Transform _camT;
         bool _saved, _origFog;
         FogMode _origMode;
@@ -5705,7 +5727,7 @@ namespace TrickyMaddnessLevelHook
             OwnsFog = p._fog != null;
             why = (p._fog != null ? $"fog {p._fog.zones.Length} zone(s)/{p._fog.zone.Length} cell(s)" : "fog off")
                 + ", " + (p._tint != null ? $"tint {p._tint.zones.Length} zone(s)/{p._tint.zone.Length} cell(s)" : "tint off")
-                + $", S {p._s}, fog reach {(reach > 0f ? reach.ToString("F0", inv) : "camera far clip")}{offNote}";
+                + $", S {p._s}, fog reaches its cap at {(reach > 0f ? reach.ToString("F0", inv) + " u ([Visual] Ssx3FogReach)" : (PsFarClipRaw * p._s).ToString("F0", inv) + " u (PS2 far clip)")}{offNote}";
             return true;
         }
 
@@ -5729,7 +5751,6 @@ namespace TrickyMaddnessLevelHook
         {
             if (cam == null || !cam.CompareTag("MainCamera")) return;
             _camT = cam.transform;
-            _camFar = cam.farClipPlane;
             if (_tint == null) return;
             var data = cam.GetComponent<UnityEngine.Rendering.Universal.UniversalAdditionalCameraData>();
             if (data != null && !data.renderPostProcessing) data.renderPostProcessing = true;
@@ -5777,8 +5798,36 @@ namespace TrickyMaddnessLevelHook
             if (cam == null) { var c = Camera.main; if (c == null) return; cam = c.transform; }
             float rx = cam.position.x / _s, ry = cam.position.z / _s;   // P() = (x·S, z·S, y·S)
             float dt = Time.deltaTime;
-            if (_fog != null && Blend(_fog, ZoneAt(_fog, rx, ry), dt)) ApplyFog(_fog.acc);
+            if (_fog != null && Blend(_fog, ZoneAt(_fog, rx, ry), dt))
+            {
+                if (_fog.lastZone >= 0 && _fog.lastZone != _fogLogged)
+                {
+                    // The zone's steady state; the eased record passes through blends of two.
+                    _fogLogged = _fog.lastZone;
+                    if (FogMap(_fog.zones[_fogLogged], out float st, out float en, out float cp))
+                        Plugin.Log.LogInfo($"[Painter] fog zone {_fogLogged} -> Unity Linear start {st:F0} end {en:F0} " +
+                                           $"(cap {cp:F3} at {st + cp * (en - st):F0} u)");
+                    else
+                        Plugin.Log.LogInfo($"[Painter] fog zone {_fogLogged} -> fog off (Density 0)");
+                }
+                ApplyFog(_fog.acc);
+            }
             if (_tint != null && Blend(_tint, ZoneAt(_tint, rx, ry), dt)) ApplyTint(_tint.acc);
+        }
+
+        // The measured curve's knee is d0 (Near is inert: README §4.5.1), so the line starts at
+        // max(Near, 6000)·S — max() keeps a Near past d0 (two shipped zones have 7000), which
+        // the game would honour too since its index would then fall inside the table (judgment,
+        // unmeasured). It reaches the cap at `reach` = the PS2 far clip unless the user trims it,
+        // never nearer than the zone's own Far (the game plateaus there) nor inside the start.
+        bool FogMap(float[] k, out float start, out float end, out float cap)
+        {
+            cap = 1f - Mathf.Exp(-k[1] / 10f);
+            start = Mathf.Max(k[2], FogZCutoffRaw) * _s;
+            float reach = _reach > 0f ? _reach : PsFarClipRaw * _s;
+            reach = Mathf.Max(reach, k[3] * _s, start + 1f);
+            end = start + (reach - start) / Mathf.Max(cap, 1e-4f);
+            return cap >= 1e-4f;             // Density 0: the game skips the pass
         }
 
         void ApplyFog(float[] k)
@@ -5789,16 +5838,20 @@ namespace TrickyMaddnessLevelHook
                 _origFog = RenderSettings.fog; _origMode = RenderSettings.fogMode; _origColor = RenderSettings.fogColor;
                 _origDen = RenderSettings.fogDensity; _origStart = RenderSettings.fogStartDistance; _origEnd = RenderSettings.fogEndDistance;
             }
-            float cap = 1f - Mathf.Exp(-k[1] / 10f);
-            float near = k[2] * _s, far = k[3] * _s;
-            if (cap < 1e-4f || far <= near) { RenderSettings.fog = false; return; }   // Density 0: the game skips the pass
-            float reach = _reach > 0f ? _reach : (_camFar > 0f ? _camFar : far);
-            if (reach < far) reach = far;
+            if (!FogMap(k, out float start, out float end, out float cap))
+            {
+                RenderSettings.fog = false;
+                SkyFogAmount = 0f;
+                return;
+            }
+            var col = new Color(k[4], k[5], k[6], 1f);   // CLUT = int(c·255), gamma space
             RenderSettings.fog = true;
             RenderSettings.fogMode = FogMode.Linear;
-            RenderSettings.fogStartDistance = near;
-            RenderSettings.fogEndDistance = near + (reach - near) / cap;
-            RenderSettings.fogColor = new Color(k[4], k[5], k[6], 1f);   // CLUT = int(c·255), gamma space
+            RenderSettings.fogStartDistance = start;
+            RenderSettings.fogEndDistance = end;
+            RenderSettings.fogColor = col;
+            SkyFogAmount = cap;
+            SkyFogColor = col;
         }
 
         void ApplyTint(float[] k)
@@ -5864,7 +5917,7 @@ namespace TrickyMaddnessLevelHook
                 RenderSettings.fog = _origFog; RenderSettings.fogMode = _origMode; RenderSettings.fogColor = _origColor;
                 RenderSettings.fogDensity = _origDen; RenderSettings.fogStartDistance = _origStart; RenderSettings.fogEndDistance = _origEnd;
             }
-            if (_inst == this) { _inst = null; Active = false; OwnsFog = false; }
+            if (_inst == this) { _inst = null; Active = false; OwnsFog = false; SkyFogAmount = 0f; }
         }
     }
 
