@@ -84,6 +84,8 @@ namespace TrickyMaddnessLevelHook
         // Peak-to-Valley chain alone. The switch exists so the ramp can be A/B'd against the
         // map's single baked grade without a rebuild — off = exactly what the bundle bakes.
         internal static ConfigEntry<bool> lightingRamp;
+        internal static ConfigEntry<bool> ssx3WorldPainter;
+        internal static ConfigEntry<float> ssx3FogReach;
         // Per-level sky-fill override, baked into the bundle by SSXImporter as an empty
         // marker GO named "SkyFill_<RRGGBB>" (from Overrides.json lighting.skyFillColor).
         // Parsed in LoadLevelManager before SkydomeFollow attaches; wins over the global
@@ -507,6 +509,20 @@ namespace TrickyMaddnessLevelHook
                 "one grade. Only affects maps whose bundle carries the ramp data; every " +
                 "other map, and every built-in level, is untouched either way. Set false " +
                 "to see the map exactly as its bundle bakes it. Relaunch to apply.");
+            ssx3WorldPainter = Config.Bind("Visual", "Ssx3WorldPainter", true,
+                "On SSX 3 maps, change the fog and the screen colour grade as you ride from " +
+                "one area of the mountain to the next, from the game's own per-zone data " +
+                "(the map's .painter.txt file). Set false to get the single fog each map " +
+                "bakes and no colour grade — how SSX 3 maps looked before this existed. " +
+                "Maps without the file are untouched either way. Relaunch to apply.");
+            ssx3FogReach = Config.Bind("Visual", "Ssx3FogReach", 0f,
+                "SSX 3 per-zone fog only. SSX 3's fog never gets thicker than a set amount " +
+                "(18-50% on most courses) however far away something is; Unity's fog always " +
+                "ends fully opaque. So the Hook makes the fog reach that set amount at this " +
+                "distance, in Unity units, and keeps thickening past it. 0 = the camera's " +
+                "draw distance, so nothing on screen is ever fogged harder than in SSX 3, but " +
+                "the middle distance is fogged less. Lower it (try 250-750) for more haze " +
+                "close up, at the cost of the far mountains fading out. Relaunch to apply.");
             uvScrollFrameRate = Config.Bind("Visual", "UVScrollFrameRate", 60f,
                 "Playback speed for animated (UV-scrolling) textures on custom maps — " +
                 "LCD scanlines, jumbotrons, boost-pad chevrons, river water. The " +
@@ -2826,6 +2842,31 @@ namespace TrickyMaddnessLevelHook
             // by rider elevation. Needs at least two — one stop is just the baked grade.
             // Attached after the skydome and terrain exist, because it drives their
             // materials.
+            // SSX 3 per-zone fog + ScreenTint (WorldPainter slots 5/7) from the plain-text
+            // "<map>.painter.txt" sidecar — a sidecar so it needs no bundle rebuild. Absent
+            // file or [Visual] Ssx3WorldPainter = false: the bundle's baked fog, no tint.
+            if (ssx3WorldPainter == null || ssx3WorldPainter.Value)
+            {
+                string painterPath = Path.ChangeExtension(LoadedAssetBundle, ".painter.txt");
+                if (File.Exists(painterPath))
+                {
+                    try
+                    {
+                        if (Ssx3Painter.TrySpawn(painterPath, WorldScale, ssx3FogReach == null ? 0f : ssx3FogReach.Value,
+                                                 levelManagerMaker.gameObject.scene, out string why))
+                            Log.LogInfo($"[Painter] {why}");
+                        else
+                            Log.LogWarning($"[Painter] '{Path.GetFileName(painterPath)}': {why}; keeping the baked fog, no tint");
+                    }
+                    catch (Exception e)
+                    {
+                        Log.LogWarning($"[Painter] '{Path.GetFileName(painterPath)}' unreadable ({e.Message}); keeping the baked fog, no tint");
+                    }
+                }
+                else if (BundleSource == "ssx3")
+                    Log.LogInfo($"[Painter] no '{Path.GetFileName(painterPath)}' next to this SSX 3 map; baked fog, no per-zone fog or tint");
+            }
+
             if (lightingRamp == null || lightingRamp.Value)
             {
                 var stops = new List<LightingRamp.Stop>();
@@ -5507,6 +5548,326 @@ namespace TrickyMaddnessLevelHook
         }
     }
 
+    // SSX 3's per-zone depth fog and ScreenTint: WorldPainter slots 5 and 7, emitted by
+    // ssx/ssx3_painter.py as the plain-text sidecar "<map>.painter.txt" (HOOK_NOTES §37).
+    // Two independent zone maps (fog zones and tint zones are separate quadtrees in the
+    // data). Each frame the camera's raw (x, y) picks one zone per slot and the record eases
+    // toward it by k0² per 60 Hz frame, first sample snapping: Ssx3SnowFall's query, same data
+    // family. Off every cell the last value HOLDS (a guess: the weather query resets to its
+    // ctor defaults there, but neither slot's defaults are decoded).
+    //
+    // FOG is an approximation, not the game's curve. SSX 3 fogs with a full-screen sprite pass
+    // reading view depth through a CLUT (ssx/rendering_re/README.md §4.5, VERIFIED):
+    //   fog(d) = 1 − exp(−D/10 · t),  t = clamp((1/Near − 1/d) / (1/Near − 1/Far), 0, 1)
+    // so it CAPS at 1 − e^(−D/10) (18–50% on the shipped courses) and rises in 1/d. Unity fog
+    // always reaches 100% and has no 1/d mode. We use Linear fog starting at Near and reaching
+    // the cap at the camera's far clip ([Visual] Ssx3FogReach overrides that distance), so no
+    // visible pixel is ever fogged harder than the game fogs it — which is the complaint the
+    // old flat exp2 fog earned — at the cost of under-fogging the middle distance.
+    //
+    // TINT is the verified operator out = clamp(fb·Tint) + 0.5·Fill, in display (gamma) space,
+    // done with URP's colour grading since the Hook can ship no shader (§4): ColorAdjustments
+    // .colorFilter = Tint (URP linearises it, so the multiply is the gamma-space multiply to
+    // sRGB-curve accuracy), and the additive Fill is FITTED with LiftGammaGain — per channel a
+    // gain, lift and gamma chosen so black, mid-grey and (1 − fill) land exactly; the worst
+    // residual is 0.012 at Fill 0.15 and 0.021 at Fill 0.3 (dark greys). Identity zones set
+    // the volume's weight to 0, as the game skips the pass.
+    public class Ssx3Painter : MonoBehaviour
+    {
+        public static bool Active, OwnsFog;
+        static Ssx3Painter _inst;
+        const float Bucket = 8192f;            // raw units per lookup-grid bucket
+
+        class Slot
+        {
+            public string kind;
+            public float[][] zones;            // 7 floats each, k0..k6
+            public float[] x0, y0, size;
+            public int[] zone;
+            public Dictionary<long, List<int>> grid = new Dictionary<long, List<int>>();
+            public int lastCell = -1, lastZone = -2;
+            public readonly float[] acc = new float[7];
+            public bool seeded;
+        }
+
+        Slot _fog, _tint;
+        float _s, _reach, _camFar;
+        Transform _camT;
+        bool _saved, _origFog;
+        FogMode _origMode;
+        Color _origColor;
+        float _origDen, _origStart, _origEnd;
+        UnityEngine.Rendering.Volume _vol;
+        UnityEngine.Rendering.Universal.ColorAdjustments _ca;
+        UnityEngine.Rendering.Universal.LiftGammaGain _lgg;
+        readonly float[] _fitFill = { -1f, -1f, -1f };
+
+        static long Key(int bx, int by) => ((long)bx << 32) ^ (uint)by;
+
+        // Reads the sidecar. Refuses the whole file on any malformed line: a partly-read zone
+        // table would silently paint one zone's fog over another's ground.
+        public static bool TrySpawn(string path, float worldScale, float reach, Scene scene, out string why)
+        {
+            if (_inst != null) DestroyImmediate(_inst.gameObject);
+            var inv = CultureInfo.InvariantCulture;
+            var zones = new Dictionary<string, List<float[]>> { { "fog", new List<float[]>() }, { "tint", new List<float[]>() } };
+            var cells = new Dictionary<string, List<float[]>> { { "fog", new List<float[]>() }, { "tint", new List<float[]>() } };
+            var off = new HashSet<string>();
+            int version = -1, lineNo = 0;
+            foreach (var raw in File.ReadAllLines(path))
+            {
+                lineNo++;
+                var line = raw.Trim();
+                if (line.Length == 0 || line[0] == '#') continue;
+                var tok = line.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+                switch (tok[0])
+                {
+                    case "painter":
+                        if (tok.Length != 2 || !int.TryParse(tok[1], out version)) { why = $"line {lineNo}: bad 'painter' header"; return false; }
+                        break;
+                    case "off":
+                        if (tok.Length != 2 || (tok[1] != "fog" && tok[1] != "tint")) { why = $"line {lineNo}: bad 'off' line"; return false; }
+                        off.Add(tok[1]);
+                        break;
+                    case "region":
+                        break;
+                    case "fog":
+                    case "tint":
+                    {
+                        // <kind> <i> <REGION> <zone> k0..k6
+                        var k = new float[7];
+                        if (tok.Length != 11 || !int.TryParse(tok[1], out int i) || i != zones[tok[0]].Count)
+                        { why = $"line {lineNo}: bad or out-of-order '{tok[0]}' record"; return false; }
+                        for (int j = 0; j < 7; j++)
+                            if (!float.TryParse(tok[4 + j], NumberStyles.Float, inv, out k[j]))
+                            { why = $"line {lineNo}: '{tok[0]}' field k{j} unparseable"; return false; }
+                        zones[tok[0]].Add(k);
+                        break;
+                    }
+                    case "fogcell":
+                    case "tintcell":
+                    {
+                        var c = new float[4];
+                        if (tok.Length != 5) { why = $"line {lineNo}: bad '{tok[0]}'"; return false; }
+                        for (int j = 0; j < 4; j++)
+                            if (!float.TryParse(tok[1 + j], NumberStyles.Float, inv, out c[j]))
+                            { why = $"line {lineNo}: '{tok[0]}' field {j} unparseable"; return false; }
+                        cells[tok[0] == "fogcell" ? "fog" : "tint"].Add(c);
+                        break;
+                    }
+                    default:
+                        why = $"line {lineNo}: unknown record '{tok[0]}'";
+                        return false;
+                }
+            }
+            if (version != 1) { why = $"painter version {version}, this Hook reads 1"; return false; }
+            if (worldScale <= 0f) { why = $"world scale {worldScale}"; return false; }
+
+            var slots = new Dictionary<string, Slot>();
+            foreach (var kind in new[] { "fog", "tint" })
+            {
+                if (off.Contains(kind) || zones[kind].Count == 0 || cells[kind].Count == 0) continue;
+                var sl = new Slot { kind = kind, zones = zones[kind].ToArray() };
+                int n = cells[kind].Count;
+                sl.x0 = new float[n]; sl.y0 = new float[n]; sl.size = new float[n]; sl.zone = new int[n];
+                for (int i = 0; i < n; i++)
+                {
+                    var c = cells[kind][i];
+                    int z = (int)c[0];
+                    if (z < 0 || z >= sl.zones.Length || c[3] <= 0f) { why = $"{kind}cell {i} names zone {z} of {sl.zones.Length}"; return false; }
+                    sl.zone[i] = z; sl.x0[i] = c[1]; sl.y0[i] = c[2]; sl.size[i] = c[3];
+                    int bx0 = Mathf.FloorToInt(c[1] / Bucket), bx1 = Mathf.FloorToInt((c[1] + c[3]) / Bucket);
+                    int by0 = Mathf.FloorToInt(c[2] / Bucket), by1 = Mathf.FloorToInt((c[2] + c[3]) / Bucket);
+                    for (int bx = bx0; bx <= bx1; bx++)
+                        for (int by = by0; by <= by1; by++)
+                        {
+                            long key = Key(bx, by);
+                            if (!sl.grid.TryGetValue(key, out var list)) sl.grid[key] = list = new List<int>();
+                            list.Add(i);
+                        }
+                }
+                slots[kind] = sl;
+            }
+            string offNote = off.Count > 0 ? $"; off by course: {string.Join(",", off)}" : "";
+            if (slots.Count == 0) { why = $"nothing to paint{offNote}"; return false; }
+
+            var go = new GameObject("HookSsx3Painter");
+            if (scene.IsValid() && scene.isLoaded) SceneManager.MoveGameObjectToScene(go, scene);
+            var p = go.AddComponent<Ssx3Painter>();
+            p._s = worldScale / 100f;          // SSXImporter.P: S = scale / 100
+            p._reach = reach;
+            slots.TryGetValue("fog", out p._fog);
+            slots.TryGetValue("tint", out p._tint);
+            if (p._tint != null) p.BuildVolume();
+            UnityEngine.Rendering.RenderPipelineManager.beginCameraRendering += p.OnBeginCamera;
+            _inst = p;
+            Active = true;
+            OwnsFog = p._fog != null;
+            why = (p._fog != null ? $"fog {p._fog.zones.Length} zone(s)/{p._fog.zone.Length} cell(s)" : "fog off")
+                + ", " + (p._tint != null ? $"tint {p._tint.zones.Length} zone(s)/{p._tint.zone.Length} cell(s)" : "tint off")
+                + $", S {p._s}, fog reach {(reach > 0f ? reach.ToString("F0", inv) : "camera far clip")}{offNote}";
+            return true;
+        }
+
+        void BuildVolume()
+        {
+            _vol = gameObject.AddComponent<UnityEngine.Rendering.Volume>();
+            _vol.isGlobal = true;
+            _vol.priority = 101f;              // above PostFX's bloom volume (100)
+            _vol.weight = 0f;                  // nothing until the first sample
+            var profile = ScriptableObject.CreateInstance<UnityEngine.Rendering.VolumeProfile>();
+            _vol.sharedProfile = profile;
+            _ca = profile.Add<UnityEngine.Rendering.Universal.ColorAdjustments>(true);
+            _ca.colorFilter.Override(Color.white);
+            _lgg = profile.Add<UnityEngine.Rendering.Universal.LiftGammaGain>(true);
+            _lgg.lift.Override(new Vector4(1f, 1f, 1f, 0f));
+            _lgg.gamma.Override(new Vector4(1f, 1f, 1f, 0f));
+            _lgg.gain.Override(new Vector4(1f, 1f, 1f, 0f));
+        }
+
+        void OnBeginCamera(UnityEngine.Rendering.ScriptableRenderContext ctx, Camera cam)
+        {
+            if (cam == null || !cam.CompareTag("MainCamera")) return;
+            _camT = cam.transform;
+            _camFar = cam.farClipPlane;
+            if (_tint == null) return;
+            var data = cam.GetComponent<UnityEngine.Rendering.Universal.UniversalAdditionalCameraData>();
+            if (data != null && !data.renderPostProcessing) data.renderPostProcessing = true;
+        }
+
+        int ZoneAt(Slot sl, float rx, float ry)
+        {
+            int c = sl.lastCell;
+            if (c >= 0 && rx >= sl.x0[c] && rx < sl.x0[c] + sl.size[c] && ry >= sl.y0[c] && ry < sl.y0[c] + sl.size[c])
+                return sl.zone[c];
+            if (!sl.grid.TryGetValue(Key(Mathf.FloorToInt(rx / Bucket), Mathf.FloorToInt(ry / Bucket)), out var list))
+                return -1;
+            foreach (int i in list)
+                if (rx >= sl.x0[i] && rx < sl.x0[i] + sl.size[i] && ry >= sl.y0[i] && ry < sl.y0[i] + sl.size[i])
+                {
+                    sl.lastCell = i;
+                    return sl.zone[i];
+                }
+            return -1;
+        }
+
+        // acc += w²·(target − acc) per 60 Hz frame, w = −k0 of the TARGET zone (weather's rule).
+        static bool Blend(Slot sl, int zone, float dt)
+        {
+            if (zone != sl.lastZone)
+            {
+                if (zone >= 0)
+                    Plugin.Log.LogInfo($"[Painter] {sl.kind} zone {sl.lastZone} -> {zone}: " +
+                        string.Join(" ", Array.ConvertAll(sl.zones[zone], v => v.ToString("0.###", CultureInfo.InvariantCulture))));
+                sl.lastZone = zone;
+            }
+            if (zone < 0) return sl.seeded;    // off the map: hold
+            var t = sl.zones[zone];
+            if (!sl.seeded) { Array.Copy(t, sl.acc, 7); sl.seeded = true; return true; }
+            float w2 = t[0] * t[0];
+            float a = 1f - Mathf.Pow(1f - Mathf.Clamp01(w2), dt * 60f);
+            for (int k = 1; k < 7; k++) sl.acc[k] += a * (t[k] - sl.acc[k]);
+            sl.acc[0] = t[0];
+            return true;
+        }
+
+        void LateUpdate()
+        {
+            Transform cam = _camT;
+            if (cam == null) { var c = Camera.main; if (c == null) return; cam = c.transform; }
+            float rx = cam.position.x / _s, ry = cam.position.z / _s;   // P() = (x·S, z·S, y·S)
+            float dt = Time.deltaTime;
+            if (_fog != null && Blend(_fog, ZoneAt(_fog, rx, ry), dt)) ApplyFog(_fog.acc);
+            if (_tint != null && Blend(_tint, ZoneAt(_tint, rx, ry), dt)) ApplyTint(_tint.acc);
+        }
+
+        void ApplyFog(float[] k)
+        {
+            if (!_saved)
+            {
+                _saved = true;
+                _origFog = RenderSettings.fog; _origMode = RenderSettings.fogMode; _origColor = RenderSettings.fogColor;
+                _origDen = RenderSettings.fogDensity; _origStart = RenderSettings.fogStartDistance; _origEnd = RenderSettings.fogEndDistance;
+            }
+            float cap = 1f - Mathf.Exp(-k[1] / 10f);
+            float near = k[2] * _s, far = k[3] * _s;
+            if (cap < 1e-4f || far <= near) { RenderSettings.fog = false; return; }   // Density 0: the game skips the pass
+            float reach = _reach > 0f ? _reach : (_camFar > 0f ? _camFar : far);
+            if (reach < far) reach = far;
+            RenderSettings.fog = true;
+            RenderSettings.fogMode = FogMode.Linear;
+            RenderSettings.fogStartDistance = near;
+            RenderSettings.fogEndDistance = near + (reach - near) / cap;
+            RenderSettings.fogColor = new Color(k[4], k[5], k[6], 1f);   // CLUT = int(c·255), gamma space
+        }
+
+        void ApplyTint(float[] k)
+        {
+            bool ident = true;
+            for (int c = 0; c < 3; c++)
+                if (Mathf.Abs(k[1 + c] - 1f) > 1e-3f || k[4 + c] > 1e-3f) ident = false;
+            _vol.weight = ident ? 0f : 1f;
+            if (ident) return;
+            _ca.colorFilter.Override(new Color(k[1], k[2], k[3], 1f));
+            bool changed = false;
+            for (int c = 0; c < 3; c++) if (Mathf.Abs(_fitFill[c] - k[4 + c]) > 1e-4f) changed = true;
+            if (!changed) return;
+            var G = new float[3]; var L = new float[3]; var P = new float[3];
+            for (int c = 0; c < 3; c++)
+            {
+                _fitFill[c] = k[4 + c];
+                FitFill(0.5f * k[4 + c], out G[c], out L[c], out P[c]);
+            }
+            _lgg.lift.Override(Pack(L, 0f, 0.15f));
+            _lgg.gain.Override(Pack(G, 1f, 0.8f));
+            var a = new float[3];
+            for (int c = 0; c < 3; c++) a[c] = 1f / P[c];
+            _lgg.gamma.Override(Pack(a, 1f, 0.8f));
+        }
+
+        // Linear-space c·G + L then ^p, per channel, standing in for gamma-space c + f.
+        // Anchors: black -> f, 0.5 -> 0.5 + f, (1 − f) -> 1. Converges in < 12 iterations.
+        static void FitFill(float f, out float G, out float L, out float p)
+        {
+            f = Mathf.Clamp(f, 0f, 0.45f);
+            G = 1f; L = 0f; p = 1f;
+            if (f < 1e-5f) return;
+            float gf = Mathf.GammaToLinearSpace(f), g1 = Mathf.GammaToLinearSpace(1f - f);
+            float gh = Mathf.GammaToLinearSpace(0.5f), ghf = Mathf.GammaToLinearSpace(0.5f + f);
+            for (int it = 0; it < 12; it++)
+            {
+                L = Mathf.Pow(gf, 1f / p);
+                G = (1f - L) / g1;
+                p = Mathf.Log(ghf) / Mathf.Log(G * gh + L);
+            }
+        }
+
+        // Inverts URP's ColorUtils.PrepareLiftGammaGain (IL-verified): it takes
+        // xyz' = GammaToLinear(xyz)·scale, then xyz' − Luminance(xyz') + w (+1 for gain and
+        // gamma, and gamma is then reciprocated — pass 1/p). We want `want − bias` exactly per
+        // channel: put the per-channel spread in xyz and the common part in w.
+        static Vector4 Pack(float[] want, float bias, float scale)
+        {
+            float a0 = want[0] - bias, a1 = want[1] - bias, a2 = want[2] - bias;
+            float m = Mathf.Min(a0, Mathf.Min(a1, a2));
+            float w = 0.2126729f * a0 + 0.7151522f * a1 + 0.072175f * a2;
+            return new Vector4(Mathf.LinearToGammaSpace((a0 - m) / scale),
+                               Mathf.LinearToGammaSpace((a1 - m) / scale),
+                               Mathf.LinearToGammaSpace((a2 - m) / scale), w);
+        }
+
+        void OnDestroy()
+        {
+            UnityEngine.Rendering.RenderPipelineManager.beginCameraRendering -= OnBeginCamera;
+            if (_saved)
+            {
+                RenderSettings.fog = _origFog; RenderSettings.fogMode = _origMode; RenderSettings.fogColor = _origColor;
+                RenderSettings.fogDensity = _origDen; RenderSettings.fogStartDistance = _origStart; RenderSettings.fogEndDistance = _origEnd;
+            }
+            if (_inst == this) { _inst = null; Active = false; OwnsFog = false; }
+        }
+    }
+
     // Time-of-day ramp for whole-mountain chain maps.
     //
     // A Unity scene bakes exactly ONE lighting grade. That is right for a single course and
@@ -5699,7 +6060,9 @@ namespace TrickyMaddnessLevelHook
             RenderSettings.ambientEquatorColor = g.amb;
             RenderSettings.ambientGroundColor = g.amb;
 
-            if (_anyFog)
+            // Ssx3Painter owns fog on an SSX 3 map whose sidecar carries per-zone fog (the
+            // chain has both); the ramp keeps sun, ambient, dome and terrain.
+            if (_anyFog && !Ssx3Painter.OwnsFog)
             {
                 bool linear = g.fogMode == "linear";
                 RenderSettings.fog = linear ? g.fogEnd > 0f : g.fogDen > 0f;
