@@ -178,25 +178,148 @@ WHAT'S IN THIS ZIP
                                                      rebuilds levels from;
                                                      required alongside it
 
-  Drop the BepInEx folder on top of your Tricky Madness install and let it
-  merge — that's the whole install.
+HOW TO INSTALL
+--------------
+  Three parts, about 10 minutes the first time. Part 1 is the same in every
+  Tricky Madness mod's readme and you only ever do it once.
 
-INSTALL
--------
-  1. Install BepInEx 5.4.x if you don't have it (built and tested against
-     5.4.23.2), and run the game once so it creates its BepInEx folder.
-     (Windows note: BepInEx injects through winhttp.dll — if you're running
-     the game through Wine/Proton you need a native winhttp DLL override, or
-     BepInEx silently never starts.)
-  2. Copy both .dll files from this zip's BepInEx/plugins/ into your game's
-     BepInEx/plugins/ folder, overwriting any older
-     TrickyMaddnessLevelHook.dll / TrickyMaddnessLevelMaker.dll you have.
-     Don't keep an old one alongside this one.
-  3. Launch the game once, then quit. This creates (or reuses) a Maps folder:
-       - Windows: next to the game's .exe
-       - macOS:   next to run_bepinex.sh
-  4. Go install a course pack — copy its Maps/ contents into that same
-     folder. This zip doesn't ship any maps itself.
+---------------------------------------------------------------------------
+ PART 1 - INSTALL BEPINEX  (one time only)
+---------------------------------------------------------------------------
+  BepInEx is the free, widely used mod loader that every Tricky Madness mod
+  runs on. You install it once; after that, adding any mod is just copying
+  files. Already have a Tricky Madness mod working? Skip to Part 2.
+
+  Use BepInEx 5.4.23.5, from the links below. Not BepInEx 6 - that is a
+  different loader and these mods will not load in it.
+
+  STEP 1 - Find your GAME FOLDER
+    In Steam: Library -> right-click Tricky Madness -> Manage ->
+    Browse local files. The window that opens is your GAME FOLDER - every
+    step in this readme means that folder. Leave it open.
+      Windows: it has "Tricky Madness.exe" in it (Windows may hide the
+               ".exe" and just show "Tricky Madness").
+      Mac:     it has the "TrickyMadness" game app in it.
+
+  ...then follow EITHER the Windows OR the Mac steps:
+
+  WINDOWS
+  -------
+  STEP 2 - Download BepInEx. This link downloads the right file directly:
+      https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.5/BepInEx_win_x64_5.4.23.5.zip
+    (It comes from BepInEx's official GitHub page, listed here:
+      https://github.com/BepInEx/BepInEx/releases/tag/v5.4.23.5 )
+
+  STEP 3 - Double-click the downloaded zip to open it. Select everything
+    inside it (Ctrl+A) - a "BepInEx" folder, "winhttp.dll",
+    "doorstop_config.ini" and "changelog.txt" - and copy it into your
+    GAME FOLDER.
+      CHECK: "winhttp.dll" must sit right next to "Tricky Madness.exe",
+      not inside another folder. If your game folder now has a folder
+      called "BepInEx_win_x64_5.4.23.5", open it and move everything in it
+      up into the game folder.
+
+  STEP 4 - Start the game from Steam like normal. Wait for the main menu,
+    then quit.
+
+  Steam Deck / Linux (running the Windows version through Proton): also
+  set Steam -> right-click Tricky Madness -> Properties -> Launch Options to
+      WINEDLLOVERRIDES="winhttp=n,b" %command%
+  or BepInEx silently never starts.
+
+  MAC
+  ---
+  STEP 2 - Download BepInEx. This link downloads the right file directly:
+      https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.5/BepInEx_macos_universal_5.4.23.5.zip
+    (It comes from BepInEx's official GitHub page, listed here:
+      https://github.com/BepInEx/BepInEx/releases/tag/v5.4.23.5 )
+    "universal" means it works on every Mac, Apple Silicon or Intel.
+
+  STEP 3 - Double-click the downloaded zip (in Downloads) to unpack it.
+    Open the folder it makes, select everything inside (Cmd+A) and drag it
+    into your GAME FOLDER. You should now see "run_bepinex.sh" and
+    "libdoorstop.dylib" sitting next to the TrickyMadness app.
+
+  STEP 4 - One-time setup in Terminal. BepInEx has to be told the game's
+    name, and macOS has to be told the files are safe to run. This is two
+    copy-and-pastes:
+      a) Open Terminal: press Cmd+Space, type Terminal, press Return.
+      b) Paste this line and press Return:
+
+   cd ~/"Library/Application Support/Steam/steamapps/common/Tricky Madness"
+
+         If it says "no such file or directory", your Steam games live
+         somewhere else. Type  cd  and a space, then go to your GAME
+         FOLDER in Finder, press Cmd+Up Arrow to go up one folder, drag the
+         "Tricky Madness" folder onto the Terminal window, and press Return.
+      c) Paste this line and press Return:
+
+   sed -i '' 's/^executable_name=.*/executable_name="TrickyMadness.app"/' run_bepinex.sh && chmod +x run_bepinex.sh && xattr -dr com.apple.quarantine . && echo "\"$PWD/run_bepinex.sh\" %command%"
+
+         It prints one line that starts with a " and ends with %command%.
+         Copy that whole line. You need it for the next step.
+
+  STEP 5 - Make Steam's Play button start the game with mods. In Steam:
+    right-click Tricky Madness -> Properties -> General -> Launch Options,
+    and paste the line from step 4c into that box. (To play without mods
+    later, clear the box. To play with mods again, redo step 4b and 4c
+    to get the line back.)
+
+  STEP 6 - Press Play in Steam. Wait for the main menu, then quit.
+
+    If Play starts the game but step "CHECK" below fails, skip the Steam
+    Launch Options and start the game from Terminal instead, every time:
+    open Terminal, do step 4b again, then paste  ./run_bepinex.sh  and
+    press Return.
+
+  COPYING RULE ON A MAC - this matters for every mod after this one.
+    If you drag a folder onto a folder that has the same name, Finder asks
+    whether to "Replace" it. Replace DELETES everything that was already
+    in there (your other mods, your other maps). Never click Replace on a
+    folder. Instead, open the folder and drag the things inside it. (Or
+    hold Option while you drag and click "Merge" - that keeps both.)
+    Windows merges folders on its own, so this does not apply there. If
+    Windows asks whether to replace a FILE, say yes.
+
+  CHECK - did BepInEx install?
+    Open the "BepInEx" folder in your GAME FOLDER. After starting the game
+    once, it should have a "config" folder, a "plugins" folder and a file
+    called "LogOutput.log". If they are not there, BepInEx did not start:
+      Windows: winhttp.dll is not next to Tricky Madness.exe (step 3).
+      Mac:     step 4 or step 5 did not take - redo them, or use the
+               Terminal fallback in step 6.
+
+  (end of Part 1)
+
+---------------------------------------------------------------------------
+ PART 2 - INSTALL THE LEVEL HOOK
+---------------------------------------------------------------------------
+  STEP 1 - Open this zip, then its "BepInEx" folder, then its "plugins"
+    folder. There are two files: TrickyMaddnessLevelHook.dll and
+    TrickyMaddnessLevelMaker.dll.
+
+  STEP 2 - Copy both files into your GAME FOLDER -> BepInEx -> plugins.
+    If asked whether to replace older copies, say yes. Don't keep two
+    copies side by side (e.g. one renamed "... (1).dll").
+
+  STEP 3 - Start the game (on a Mac, the way you set up in Part 1), wait
+    for the main menu, then quit. This creates a folder called "Maps" in
+    your GAME FOLDER. That is where courses go.
+
+  STEP 4 - Get a course pack (a separate download - this zip has no
+    courses) and follow Part 3 of ITS readme to copy its courses into
+    that Maps folder.
+
+---------------------------------------------------------------------------
+ PART 3 - CHECK IT WORKED
+---------------------------------------------------------------------------
+  - Your GAME FOLDER now has a "Maps" folder.
+  - Open GAME FOLDER -> BepInEx -> LogOutput.log in a text editor (Notepad
+    or TextEdit) and search for  Loading [TrickyMaddnessLevelHook  - it
+    should be followed by the version number at the top of this readme.
+  - No Maps folder, or no such line? The DLLs are in the wrong folder
+    (they go in BepInEx -> plugins, not in BepInEx itself), or BepInEx
+    isn't running - redo the CHECK at the end of Part 1.
 
 TROUBLESHOOTING: A CUSTOM MAP HANGS OR THE SKY LOOKS WRONG
 ------------------------------------------------------------
@@ -228,7 +351,7 @@ TROUBLESHOOTING: A CUSTOM MAP HANGS OR THE SKY LOOKS WRONG
 REQUIREMENTS
 ------------
   - Tricky Madness
-  - BepInEx 5.4.x (built and tested against 5.4.23.2)
+  - BepInEx 5.4.23.5 - see Part 1 of HOW TO INSTALL
 
 VERSIONS
 --------
