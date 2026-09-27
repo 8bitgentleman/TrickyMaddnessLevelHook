@@ -50,6 +50,10 @@ head = io.open(README, encoding="utf-8").readline()
 if VERSION not in head:
     sys.exit("release/README.txt first line says %r but PluginInfo.cs says v%s -- update the prose"
               % (head.strip(), VERSION))
+# The install walkthrough is shared with every other mod/pack README and lives in
+# release_shared/ -- refuse a pack whose copy drifted from it.
+if subprocess.call([sys.executable, os.path.join(REPO, "release_shared/sync_readmes.py"), "--check"]):
+    sys.exit("fix the README install text first (release_shared/sync_readmes.py)")
 
 NAME = "Tricky Madness Level Hook v%s - Tricky Madness Mod" % VERSION
 DEST = os.path.join(REPO, "Discord Releases", NAME)
