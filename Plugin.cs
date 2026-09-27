@@ -56,6 +56,7 @@ namespace TrickyMaddnessLevelHook
         internal static ConfigEntry<bool> respawnLoopGuardPlayer;
         internal static ConfigEntry<int> respawnLoopAdvance;
         internal static ConfigEntry<float> respawnCrashLoopWindow;
+        internal static ConfigEntry<bool> respawnFallClamp;
         internal static ConfigEntry<bool> airborneStuckGuard;
         internal static ConfigEntry<float> airborneStuckSeconds;
 
@@ -442,6 +443,19 @@ namespace TrickyMaddnessLevelHook
                 "why the guard originally could not see it. Raise this if a real loop " +
                 "is still slipping through; lower it if the guard is shunting riders " +
                 "who were merely having a bad run.");
+            respawnFallClamp = Config.Bind("Gameplay", "RespawnFallClamp", true,
+                "Never let an out-of-bounds respawn carry a rider further down the " +
+                "course than where they last touched snow. The game respawns onto the " +
+                "NEAREST marker to wherever the rider ended up, so a rider who drops " +
+                "through the terrain and falls for half a minute lands next to a " +
+                "marker near the BOTTOM of the mountain — measured on SSX3 The Throne: " +
+                "one CPU rider fell through at the start line every race, respawned " +
+                "92% of the way down and 'won' in ~46 s against a ~150 s field. This " +
+                "puts them back where they last rode instead. If the same spot keeps " +
+                "dropping them, it steps them forward by RespawnLoopAdvance so a bad " +
+                "piece of collision cannot trap anyone. Crash respawns are left alone " +
+                "(a wreck already respawns where the rider actually was). Custom maps " +
+                "with race-line respawn markers only.");
             airborneStuckGuard = Config.Bind("Gameplay", "AirborneStuckGuard", true,
                 "Break riders out of the 'flipping in place and going nowhere' wedge. " +
                 "Getting pinned — on a Wall-layer prop, or against another rider — " +
@@ -1425,7 +1439,7 @@ namespace TrickyMaddnessLevelHook
         // race-line respawn markers below can reuse it. False = nothing on the
         // ground layers within reach, which the callers treat differently: a
         // spawn marker is left as authored, a race-line respawn is dropped.
-        static bool GroundSeat(Vector3 p, out float y, out float terrainY, out float cosSlope)
+        internal static bool GroundSeat(Vector3 p, out float y, out float terrainY, out float cosSlope)
         {
             y = p.y; terrainY = p.y; cosSlope = 1f;
             if (!Physics.Raycast(p + Vector3.up * 20f, Vector3.down, out var hit, 120f, SpawnGroundMask, QueryTriggerInteraction.Ignore))
@@ -4266,6 +4280,9 @@ namespace TrickyMaddnessLevelHook
             Snowboarder_OnControllerColliderHit.PendingOobCollider = null;
             bool wasCrash = PendingCrash;
             PendingCrash = false;
+            // Before NoteRespawn, so the perf harness records where the rider really
+            // ended up rather than the marker the game picked and we overrode.
+            if (!wasCrash) FallClamp(__instance);
             PerfHarness.NoteRespawn(__instance.transform, __instance.transform.position);
             // A rider can be both dead AND touching an OOB volume. OOB wins: it is the
             // faster loop (every frame, vs. every ~2.4 s) and the one with the tighter
@@ -4292,9 +4309,17 @@ namespace TrickyMaddnessLevelHook
             // Marker index the last crash-respawn landed near, so the crash route can
             // tell a loop from a rider who is simply crashing a lot on the way down.
             public int crashNear = -1;
+            // Same idea for the fall clamp: the marker the last clamped fall was
+            // taken from, and how many falls in a row have come from around it.
+            public int fallNear = -1, fallHits;
         }
         static readonly Dictionary<int, Loop> _loops = new Dictionary<int, Loop>();
         static string _guardLoggedOob, _guardLoggedCrash;
+
+        // Where each rider last had the course under them, written every physics
+        // tick by Snowboarder_LastGround, and moved by every teleport of ours so the
+        // clamp never undoes a shunt the loop guard just made.
+        internal static readonly Dictionary<int, Vector3> LastGround = new Dictionary<int, Vector3>();
 
         // Consecutive OOB respawns within this window count as one loop. The real
         // loop fires every frame, so anything above a couple of frames is generous;
@@ -4311,7 +4336,102 @@ namespace TrickyMaddnessLevelHook
         const int CrashProgressBand = 2;
 
         public static void ResetLoopState()
-        { _loops.Clear(); _guardLoggedOob = _guardLoggedCrash = null; }
+        { _loops.Clear(); LastGround.Clear(); _guardLoggedOob = _guardLoggedCrash = null; }
+
+        // ---- fall clamp --------------------------------------------------------
+        // A non-crash respawn lands on the marker nearest to wherever the rider
+        // ended up, and for a rider who fell THROUGH the terrain that is under the
+        // mountain — nearest to a marker far down-course. Measured on SSX3 The
+        // Throne: dropped through at the start line (-9023, 18495, 7980), fell
+        // 30.7 s to y 12746, respawned 92% of the way down, finished in ~46 s,
+        // in >=5 races. Pull them back to where they last rode.
+        //
+        // How far past the last contact a respawn may land before it counts as
+        // course the rider never rode. A judgement call, not measured: it matches
+        // RespawnLoopAdvance's default, and at ~25-35 m a marker it leaves alone a
+        // rider who goes out of bounds just past a lip.
+        const int FallSlack = 3;
+        // A fall costs the whole drop each time (~30 s on The Throne), so the loop
+        // is declared on the SECOND fall from the same place, not the third.
+        const int FallLoopTrigger = 2;
+
+        static void FallClamp(Snowboarder sb)
+        {
+            if (!Plugin.respawnFallClamp.Value) return;
+            if (string.IsNullOrEmpty(Plugin.LoadedAssetBundle)) return;
+            var marks = Plugin.RaceLineRespawns;
+            if (marks.Count < 2) return;
+
+            int id = sb.GetInstanceID();
+            Vector3 ground;
+            if (!LastGround.TryGetValue(id, out ground)) return;
+            int from = NearestMarker(ground);
+            int landed = NearestMarker(sb.transform.position);
+            if (from < 0 || landed < 0 || landed - from <= FallSlack) return;
+
+            // Progress-based, not time-based like the other two routes: a fall loop
+            // repeats once per drop, which no fixed window can be sized for across
+            // courses of different heights. Two falls from around the same marker is
+            // a loop however long they took. Applies to the player too, on the crash
+            // route's reasoning — a rider who keeps dropping through the same hole is
+            // not making progress there is anything to protect.
+            int adv = Mathf.Max(1, Plugin.respawnLoopAdvance.Value);
+            Loop st;
+            if (!_loops.TryGetValue(id, out st)) { st = new Loop(); _loops[id] = st; }
+            bool sameSpot = st.fallNear >= 0
+                && Mathf.Abs(from - st.fallNear) <= adv + CrashProgressBand;
+            st.fallHits = sameSpot ? st.fallHits + 1 : 1;
+            st.fallNear = from;
+
+            int dest = from;
+            string how = "back to last contact";
+            if (st.fallHits >= FallLoopTrigger)
+            {
+                // Forward, but never past where the game itself wanted them. Stay
+                // armed at the new spot so a hole there escalates on its first fall.
+                dest = Mathf.Min(from + adv, landed);
+                st.fallNear = dest;
+                st.fallHits = FallLoopTrigger - 1;
+                how = $"fall loop x{FallLoopTrigger}, stepped {dest - from} forward";
+            }
+            var target = marks[dest];
+            if (target == null) return;
+            Vector3 was = sb.transform.position;
+            Teleport(sb, target);
+            // Info, not Debug, and every time: a fall means the rider left the world,
+            // which is a collision bug worth finding, and it happens at most once a
+            // drop — nothing like the OOB loop's once per frame.
+            Plugin.Log.LogInfo($"[Respawn] fall clamp: {sb.name} [{id}] respawned at marker "
+                + $"{landed} of {marks.Count} {was} but last rode near marker {from} {ground} "
+                + $"-> marker {dest} ({how})");
+        }
+
+        static int NearestMarker(Vector3 p)
+        {
+            var marks = Plugin.RaceLineRespawns;
+            int near = -1;
+            float best = float.MaxValue;
+            for (int i = 0; i < marks.Count; i++)
+            {
+                if (marks[i] == null) continue;
+                float d = (marks[i].position - p).sqrMagnitude;
+                if (d < best) { best = d; near = i; }
+            }
+            return near;
+        }
+
+        // A CharacterController caches its own position and will drag the rider
+        // back to it, so a bare transform write does not stick — toggle it around
+        // the move.
+        static void Teleport(Snowboarder sb, Transform target)
+        {
+            var cc = sb.GetComponent<CharacterController>();
+            if (cc != null) cc.enabled = false;
+            sb.transform.position = target.position;
+            sb.transform.rotation = target.rotation;
+            if (cc != null) cc.enabled = true;
+            LastGround[sb.GetInstanceID()] = target.position;
+        }
 
         static void LoopGuard(Snowboarder sb, bool crashRoute)
         {
@@ -4339,14 +4459,7 @@ namespace TrickyMaddnessLevelHook
             // route needs it to judge progress; the scan is linear over the marker
             // list, which even the pathological OOB case can afford.
             Vector3 p = sb.transform.position;
-            int near = -1;
-            float best = float.MaxValue;
-            for (int i = 0; i < marks.Count; i++)
-            {
-                if (marks[i] == null) continue;
-                float d = (marks[i].position - p).sqrMagnitude;
-                if (d < best) { best = d; near = i; }
-            }
+            int near = NearestMarker(p);
             if (near < 0) return;
 
             int id = sb.GetInstanceID();
@@ -4384,15 +4497,7 @@ namespace TrickyMaddnessLevelHook
             if (dest == near) return;
             var target = marks[dest];
             if (target == null) return;
-
-            // A CharacterController caches its own position and will drag the rider
-            // back to it, so a bare transform write does not stick — toggle it around
-            // the move.
-            var cc = sb.GetComponent<CharacterController>();
-            if (cc != null) cc.enabled = false;
-            sb.transform.position = target.position;
-            sb.transform.rotation = target.rotation;
-            if (cc != null) cc.enabled = true;
+            Teleport(sb, target);
 
             // Named per route, because "the guard is active" means two different
             // things to whoever is reading the log to decide what to fix: an OOB
@@ -4410,6 +4515,110 @@ namespace TrickyMaddnessLevelHook
             }
             Plugin.Log.LogDebug($"[Respawn] {route} loop guard moved {sb.name} [{id}] "
                 + $"marker {near} -> {dest} ({route} respawn x{LoopTrigger})");
+        }
+    }
+
+    // Seats each start lane on the snow. LevelManager.Start instantiates every rider at
+    // startingGate.position + gate.rotation * (laneX, 0.45, 0) — the player at
+    // -5.25 + 1.5*slot, the COMs at -6.75 + 1.5k stepping over the player's slot
+    // (read out of the IL) — so the lanes span ~9 m across at the marker's height and
+    // ONLY the marker itself was ever ground-seated. A lane over a dip, or off the
+    // edge of a narrow start deck, stands in the air or inside the slope, drops at
+    // countdown release and — with nothing under it — falls to the ResetVolumes floor
+    // and respawns at the nearest marker, which on SSX3 The Throne was ~92% down the
+    // course: the 45 s "wins". Only ever RAISES a lane (a floating one just settles
+    // at release), and a lane with no ground under it at all is walked in toward the
+    // marker until it has some. Honours SpawnSnap Off. Custom maps only.
+    [HarmonyPatch(typeof(LevelManager), "Start")]
+    public class LevelManager_SeatStartLanes
+    {
+        const float GameLift = 0.45f;   // the game's own lane lift above the gate (IL)
+        const float WalkStep = 0.25f;
+
+        [HarmonyPostfix]
+        public static void Postfix(LevelManager __instance)
+        {
+            if (string.IsNullOrEmpty(Plugin.LoadedAssetBundle)) return;
+            if (Plugin.SpawnSnapMode == Plugin.SpawnSnap.Off) return;
+            var gate = Traverse.Create(__instance).Field("startingGate").GetValue<Transform>();
+            var riders = Traverse.Create(__instance).Field("snowboarders").GetValue<List<Snowboarder>>();
+            if (gate == null || riders == null) return;
+            foreach (var sb in riders)
+            {
+                if (sb == null) continue;
+                try { Seat(sb, gate); }
+                catch (Exception e) { Plugin.Log.LogWarning($"[Spawn] lane seat failed for {sb.name}: {e.Message}"); }
+            }
+        }
+
+        static void Seat(Snowboarder sb, Transform gate)
+        {
+            Vector3 p = sb.transform.position;
+            float laneX = gate.InverseTransformPoint(p).x;
+            Vector3 q = p; float target, terrainY, cos;
+            bool found = Plugin.GroundSeat(q, out target, out terrainY, out cos);
+            // No ground under the lane: walk it in along the gate's right axis, toward
+            // the (seated, so known-good) marker, until the cast finds some.
+            float walked = 0f;
+            while (!found && Mathf.Abs(laneX) - walked > WalkStep)
+            {
+                walked += WalkStep;
+                q = p - gate.right * (Mathf.Sign(laneX) * walked);
+                found = Plugin.GroundSeat(q, out target, out terrainY, out cos);
+            }
+            if (!found)
+            {
+                Plugin.Log.LogWarning($"[Spawn] lane x={laneX:F2} {sb.name}: no ground under it or anywhere in to the marker — left as spawned at {p}");
+                return;
+            }
+            float y = Mathf.Max(q.y, target + GameLift);
+            if (walked == 0f && y - p.y < 0.01f)
+            {
+                Plugin.Log.LogInfo($"[Spawn] lane x={laneX:F2} {sb.name} on snow (y={p.y:F2}, terrain {terrainY:F2}, {p.y - terrainY:+0.00;-0.00} above)");
+                return;
+            }
+            var to = new Vector3(q.x, y, q.z);
+            var cc = Traverse.Create(sb).Field("characterController").GetValue<CharacterController>();
+            if (cc != null) cc.enabled = false;
+            sb.transform.position = to;
+            if (cc != null) cc.enabled = true;
+            Plugin.Log.LogInfo($"[Spawn] lane x={laneX:F2} {sb.name} seated {p} -> {to} (terrain {terrainY:F2}, raised {y - p.y:+0.00;-0.00}"
+                + (walked > 0f ? $", walked {walked:F2} in toward the marker — no ground at its own lane)" : ")"));
+        }
+    }
+
+    // Feeds Snowboarder_Respawn's fall clamp: the last place each rider had the
+    // course under them. ⚠️ Read off the state field, and only states that mean
+    // contact — a rider falling through the terrain reads Airborne for the whole
+    // drop (SmartAI's jump log saw 30.7 s of it on The Throne), so the fall can
+    // never overwrite the spot they fell from. Grounded also needs the controller
+    // to agree, because a wedged rider can read Grounded with nothing under it
+    // (the perf harness's WEDGED probe: "state Grounded ... grounded False").
+    [HarmonyPatch(typeof(Snowboarder), "FixedUpdate")]
+    public class Snowboarder_LastGround
+    {
+        static readonly System.Reflection.FieldInfo fState =
+            AccessTools.Field(typeof(Snowboarder), "state");
+        static readonly System.Reflection.FieldInfo fCC =
+            AccessTools.Field(typeof(Snowboarder), "characterController");
+
+        [HarmonyPostfix]
+        public static void Postfix(Snowboarder __instance)
+        {
+            if (!Plugin.respawnFallClamp.Value || __instance == null || fState == null) return;
+            if (string.IsNullOrEmpty(Plugin.LoadedAssetBundle)) return;
+            object s = fState.GetValue(__instance);
+            if (s == null) return;
+            int state = Convert.ToInt32(s);
+            if (state == 1)             // Grounded
+            {
+                var cc = fCC == null ? null : fCC.GetValue(__instance) as CharacterController;
+                if (cc == null || !cc.enabled || !cc.isGrounded) return;
+            }
+            // Starting (0) is the grid, which is where a start-line faller came from;
+            // Grinding (3) is a rail, which is course.
+            else if (state != 0 && state != 3) return;
+            Snowboarder_Respawn.LastGround[__instance.GetInstanceID()] = __instance.transform.position;
         }
     }
 
