@@ -196,6 +196,26 @@ numbering.
   button, on every custom map — workaround and full mechanism:
   `AIMod-src/CLAUDE.md`.
 
+## `Plugin.Instance` can go silently dead on some Windows installs
+
+Same root cause as `CharacterHook-src/CLAUDE.md`'s BepInEx-manager-destroyed
+note, confirmed there from a user log — **not yet confirmed here**, but the
+Hook has the identical exposure: `Instance` lives on the object BepInEx
+parents every plugin under, and four runtime features gate on
+`if (Instance != null)` before calling `Instance.StartCoroutine(...)` —
+`SkyboxWatch` (`Plugin.cs:791`), `TelemetryOnBuiltIn` (`:803`),
+`SolidColorSky` (`:1133`), `RailProbe` (`:1879`), and `LoadWatchdog`
+(`:4160-4161`). Unity's `!=` treats a destroyed object as null, so if the
+manager GameObject gets cleared, all five just never start — no exception,
+no log line, they silently don't run. `LoadWatchdog` not firing is the one
+that would read as "custom level hangs on a black screen" from the outside.
+
+Fix is BepInEx's own: `BepInEx.cfg` → `[Chainloader]` →
+`HideManagerGameObject = true`. Documented in `release/README.txt`'s
+TROUBLESHOOTING section, flagged there as unconfirmed for this mod — if a
+user report ever does pin a Hook symptom on this, promote it out of "honest
+note" status in both places.
+
 ## Version drift
 
 `MenuManager.SelectLevel(LevelEntry)` was renamed to **`LoadScene(LevelEntry)`**
