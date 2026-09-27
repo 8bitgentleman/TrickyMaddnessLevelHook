@@ -1,5 +1,5 @@
-Tricky Madness Level Hook v2.8.2 — required for every custom map pack
-=======================================================================
+Tricky Madness Level Hook v2.16.0 — required for every custom map pack
+========================================================================
 
 This is the plugin that makes custom map packs (SSX Tricky Ports, SSX 3 Ports,
 SSX 2012 Ports, SSX Blur Ports, and any other course pack posted for this
@@ -50,103 +50,70 @@ WHAT IT DOES
     with an optional grid layout (grouped by source game) for once you've got
     a lot of custom courses installed.
 
-WHAT'S NEW IN v2.8.2
+WHAT'S NEW IN v2.16.0
 ---------------------
-  Three releases' worth (2.8.0, 2.8.1, 2.8.2), nearly all of it about one
-  problem: medals on custom courses were quietly wrong, and nothing in the menu
-  told you.
+  Eight releases' worth (2.9.0 through 2.16.0). Most of it is new things the
+  Hook can draw for a course that asks for them, so it only shows up on maps
+  built for it: SSX Tricky Ports v1.4, SSX 3 Ports v1.5 and SSX On Tour Ports
+  v1.2 are the first packs that do. The last item fixes every custom map.
 
-  It is all DLL-only — no map re-download. But two of the changes below alter how
-  courses you already have installed play (freestyle medals and the freestyle
-  clock), so read those first.
+  ON EVERY CUSTOM MAP (no map re-download)
 
-  THINGS THAT CHANGE ON MAPS YOU ALREADY HAVE INSTALLED
-  (no map re-download — just drop in the new DLL)
+  - Every rider's start position is placed on the snow. Only the middle of the
+    starting grid used to be, so on a course whose start sits on a slope a CPU
+    rider's lane could be inside the hill. On SSX 3's The Throne one fell
+    through the mountain at the start of every race, got reset 92% of the way
+    down, and "won" in 45 seconds.
+  - A rider who falls out of the world is put back where they last touched the
+    snow. The game respawns you at the nearest marker to wherever you ended up,
+    and after a long fall that can be near the bottom of the course. Turn it
+    off with RespawnFallClamp = false under [Gameplay] if it ever misbehaves.
 
-  - Freestyle medals have to be earned now. Every custom map shipped with its
-    three freestyle score targets set to zero, and the game reads a zero target
-    as "any score is gold" — so every freestyle run on every custom course has
-    been an automatic gold from the moment you left the start gate. The Hook now
-    works out real targets when the course loads, from how long the course is
-    and how many pickups are on it. The one part that is exact rather than a
-    guess: bronze is half of gold and silver is three-quarters of it, which
-    holds to the point on all four of the game's own courses.
+  NEW THINGS A COURSE CAN ASK FOR
 
-    Honest note: how high GOLD itself sits is our estimate, not recovered data.
-    The game's own four courses don't follow any formula (gold tracks neither
-    length nor clock time), so this is a judgment call that wants tuning against
-    real play. Most converted courses have few or no pickups placed on them, so
-    their targets land at the low end. Across the 166 converted courses we have,
-    gold works out to about 200,000 for the middle one, 100,000 for the lowest
-    and 2.1 million for the highest.
+  - Fireworks and one-shot effects that fire as you ride past, with sound
+    (TM's own firework sound — SSX's sound ids don't exist in this game).
+  - Props that react every time you hit them: hydrants spray, bumpers spark,
+    balloons burst. A prop can also swap to its broken model when it fires.
+  - SSX Tricky's own snowfall, including its per-race chance of snow.
+  - A per-course draw distance, so a course can fade out where the original
+    game stopped drawing instead of at TM's much longer default.
+  - SSX 3's weather, fog and colour grade changing zone by zone as you ride,
+    with the game's own fade between zones. The fog's fall-off was measured
+    from the PS2 itself.
 
-  - Medal times fit the course. The old medal times were computed from the
-    map's build scale — a conversion factor that says nothing about how long the
-    course is — so every 2.5x-scale course got the same 337-second bronze
-    whether its route was 610 units long or 84,667, and the X-Games courses got
-    a gold time of over five hours. The Hook now times the actual route between
-    the start and the finish.
+  NEW SETTINGS (BepInEx/config/TrickyMaddnessLevelHook.cfg)
 
-    Two details worth knowing. It only measures the stretch you really ride:
-    SSX 3's events start 38 to 60 percent of the way down their own line, and
-    one SSX 2012 course's recorded line laps the course twice, which had been
-    handing those courses a gold time nobody could reach. And a Time Trial has
-    no clock — these times are medal targets only; nothing cuts your run short.
-
-  - The freestyle clock is now the one each course asks for. This is the thing
-    2.7.1 deliberately held back (see PREVIOUSLY below). What let it out: the
-    clock can no longer get SHORTER than the game's stock 150 seconds, so short
-    courses run exactly as before, and only the long ones — the ones that ran
-    out of time halfway down the mountain — get more. Across the 166 courses,
-    51 sit at 150 seconds and are unchanged; the very longest converted course
-    comes out at about 47 minutes.
-
-    Honest note: those clock lengths are calculated from route length, not
-    played at that length. They only ever go up from 150 seconds, but if one
-    feels absurd, that is data we want.
-
-  - The X-Games courses' scrolling soft-edged planes actually scroll. Those
-    planes use one of the game's particle shaders, which ignores the
-    texture-offset the Hook was writing, so the scroll was recorded correctly
-    and drew nothing. For renderers that use ONLY that shader, the Hook now
-    shifts the mesh's own UVs instead. Every other course is untouched.
-
-  WHAT IT WILL AND WON'T TOUCH
-
-  The Hook only rewrites a course's times or score targets when the course still
-  carries the old placeholder values. A course that was rebuilt with real values,
-  or tuned by hand, is left exactly as it is. A course with no race line to
-  measure is also left alone, with a warning in BepInEx/LogOutput.log. Look for
-  lines starting [TimeBudget] to see what the Hook decided for any given course.
-
-  THINGS THAT NEED A COURSE THAT DECLARES IT
-
-  - A per-course pace. Gold time used to assume one riding speed for every
-    course (45 units a second, fitted to the game's own courses). It's really
-    about 45 for SSX Tricky-style courses and about 70 for the X-Games ones —
-    which is how X-Games Falps ended up with a 3:01 gold on a course its first
-    tester finished in 1:43. A course's map file can now carry its own measured
-    pace, and the Hook uses it. Courses that don't carry one fall back to the
-    flat 45, exactly as above. The Hook ignores any pace outside 5 to 500 as a
-    typo rather than a fast course.
-
-  FOR PEOPLE BUILDING COURSES
-
-  - You can pin any of these yourself in a course's Overrides.json
-    (gameplay.goldTime, goldPoints and their silver/bronze siblings,
-    gameplay.freestyleTime), and a pinned value is used as given — including a
-    freestyle clock shorter than 150 seconds, since pinning is a deliberate act.
-    A zero or negative pin is refused at build time: a gold time of zero can't
-    be rescued by the Hook later, and it would ship an unwinnable medal.
+  - [SnowFall] Ssx3FlakeSize (default 5) and SsxFlakeSize (default 1): the size
+    of the snowflakes. Everything else about the snow comes from the game's
+    data, but the unit the games give flake size in isn't known, so this is
+    the one guessed number. SSX 3's default of 5 was picked by riding; SSX
+    Tricky's 1 has not been tuned. Raise it if you can't see the snow, lower it
+    if the flakes look like blobs.
+  - [Visual] Ssx3WorldPainter (default on): set false to go back to one fog for
+    the whole run and no colour grade on SSX 3 maps.
+  - [Visual] Ssx3FogReach: how far away SSX 3's fog reaches full strength. 0
+    (the default) matches the PS2.
 
   COMPATIBILITY
 
-  No map file changes, no config changes, and the Hook still works with every
-  course pack ever released — no re-download of anything.
+  Still works with every course pack ever released. Older packs just don't ask
+  for any of the new effects, so apart from the start and respawn fixes above
+  they play exactly as they did.
 
-  But be aware that this one changes how courses you already have installed
-  play: freestyle stops being an automatic gold, and long courses get a longer
-  freestyle clock. Both are corrections, but you'll notice them.
+PREVIOUSLY, IN v2.8.2
+---------------------
+  (2.8.0, 2.8.1 and 2.8.2.)
+  - Freestyle medals have to be earned. Every custom map shipped with zero
+    score targets, which the game reads as "any score is gold"; the Hook now
+    works them out from course length and pickups (how high gold sits is our
+    estimate).
+  - Medal times are timed off the actual route instead of the map's scale.
+  - The freestyle clock grows on long courses; it never drops below the
+    game's stock 150 seconds.
+  - Courses can declare their own riding pace, and you can pin any of these
+    values yourself in a course's Overrides.json.
+  - X-Games' scrolling soft-edged planes actually scroll.
 
 PREVIOUSLY, IN v2.7.1
 ---------------------
