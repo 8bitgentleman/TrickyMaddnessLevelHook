@@ -222,10 +222,12 @@ HOW TO INSTALL
   STEP 4 - Start the game from Steam like normal. Wait for the main menu,
     then quit.
 
-  Steam Deck / Linux (running the Windows version through Proton): also
-  set Steam -> right-click Tricky Madness -> Properties -> Launch Options to
+  Steam Deck / Linux - UNTESTED. Nobody has tried these mods on a Steam
+  Deck yet. If you want to try: do steps 2-4 above, and also set
+  Steam -> right-click Tricky Madness -> Properties -> Launch Options to
       WINEDLLOVERRIDES="winhttp=n,b" %command%
-  or BepInEx silently never starts.
+  Without that, BepInEx most likely never starts. Please report back
+  whether it worked either way.
 
   MAC
   ---
