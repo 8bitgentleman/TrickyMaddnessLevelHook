@@ -231,6 +231,33 @@ INSTALL
   4. Go install a course pack — copy its Maps/ contents into that same
      folder. This zip doesn't ship any maps itself.
 
+TROUBLESHOOTING: A CUSTOM MAP HANGS OR THE SKY LOOKS WRONG
+------------------------------------------------------------
+  If you've already had to do this for another Tricky Madness mod (a
+  character mod is the one confirmed to need it), it's worth doing for the
+  Hook too before you report a problem — they lean on the same BepInEx
+  behavior.
+
+  A few of the Hook's running features — the one that watches and corrects
+  the sky color, and the one that catches a custom level's load if it stalls
+  instead of finishing — stay attached to an object BepInEx itself creates
+  and is supposed to protect across every scene change. On some Windows
+  setups the game destroys that object anyway, and when it does, those
+  features just quietly stop running: nothing in the log says so, a stuck
+  load never gets rescued, and the sky can end up the wrong color.
+
+  THE FIX:
+    1. Close the game.
+    2. Open BepInEx/config/BepInEx.cfg in a text editor (Notepad is fine).
+    3. Find the [Chainloader] section and set:
+         HideManagerGameObject = true
+    4. Save and relaunch.
+
+  Honest note: we haven't had a report that pins a Hook problem on this
+  specifically, the way we have for the character mod. It's cheap to rule
+  out, and if updating to the latest Hook version doesn't fix a hang on a
+  custom map, check this next before filing a bug.
+
 REQUIREMENTS
 ------------
   - Tricky Madness
