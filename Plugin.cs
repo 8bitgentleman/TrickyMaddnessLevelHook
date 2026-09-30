@@ -741,7 +741,24 @@ namespace TrickyMaddnessLevelHook
                     + (builtins.Count == 0 ? "(none found)" : string.Join(", ", builtins.ToArray())));
                 yield break;
             }
-            Log.LogInfo($"[Debug] AutoLoadMap: selecting '{trackName}' (index {index})");
+            // MenuManager.difficulty is written ONLY by SelectDifficulty (a menu click)
+            // and defaults to 0 = casual, so a menu-less boot raced every COM at half
+            // competence (GetDifficulty = 0.5 + 0.25*difficulty) whatever the player
+            // normally picks. Apply the saved last-selected difficulty instead.
+            int difficulty = -1;
+            try
+            {
+                var getLast = AccessTools.PropertyGetter(typeof(SettingsManager), "lastSelectedDifficulty");
+                var fDifficulty = AccessTools.Field(typeof(MenuManager), "difficulty");
+                if (getLast != null && fDifficulty != null)
+                {
+                    difficulty = (int)getLast.Invoke(null, null);
+                    fDifficulty.SetValue(MenuManager.Instance, difficulty);
+                }
+            }
+            catch (Exception e) { Log.LogWarning($"[Debug] AutoLoadMap: could not apply the saved difficulty: {e.Message}"); }
+            Log.LogInfo($"[Debug] AutoLoadMap: selecting '{trackName}' (index {index}), difficulty "
+                + (difficulty < 0 ? "UNSET (casual)" : difficulty.ToString()));
             MenuManager.Instance.SelectLevel(index);
         }
 
