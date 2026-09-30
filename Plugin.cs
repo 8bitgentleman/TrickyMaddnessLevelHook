@@ -49,6 +49,8 @@ namespace TrickyMaddnessLevelHook
         // jump is the point; heavier gravity would shrink the arcs right back.
         // Inert at scale 1 and on built-in levels regardless of the flag.
         internal static ConfigEntry<bool> scaleGravityWithMap;
+        internal static ConfigEntry<bool> aiBracePoints;
+        internal static ConfigEntry<bool> lowerScaledGems;
         internal static ConfigEntry<float> startLaunchSpeedScale;
         internal static ConfigEntry<bool> fixRailProjection;
         internal static ConfigEntry<bool> mapPhysicsRate;
@@ -357,6 +359,11 @@ namespace TrickyMaddnessLevelHook
                 "reference pixels. The bottom of the grid is fixed just above the " +
                 "nav bar (y=216); this is how far up the screen it reaches, so 1944 " +
                 "is full height. Lower it if the grid crowds the top of your screen.");
+            aiBracePoints = Config.Bind("Gameplay", "AIBracePoints", true,
+                "On converted maps, flag the AI route run-up before each detected jump lip " +
+                "as a windup (brace) span, the way TM's own courses do, so COM riders " +
+                "crouch and pre-load a spin into the takeoff. Converted courses carry no " +
+                "windup data of their own. Takes effect on the next map load.");
             scaleGravityWithMap = Config.Bind("Gameplay", "ScaleGravityWithMap", false,
                 "Opt-in feel tuning: on custom maps that declare a world scale (a " +
                 "'scale' line in their .aipaths.txt sidecar), multiply the " +
@@ -364,7 +371,14 @@ namespace TrickyMaddnessLevelHook
                 "toward original proportions. Off by default — scaled-up maps are " +
                 "meant to keep stock gravity so jumps cover proportionally less " +
                 "ground. No effect on built-in levels or unscaled maps.");
-            startLaunchSpeedScale = Config.Bind("Gameplay", "StartLaunchSpeedScale", 0.7f,
+            lowerScaledGems = Config.Bind("Gameplay", "LowerScaledGems", true,
+                "On SSX Tricky maps built bigger than the original (a 'scale' line " +
+                "above 1 in their .aipaths.txt sidecar), bring each trick-multiplier " +
+                "gem's height above the ground back to SSX's proportion, so it sits " +
+                "within stock jump reach. Only ever lowers, never below the ground " +
+                "under the gem, and leaves gems over a gap, a pit or out of bounds " +
+                "alone. Takes effect on the next map load.");
+            startLaunchSpeedScale =Config.Bind("Gameplay", "StartLaunchSpeedScale", 0.7f,
                 "Custom-map start-launch fix (see StartLaunchRedirect): the game " +
                 "kicks every rider straight DOWN at the countdown's end and lets the " +
                 "ground redirect it. On custom maps whose start sits on a sideways " +
@@ -1625,6 +1639,96 @@ namespace TrickyMaddnessLevelHook
                 Log.LogInfo($"[SnowFall] SSX Tricky snow: {why}");
         }
 
+        // Gem heights on scaled SSX Tricky maps. The importer scales the whole world
+        // by WorldScale (2.5 on most Tricky ports) but rider physics stays stock, so
+        // a gem at SSX's intended height sits WorldScale times too high in jump
+        // terms. Measured over all 626 Tricky gems: median 41 u above ground as
+        // built, 18 u once divided back by the scale, vs 22 u for TM's own flakes.
+        // So divide each gem's height above the ground under it by WorldScale.
+        //   * Only ever lowers.
+        //   * Never into the ground: the gem's bottom stays GemClearance above the
+        //     HIGHEST ground under its footprint, so a slope can't swallow the
+        //     uphill half.
+        //   * Leaves a gem alone when there is nothing solid under it, the first
+        //     thing under it is OOB, or it sits over a pit/gap (the ring around it
+        //     mostly misses, or the ground under it is GemPitDepth below the ring's
+        //     median) -- those were placed for a line we can't infer, and dividing
+        //     would drop them into the hole.
+        // ⚠️ GemClearance, GemPitDepth and the ring margin are JUDGMENT CALLS
+        // (the pit depth is the measuring script's cut-off; it moved the gap count
+        // 101..191 over -20..-3 u). Only BundleSource "ssx_tricky" -- WildTangent
+        // rides at WorldScale 100 and SSX 3 was not measured.
+        const float GemClearance = 2f, GemPitDepth = 10f, GemRingMargin = 6f, GemProbeReach = 1000f;
+        // Everything a gem can rest over: excludes pickups(2), 3, rails(9), 13, 15 --
+        // the same non-ground set the measurement skipped. OOB(10) stays IN so it
+        // can be detected and refused.
+        const int GemGroundMask = ~((1 << 2) | (1 << 3) | (1 << 9) | (1 << 13) | (1 << 15));
+
+        static bool GemGroundY(float x, float z, float top, out float y)
+        {
+            y = 0f;
+            if (!Physics.Raycast(new Vector3(x, top, z), Vector3.down, out var hit, GemProbeReach,
+                                 GemGroundMask, QueryTriggerInteraction.Ignore)) return false;
+            if (hit.collider.gameObject.layer == Snowboarder_OnControllerColliderHit.OobLayer) return false;
+            y = hit.point.y;
+            return true;
+        }
+
+        static void LowerScaledGems(UnityEngine.SceneManagement.Scene scene)
+        {
+            if (lowerScaledGems == null || !lowerScaledGems.Value) return;
+            if (BundleSource != "ssx_tricky" || WorldScale <= 1f) return;
+            Physics.SyncTransforms();
+            int lowered = 0, floored = 0, gap = 0, unchanged = 0;
+            var ring = new List<float>(8);
+            foreach (var sceneRoot in scene.GetRootGameObjects())
+            {
+                foreach (var flake in sceneRoot.GetComponentsInChildren<Snowflake>(true))
+                {
+                    var rend = flake.GetComponent<Renderer>();
+                    if (rend == null) continue;
+                    Bounds b = rend.bounds;
+                    if (b.size == Vector3.zero) continue;
+                    float top = b.max.y + 0.5f;
+
+                    if (!GemGroundY(b.center.x, b.center.z, top, out float groundC)) { gap++; continue; }
+
+                    ring.Clear();
+                    float rr = Mathf.Max(b.extents.x, b.extents.z) + GemRingMargin;
+                    for (int k = 0; k < 8; k++)
+                    {
+                        float a = k * Mathf.PI / 4f;
+                        if (GemGroundY(b.center.x + rr * Mathf.Cos(a), b.center.z + rr * Mathf.Sin(a), top, out float ry))
+                            ring.Add(ry);
+                    }
+                    if (ring.Count < 4) { gap++; continue; }
+                    ring.Sort();
+                    if (groundC < ring[ring.Count / 2] - GemPitDepth) { gap++; continue; }
+
+                    float groundMax = groundC;
+                    for (int cx = -1; cx <= 1; cx += 2)
+                        for (int cz = -1; cz <= 1; cz += 2)
+                            if (GemGroundY(b.center.x + cx * b.extents.x, b.center.z + cz * b.extents.z, top, out float fy))
+                                groundMax = Mathf.Max(groundMax, fy);
+
+                    float h = b.center.y - groundC;
+                    if (h <= 0f) { unchanged++; continue; }   // already buried in SSX's data; not ours to move
+                    float target = groundC + h / WorldScale;
+                    float floor = groundMax + b.extents.y + GemClearance;
+                    bool hitFloor = target < floor;
+                    if (hitFloor) target = floor;
+                    if (target >= b.center.y - 0.01f) { unchanged++; continue; }
+
+                    flake.transform.position += Vector3.up * (target - b.center.y);
+                    lowered++;
+                    if (hitFloor) floored++;
+                }
+            }
+            if (lowered + gap + unchanged > 0)
+                Log.LogInfo($"[Gems] scale {WorldScale.ToString(CultureInfo.InvariantCulture)}: lowered {lowered} gem(s) " +
+                            $"({floored} stopped at the ground clearance), left {gap} over a gap/pit/OOB and {unchanged} already low enough");
+        }
+
         public static void LoadLevelManager()
         {
             //Find Main Starting Objects
@@ -2256,6 +2360,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (flakes > 0)
                 Log.LogInfo($"[Snowflakes] converted {flakes} pickup(s) to the game's Snowflake behaviour, {flakeSpheres} sphere trigger(s)");
+            LowerScaledGems(levelManagerMaker.gameObject.scene);
 
             // Phase 4 custom items — Wind volumes. Naming contract with SSXImporter.BuildItems:
             // a GO named "Wind_<accel>" carries a BoxCollider (geometry only) and is oriented
@@ -3201,6 +3306,65 @@ namespace TrickyMaddnessLevelHook
         const float SpineHalfWidth = 80f, BranchHalfWidth = 30f;
         const float RouteHeightBelow = 15f, RouteHeightAbove = 60f;
 
+        // Brace (windup) points. No converted course carries any: SSX has no such
+        // flag, so every sidecar point is 0 and the race line is built false. TM's
+        // own four courses flag 12-19% of their knots, one knot per span, ~50 m
+        // (1x) of flattish run-up ending where the path drops away (measured from
+        // their exported AIPath3D profiles). For the AI a windup span is NOT a
+        // charged jump — AISnowboarder.GetJumpInput is hard false — it is a
+        // crouch plus a pre-loaded spin/flip carried into Takeoff, i.e. trick
+        // points and so boost. KnotProfile.windup is a step function (knot i
+        // holds until knot i+1), so with our dense knots every knot in the
+        // run-up is flagged.
+        //
+        // Lip test, per knot k: the ground LipLookAhead ahead sits at least
+        // LipDrop below where the approach grade (over LipBackOff behind) would
+        // put it, or there is no ground under it at all (a gap). The three
+        // thresholds are judgment, not measured against TM's courses.
+        const float BraceSpan = 50f, LipLookAhead = 10f, LipBackOff = 20f, LipDrop = 4f;
+
+        private static int MarkBracePoints(List<Vector3> pts, List<bool> windups, float s)
+        {
+            int n = pts.Count;
+            if (aiBracePoints != null && !aiBracePoints.Value) return 0;
+            if (n < 3 || windups.Count != n) return 0;
+            for (int k = 0; k < n; k++) if (windups[k]) return 0; // authored: take as is
+            var cum = new float[n];
+            var gy = new float[n];
+            for (int k = 0; k < n; k++)
+            {
+                if (k > 0)
+                {
+                    float dx = pts[k].x - pts[k - 1].x, dz = pts[k].z - pts[k - 1].z;
+                    cum[k] = cum[k - 1] + Mathf.Sqrt(dx * dx + dz * dz);
+                }
+                var from = new Vector3(pts[k].x, pts[k].y + 50f * s, pts[k].z);
+                gy[k] = Physics.Raycast(from, Vector3.down, out var hit, 400f * s, SpawnGroundMask, QueryTriggerInteraction.Ignore)
+                    ? hit.point.y : float.NaN;
+            }
+            float back = LipBackOff * s, ahead = LipLookAhead * s, span = BraceSpan * s, drop = LipDrop * s;
+            float lastLip = float.NegativeInfinity;
+            int lips = 0, b = 0, a = 0;
+            for (int k = 1; k < n; k++)
+            {
+                if (float.IsNaN(gy[k])) continue;
+                while (b + 1 < k && cum[k] - cum[b + 1] >= back) b++;
+                if (cum[k] - cum[b] < back || float.IsNaN(gy[b])) continue;
+                if (a <= k) a = k + 1;
+                while (a < n && cum[a] - cum[k] < ahead) a++;
+                if (a >= n) break;
+                if (cum[k] - lastLip < span) continue;
+                float grade = (gy[k] - gy[b]) / (cum[k] - cum[b]);
+                float predicted = gy[k] + grade * (cum[a] - cum[k]);
+                if (!float.IsNaN(gy[a]) && predicted - gy[a] < drop) continue;
+                for (int i = k - 1; i >= 0 && cum[k] - cum[i] <= span && cum[i] > lastLip; i--)
+                    windups[i] = true;
+                lastLip = cum[k];
+                lips++;
+            }
+            return lips;
+        }
+
         // Turns the drafts into AIPath3D children of `root` under one
         // AIPathNetwork. AIPath3D bakes its samples lazily from the SplineContainer
         // (world space via the transform, so an identity root = world knots), and
@@ -3209,6 +3373,7 @@ namespace TrickyMaddnessLevelHook
         {
             float s = WorldScale > 0f ? WorldScale : 1f;
             int grounded = 0, seeded = 0, blind = 0, knots = 0, built = 0;
+            int braceLips = 0, braceRoutes = 0;
             // Only the sidecar pool (race line + SSX fragments) gets wired; maker
             // paths from the bundle are taken as authored.
             var links = routes.Contains(raceLine) ? SplitAndLink(routes, raceLine, s) : new List<KeyValuePair<int, int>>();
@@ -3225,6 +3390,7 @@ namespace TrickyMaddnessLevelHook
                     var container = go.AddComponent<UnityEngine.Splines.SplineContainer>();
                     var spline = container.Spline;
                     float prevY = float.NaN;
+                    var placed = new List<Vector3>(d.Points.Count);
                     for (int k = 0; k < d.Points.Count; k++)
                     {
                         Vector3 p = d.Points[k];
@@ -3233,10 +3399,13 @@ namespace TrickyMaddnessLevelHook
                             p.y = GroundUnderRoute(p, raceLine, prevY, s, ref grounded, ref seeded, ref blind);
                         }
                         prevY = p.y;
+                        placed.Add(p);
                         // Linear: the old AIPath was a polyline, and auto-smoothing
                         // dense SSX points overshoots at sharp fragment corners.
                         spline.Add(new Unity.Mathematics.float3(p.x, p.y, p.z), UnityEngine.Splines.TangentMode.Linear);
                     }
+                    int lips = MarkBracePoints(placed, d.Windups, s);
+                    if (lips > 0) { braceLips += lips; braceRoutes++; }
                     var path = go.AddComponent<AIPath3D>();
                     if (fSampleSpacing != null)
                         fSampleSpacing.SetValue(path, Mathf.Max(1f, 2f * s));
@@ -3287,6 +3456,7 @@ namespace TrickyMaddnessLevelHook
             network.SyncPaths();
             Log.LogInfo($"[AIPaths] AIPathNetwork: {built} AIPath3D route(s), {knots} knot(s) at scale {s:0.###}; "
                 + $"2D points grounded by raycast {grounded}, from race-line/previous height {seeded}, unresolved {blind}");
+            Log.LogInfo($"[AIPaths] brace points: {braceLips} lip(s) on {braceRoutes} route(s) got a {BraceSpan * s:0} unit windup run-up");
             if (blind > 0)
                 Log.LogWarning($"[AIPaths] {blind} route point(s) found no ground and no height to borrow — they sit at y=0 and riders there will not acquire the route.");
             return network;
