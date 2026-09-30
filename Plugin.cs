@@ -396,7 +396,7 @@ namespace TrickyMaddnessLevelHook
                 "hand them ONE complete race-line path and accept single-file racing. " +
                 "That traded away the wrong thing: measured across all 121 deployed " +
                 "maps and 4191 paths, only FOUR fragment endpoints anywhere sit " +
-                "farther than AIPath.GetTarget's 150-unit acquire radius from another " +
+                "farther than the old AIPath 150-unit acquire radius from another " +
                 "path — the fragments overlap like lanes and hand off to each other. " +
                 "Dropping them left the AI with no candidate to recover onto, which " +
                 "is the opposite of safe. This builds BOTH: the branches to race on " +
@@ -1541,10 +1541,12 @@ namespace TrickyMaddnessLevelHook
             AccessTools.Field(typeof(LevelManager), "snowflakes");
         static readonly System.Reflection.FieldInfo fSpeedLabel =
             AccessTools.Field(typeof(LevelManager), "speedLabel");
-        static readonly System.Reflection.FieldInfo fPathsParent =
-            AccessTools.Field(typeof(LevelManager), "pathsParent");
-        static readonly System.Reflection.FieldInfo fDividersParent =
-            AccessTools.Field(typeof(LevelManager), "dividersParent");
+        // TM build 25617730 replaced pathsParent/dividersParent (flat 2D AIPath
+        // polylines under a transform) with one AIPathNetwork of 3D spline volumes.
+        static readonly System.Reflection.FieldInfo fPathNetwork =
+            AccessTools.Field(typeof(LevelManager), "pathNetwork");
+        static readonly System.Reflection.FieldInfo fSampleSpacing =
+            AccessTools.Field(typeof(AIPath3D), "m_sampleSpacing");
         static readonly System.Reflection.FieldInfo fRaceLine =
             AccessTools.Field(typeof(LevelManager), "raceLine");
         // NOT a field. `MenuManager.lastLevelEntry` is an auto-property with a
@@ -1905,93 +1907,55 @@ namespace TrickyMaddnessLevelHook
             // comes back empty (engine limitation; lists of engine value types
             // like the race line's List<Vector3> are fine). The maker copy below
             // still wins whenever data DID arrive (future fixed bundles);
-            // otherwise the paths are rebuilt from a plain-text sidecar next to
-            // the .asset, or, failing that, from the race line. AI enumerates
-            // DIRECT children of pathsParent, so every AIPath must sit
-            // immediately under AIParent.
+            // otherwise the routes are rebuilt from a plain-text sidecar next to
+            // the .asset, or, failing that, from the race line.
+            var routes = new List<RouteDraft>();
             var MakerAIPaths = FindObjectsByType(typeof(MakerAIPath), FindObjectsSortMode.None) as MakerAIPath[];
-            int copied = 0;
             for (int i = 0; i < MakerAIPaths.Length; i++)
             {
-                // An empty maker path would become an empty AIPath, which is what
-                // sends AI into the 1.5s respawn loop — skip it entirely.
-                if (MakerAIPaths[i].m_points == null || MakerAIPaths[i].m_points.Count == 0)
+                if (MakerAIPaths[i].m_points == null || MakerAIPaths[i].m_points.Count < 2)
                     continue;
-
-                var NewPath = MakerAIPaths[i].gameObject.AddComponent<AIPath>();
-
-                MakerAIPaths[i].transform.parent = AIParent.transform;
-
-                NewPath.m_points = new List<AIPath.Point>();
-
-                for (int j = 0; j < MakerAIPaths[i].m_points.Count; j++)
+                var d = new RouteDraft { Name = "AIPath3D (maker " + routes.Count.ToString(CultureInfo.InvariantCulture) + ")" };
+                foreach (var mp in MakerAIPaths[i].m_points)
                 {
-                    var TempPoint = new AIPath.Point();
-                    TempPoint.position = MakerAIPaths[i].m_points[j].position;
-                    TempPoint.windup = MakerAIPaths[i].m_points[j].windup;
-                    NewPath.m_points.Add(TempPoint);
+                    // Maker points are 2D (world XZ), like the old AIPath's.
+                    d.Points.Add(new Vector3(mp.position.x, float.NaN, mp.position.y));
+                    d.Windups.Add(mp.windup);
                 }
-
-                NewPath.CalculateSegments();
-                copied++;
+                routes.Add(d);
             }
 
-            if (copied > 0)
+            var raceLineDraft = RaceLineRoute();
+            if (routes.Count > 0)
             {
-                Log.LogInfo($"[AIPaths] copied {copied} maker path(s) from the bundle (sidecar ignored)");
+                Log.LogInfo($"[AIPaths] copied {routes.Count} maker path(s) from the bundle (sidecar ignored)");
             }
             else
             {
-                // Build BOTH sources into the same pool. The game's AISnowboarder
-                // .FindNewPath enumerates every AIPath under pathsParent and re-picks
-                // whenever the current one runs out, so a pool of overlapping branch
-                // fragments is what it actually wants — that is how the game's own
-                // courses are authored.
-                //
-                // This block used to build the race line ALONE, gating the sidecar
-                // behind `built == 0`, on the reasoning that SSX branch fragments
-                // don't span the course and would strand the AI (MECHANICS_DIAGNOSIS
-                // Bug 3). The fragments genuinely don't span the course; the stranding
-                // does not follow. Measured over all 121 deployed maps / 4191 paths,
-                // exactly FOUR fragment endpoints sit farther than GetTarget's
-                // 150-unit acquire radius from any other path. Pipedream is the case
-                // that settles it: 9 of its 18 fragment ends are out of range of the
-                // race line, and 18 of 18 are in range of another fragment. Dropping
-                // the fragments removed the very candidates a stranded rider needed.
-                //
-                // The race line is still built, and still first: it is the one route
-                // guaranteed to reach the finish, so it backstops any fragment whose
-                // successor is missing. Toggle MultiPathAI off to restore the old
-                // single-file behaviour without a rebuild.
-                int built = BuildAIPathFromRaceLine(AIParent.transform);
+                // Build BOTH sources into the same pool: SSX branch fragments to race
+                // on, and the race line as the one route guaranteed to reach the
+                // finish. AIPathNetwork.TryAcquirePath keeps a rider on its current
+                // route while inside that route's volume and, once it leaves (a
+                // fragment end), re-picks the best-scoring volume it is inside — so
+                // the race line is the backstop a stranded rider falls back onto.
+                // Toggle MultiPathAI off for race-line-only racing without a rebuild.
+                int built = raceLineDraft == null ? 0 : 1;
+                if (raceLineDraft != null) routes.Add(raceLineDraft);
                 int branches = 0;
                 if (multiPathAI.Value || built == 0)
-                    branches = BuildAIPathsFromSidecar(AIParent.transform);
+                {
+                    var side = SidecarRoutes();
+                    branches = side.Count;
+                    routes.AddRange(side);
+                }
                 if (built + branches == 0)
                     Log.LogWarning("[AIPaths] no AI path data (maker points empty, no usable race line, no sidecar); AI will hold the start gate but cannot race");
                 else
                     Log.LogInfo($"[AIPaths] AI pool: {built} race-line path + {branches} branch path(s) = {built + branches} total"
                         + (multiPathAI.Value ? "" : " (MultiPathAI off)"));
             }
-            SetGameField(fPathsParent, "LevelManager.pathsParent", levelManager, AIParent.transform);
-
-
-            GameObject AIPDividerParent = new GameObject("AI Paths Divider Parent");
-            AIPDividerParent.transform.parent = levelManagerMaker.transform;
-            var MakerAIPathsDivider = FindObjectsByType(typeof(MakerAIPathDivider), FindObjectsSortMode.None) as MakerAIPathDivider[];
-            for (int i = 0; i < MakerAIPathsDivider.Length; i++)
-            {
-                var NewPath = MakerAIPathsDivider[i].gameObject.AddComponent<AIPathDivider>();
-
-                // The game enumerates DIRECT children of dividersParent — parent
-                // dividers under the transform actually registered as
-                // dividersParent (they used to go under AIParent and were never
-                // found).
-                MakerAIPathsDivider[i].transform.parent = AIPDividerParent.transform;
-
-                NewPath.m_points = MakerAIPathsDivider[i].m_points;
-            }
-            SetGameField(fDividersParent, "LevelManager.dividersParent", levelManager, AIPDividerParent.transform);
+            var network = BuildAIPathNetwork(AIParent, routes, raceLineDraft);
+            SetGameField(fPathNetwork, "LevelManager.pathNetwork", levelManager, network);
 
             // ⚠️ A map with no MakerRaceLine is legal — this lookup can and does
             // return null, and dereferencing it threw an NRE straight out of a Unity
@@ -3129,21 +3093,32 @@ namespace TrickyMaddnessLevelHook
             Log.LogInfo($"[Rails] probe hit '{hit.collider.gameObject.name}' (layer {hit.collider.gameObject.layer}): Rail={(rail != null)}, segments={(segs == null ? 0 : segs.Count)}");
         }
 
-        // Rebuilds AI paths from "<map>.aipaths.txt" next to the .asset
-        // (generated by gen_aipaths.py from the bundle's own data). Plain text,
-        // NOT JsonUtility — that is the same serializer that loses the nested
-        // class in the first place. Format: '#' comments; a line "path" starts a
-        // new path; point lines are "x z windup" (two invariant-culture floats,
-        // world XZ, then 0/1). Returns the number of paths built.
-        private static int BuildAIPathsFromSidecar(Transform parent)
+        // One AI route before it becomes an AIPath3D. A NaN Y means the source was
+        // 2D (sidecar / maker points are world XZ only) and BuildAIPathNetwork has
+        // to find the ground under it.
+        internal sealed class RouteDraft
         {
-            if (string.IsNullOrEmpty(LoadedAssetBundle)) return 0;
+            public string Name;
+            public bool Spine;   // the race line: the complete, finish-reaching backstop
+            public readonly List<Vector3> Points = new List<Vector3>();
+            public readonly List<bool> Windups = new List<bool>();
+        }
+
+        // Reads routes from "<map>.aipaths.txt" next to the .asset (generated by
+        // gen_aipaths.py from the bundle's own data). Plain text, NOT JsonUtility —
+        // that is the same serializer that loses the nested class in the first
+        // place. Format: '#' comments; a line "path" starts a new path; point lines
+        // are "x z windup" (two invariant-culture floats, world XZ, then 0/1).
+        private static List<RouteDraft> SidecarRoutes()
+        {
+            var result = new List<RouteDraft>();
+            if (string.IsNullOrEmpty(LoadedAssetBundle)) return result;
             string sidecarPath = Path.ChangeExtension(LoadedAssetBundle, ".aipaths.txt");
-            if (!File.Exists(sidecarPath)) return 0;
+            if (!File.Exists(sidecarPath)) return result;
             try
             {
-                var paths = new List<List<AIPath.Point>>();
-                List<AIPath.Point> cur = null;
+                var paths = new List<RouteDraft>();
+                RouteDraft cur = null;
                 int malformed = 0;
                 foreach (var raw in File.ReadAllLines(sidecarPath))
                 {
@@ -3157,7 +3132,7 @@ namespace TrickyMaddnessLevelHook
                     if (IsHeaderLine(line)) continue;
                     if (line == "path")
                     {
-                        cur = new List<AIPath.Point>();
+                        cur = new RouteDraft();
                         paths.Add(cur);
                         continue;
                     }
@@ -3165,30 +3140,25 @@ namespace TrickyMaddnessLevelHook
                     if (t.Length < 3) { malformed++; continue; }
                     if (cur == null)
                     {
-                        cur = new List<AIPath.Point>();
+                        cur = new RouteDraft();
                         paths.Add(cur);
                     }
-                    var p = new AIPath.Point();
-                    p.position = new Vector2(
+                    cur.Points.Add(new Vector3(
                         float.Parse(t[0], CultureInfo.InvariantCulture),
-                        float.Parse(t[1], CultureInfo.InvariantCulture));
-                    p.windup = t[2] == "1";
-                    cur.Add(p);
+                        float.NaN,
+                        float.Parse(t[1], CultureInfo.InvariantCulture)));
+                    cur.Windups.Add(t[2] == "1");
                 }
 
-                int built = 0, points = 0, tooShort = 0;
-                for (int i = 0; i < paths.Count; i++)
+                int points = 0, tooShort = 0;
+                foreach (var d in paths)
                 {
-                    if (paths[i].Count < 2) { tooShort++; continue; } // a path needs a direction
-                    var go = new GameObject("AIPath (sidecar " + built.ToString(CultureInfo.InvariantCulture) + ")");
-                    go.transform.parent = parent;
-                    var path = go.AddComponent<AIPath>();
-                    path.m_points = paths[i];
-                    path.CalculateSegments();
-                    built++;
-                    points += paths[i].Count;
+                    if (d.Points.Count < 2) { tooShort++; continue; } // a path needs a direction
+                    d.Name = "AIPath3D (sidecar " + result.Count.ToString(CultureInfo.InvariantCulture) + ")";
+                    result.Add(d);
+                    points += d.Points.Count;
                 }
-                Log.LogInfo($"[AIPaths] built {built} path(s) ({points} points) from sidecar {Path.GetFileName(sidecarPath)}");
+                Log.LogInfo($"[AIPaths] read {result.Count} path(s) ({points} points) from sidecar {Path.GetFileName(sidecarPath)}");
                 // Both counters used to be invisible: the summary above reported only the
                 // survivors, so a truncated sidecar looked exactly like a short one. A
                 // path dropped here is a path the AI cannot run.
@@ -3198,13 +3168,120 @@ namespace TrickyMaddnessLevelHook
                 if (tooShort > 0)
                     Log.LogWarning($"[AIPaths] sidecar {Path.GetFileName(sidecarPath)}: {tooShort} path(s) "
                         + "had fewer than 2 points and were discarded entirely.");
-                return built;
+                return result;
             }
             catch (Exception e)
             {
                 Log.LogError($"[AIPaths] sidecar {sidecarPath} failed to load: {e}");
-                return 0;
+                return new List<RouteDraft>();
             }
+        }
+
+        // Route volume sizes, in 1x world units (multiplied by WorldScale). TM's own
+        // four courses (build 25617730) measure a median half-width of 14-26 and a
+        // max of 55-122, heightBelow/heightAbove 10 almost everywhere (≤30).
+        // Ours are deliberately wider and taller: a rider outside EVERY volume for
+        // 1.5 s respawns (AISnowboarder.GetSteeringInput), SSX fragments were never
+        // authored as volumes, and converted courses carry bigger airs. The spine
+        // (race line) has to cover the whole run, so it is the widest.
+        const float SpineHalfWidth = 80f, BranchHalfWidth = 30f;
+        const float RouteHeightBelow = 15f, RouteHeightAbove = 60f;
+
+        // Turns the drafts into AIPath3D children of `root` under one
+        // AIPathNetwork. AIPath3D bakes its samples lazily from the SplineContainer
+        // (world space via the transform, so an identity root = world knots), and
+        // pads m_knotProfiles to the knot count itself; we only fill the widths.
+        private static AIPathNetwork BuildAIPathNetwork(GameObject root, List<RouteDraft> routes, RouteDraft raceLine)
+        {
+            float s = WorldScale > 0f ? WorldScale : 1f;
+            int grounded = 0, seeded = 0, blind = 0, knots = 0, built = 0;
+            foreach (var d in routes)
+            {
+                try
+                {
+                    var go = new GameObject(d.Name);
+                    go.transform.SetParent(root.transform, false);
+                    // Container first and filled BEFORE AIPath3D exists, so its
+                    // OnEnable bakes once instead of re-syncing on every knot.
+                    var container = go.AddComponent<UnityEngine.Splines.SplineContainer>();
+                    var spline = container.Spline;
+                    float prevY = float.NaN;
+                    for (int k = 0; k < d.Points.Count; k++)
+                    {
+                        Vector3 p = d.Points[k];
+                        if (float.IsNaN(p.y))
+                        {
+                            p.y = GroundUnderRoute(p, raceLine, prevY, s, ref grounded, ref seeded, ref blind);
+                        }
+                        prevY = p.y;
+                        // Linear: the old AIPath was a polyline, and auto-smoothing
+                        // dense SSX points overshoots at sharp fragment corners.
+                        spline.Add(new Unity.Mathematics.float3(p.x, p.y, p.z), UnityEngine.Splines.TangentMode.Linear);
+                    }
+                    var path = go.AddComponent<AIPath3D>();
+                    if (fSampleSpacing != null)
+                        fSampleSpacing.SetValue(path, Mathf.Max(1f, 2f * s));
+                    if (path.m_knotProfiles == null) path.m_knotProfiles = new List<AIPath3D.KnotProfile>();
+                    while (path.m_knotProfiles.Count < d.Points.Count)
+                        path.m_knotProfiles.Add(new AIPath3D.KnotProfile());
+                    float half = (d.Spine ? SpineHalfWidth : BranchHalfWidth) * s;
+                    for (int k = 0; k < d.Points.Count; k++)
+                    {
+                        var kp = path.m_knotProfiles[k];
+                        kp.leftWidth = half;
+                        kp.rightWidth = half;
+                        kp.heightBelow = RouteHeightBelow * s;
+                        kp.heightAbove = RouteHeightAbove * s;
+                        kp.windup = d.Windups[k];
+                    }
+                    path.MarkDirty();
+                    knots += d.Points.Count;
+                    built++;
+                }
+                catch (Exception e)
+                {
+                    Log.LogError($"[AIPaths] building '{d.Name}' failed: {e}");
+                }
+            }
+            var network = root.AddComponent<AIPathNetwork>();
+            network.SyncPaths();
+            Log.LogInfo($"[AIPaths] AIPathNetwork: {built} AIPath3D route(s), {knots} knot(s) at scale {s:0.###}; "
+                + $"2D points grounded by raycast {grounded}, from race-line/previous height {seeded}, unresolved {blind}");
+            if (blind > 0)
+                Log.LogWarning($"[AIPaths] {blind} route point(s) found no ground and no height to borrow — they sit at y=0 and riders there will not acquire the route.");
+            return network;
+        }
+
+        // Height for a 2D route point. Seed from the nearest race-line point (the
+        // race line is 3D and follows the same run) or the previous point, then
+        // cast down from above the seed so a branch in a tunnel lands on the
+        // tunnel floor rather than the mountain above it.
+        private static float GroundUnderRoute(Vector3 p, RouteDraft raceLine, float prevY, float s,
+            ref int grounded, ref int seeded, ref int blind)
+        {
+            float seed = float.NaN;
+            if (raceLine != null)
+            {
+                float best = float.MaxValue;
+                foreach (var r in raceLine.Points)
+                {
+                    float dx = r.x - p.x, dz = r.z - p.z, d2 = dx * dx + dz * dz;
+                    if (d2 < best) { best = d2; seed = r.y; }
+                }
+            }
+            if (float.IsNaN(seed)) seed = prevY;
+            Vector3 from;
+            float reach;
+            if (float.IsNaN(seed)) { from = new Vector3(p.x, 100000f, p.z); reach = 200000f; }
+            else { from = new Vector3(p.x, seed + 50f * s, p.z); reach = 400f * s; }
+            if (Physics.Raycast(from, Vector3.down, out var hit, reach, SpawnGroundMask, QueryTriggerInteraction.Ignore))
+            {
+                grounded++;
+                return hit.point.y;
+            }
+            if (!float.IsNaN(seed)) { seeded++; return seed; }
+            blind++;
+            return 0f;
         }
 
         // ---- time budget rescue -------------------------------------------------
@@ -3422,29 +3499,21 @@ namespace TrickyMaddnessLevelHook
             }
         }
 
-        // Last-ditch path source: the race line's List<Vector3> DOES deserialize,
-        // so one AIPath along it (world XZ, no windups) keeps AI racing instead of
-        // respawn-looping.
-        private static int BuildAIPathFromRaceLine(Transform parent)
+        // The race line's List<Vector3> DOES deserialize (and is 3D), so it is
+        // always available as one complete route to the finish.
+        private static RouteDraft RaceLineRoute()
         {
             var raceLine = FindAnyObjectByType<MakerRaceLine>();
             if (raceLine == null || raceLine.m_points == null || raceLine.m_points.Count < 2)
-                return 0;
-            var go = new GameObject("AIPath (race-line fallback)");
-            go.transform.parent = parent;
-            var path = go.AddComponent<AIPath>();
-            path.m_points = new List<AIPath.Point>();
-            for (int i = 0; i < raceLine.m_points.Count; i++)
+                return null;
+            var d = new RouteDraft { Name = "AIPath3D (race line)", Spine = true };
+            foreach (var v in raceLine.m_points)
             {
-                var p = new AIPath.Point();
-                Vector3 v = raceLine.m_points[i];
-                p.position = new Vector2(v.x, v.z);
-                p.windup = false;
-                path.m_points.Add(p);
+                d.Points.Add(v);
+                d.Windups.Add(false);
             }
-            path.CalculateSegments();
-            Log.LogInfo($"[AIPaths] built 1 complete path from the race line ({path.m_points.Count} points)");
-            return 1;
+            Log.LogInfo($"[AIPaths] race line gives 1 complete path ({d.Points.Count} points)");
+            return d;
         }
 
         // Shape check shared by the six one-key-per-line sidecar header readers below.
@@ -3950,41 +4019,6 @@ namespace TrickyMaddnessLevelHook
         internal static Vector3 RailProject(Vector3 segmentDelta, float distanceAlong)
         {
             return segmentDelta.normalized * distanceAlong;
-        }
-
-        // Scales an absolute-world-unit game constant by WorldScale. Unlike
-        // ScaledGravity this is unconditional, no config gate — the constants
-        // routed through it (AIPath.GetTarget's acquire radius, so far) are
-        // correctness bugs on a scaled map, not a gameplay knob, matching how
-        // the rail-catch-width default is already applied unconditionally
-        // (§28). Inert at scale 1, so built-in levels are untouched.
-        public static float ScaledByWorldScale(float baseValue)
-        {
-            return baseValue * WorldScale;
-        }
-
-        // Routes matching ldc.r4 literals through ScaledByWorldScale. Same
-        // idiom as ScaleGravityLiterals, for constants that are a world
-        // distance rather than gravity.
-        internal static IEnumerable<CodeInstruction> ScaleWorldUnitLiterals(
-            IEnumerable<CodeInstruction> instructions, string label, float[] values)
-        {
-            var scaled = AccessTools.Method(typeof(Plugin), nameof(ScaledByWorldScale));
-            int patched = 0;
-            foreach (var ins in instructions)
-            {
-                yield return ins;
-                if (ins.opcode == OpCodes.Ldc_R4 && ins.operand is float f
-                    && Array.IndexOf(values, f) >= 0)
-                {
-                    yield return new CodeInstruction(OpCodes.Call, scaled);
-                    patched++;
-                }
-            }
-            if (patched == 0)
-                Log.LogWarning($"[AIPath] {label}: no world-unit literal found to patch — game update changed the method?");
-            else
-                Log.LogDebug($"[AIPath] {label}: routed {patched} world-unit literal(s) through ScaledByWorldScale");
         }
     }
 
@@ -4849,26 +4883,6 @@ namespace TrickyMaddnessLevelHook
         public static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
         {
             return Plugin.ScaleGravityLiterals(instructions, "Caster.Cast", new[] { 20f, 17f });
-        }
-    }
-
-    // AIPath.GetTarget's "can I see a point on this path" cutoff is a
-    // hardcoded 150-unit literal — never scaled, unlike everything else a
-    // converted map resizes. On a 2.5–5x scaled map that is a 150-unit radius
-    // in a world where the paths themselves are 2.5–5x farther apart, so a
-    // rider who drifts off-path stalls: every AIPath fails GetTarget,
-    // FindNewPath returns the NewPathReturnValue sentinel, m_noPathTime climbs
-    // past 1.5s, and Snowboarder.Respawn() teleports them to the nearest
-    // marker — a stall/teleport loop with no cooldown. Built-in levels run at
-    // WorldScale 1 and are provably unaffected. Unconditional, like the
-    // rail-catch default (§28): this is a correctness fix, not a knob.
-    [HarmonyPatch(typeof(AIPath), "GetTarget")]
-    public class AIPath_GetTarget_AcquireRadius
-    {
-        [HarmonyTranspiler]
-        public static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
-        {
-            return Plugin.ScaleWorldUnitLiterals(instructions, "AIPath.GetTarget", new[] { 150f });
         }
     }
 

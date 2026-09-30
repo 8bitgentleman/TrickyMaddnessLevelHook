@@ -44,6 +44,8 @@ mcs -target:library -out:"$HERE/TrickyMaddnessLevelHook.dll" \
   -r:"$MANAGED/Unity.RenderPipelines.Core.Runtime.dll" \
   -r:"$MANAGED/Unity.RenderPipelines.Universal.Runtime.dll" \
   -r:"$MANAGED/Unity.TextMeshPro.dll" \
+  -r:"$MANAGED/Unity.Splines.dll" \
+  -r:"$MANAGED/Unity.Mathematics.dll" \
   -r:"$MANAGED/netstandard.dll" \
   -r:"$CORE/BepInEx.dll" \
   -r:"$CORE/0Harmony.dll" \
