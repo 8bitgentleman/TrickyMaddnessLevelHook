@@ -2537,6 +2537,20 @@ namespace TrickyMaddnessLevelHook
                                                      System.Globalization.CultureInfo.InvariantCulture, out var rs) ? rs : -1f;
                                 continue;
                             }
+                            if (c.name == "PfxHideSelf")
+                            {
+                                // Meshes only: the PfxShot_ burst lives under the same mover part.
+                                var surf = t.parent;
+                                while (surf != null && !surf.name.StartsWith("MoveSurf_")) surf = surf.parent;
+                                if (surf != null)
+                                {
+                                    foreach (var r in surf.GetComponentsInChildren<Renderer>(true))
+                                        if (!(r is ParticleSystemRenderer)) rel.hideRenderers.Add(r);
+                                    ptHide++;
+                                }
+                                else { ptSkip++; Log.LogDebug($"[ParticleTrig] '{t.name}' PfxHideSelf has no MoveSurf_ ancestor — skipped"); }
+                                continue;
+                            }
                             if (c.name.StartsWith("PfxHide_"))
                             {
                                 var hideGO = FindSceneGOByInstanceName(t.gameObject.scene, c.name.Substring("PfxHide_".Length));
@@ -8210,10 +8224,14 @@ namespace TrickyMaddnessLevelHook
     //                               name) to SetActive(false) when it fires — SSX's MT7 into a
     //                               DeadNodeMode-only header, i.e. a model swap (merquer's
     //                               Trigger_Highway consuming Highway_Good).
+    //     PfxHideSelf             — impact "once" riding a mover (snow's balloons): disable the
+    //                               enclosing MoveSurf_'s mesh renderers when it fires. Renderers,
+    //                               not SetActive — the PfxShot_ burst is parented under it.
     public class ParticleTrigger : MonoBehaviour
     {
         public List<ParticleSystem> targets = new List<ParticleSystem>();
         public List<GameObject> hides = new List<GameObject>();
+        public List<Renderer> hideRenderers = new List<Renderer>();   // PfxHideSelf
         public bool impact;
         public float rearm = -1f;   // impact only; < 0 = once
         // Floor on rearm 0 so a rider grazing the box edge can't restart the burst every tick.
@@ -8263,6 +8281,8 @@ namespace TrickyMaddnessLevelHook
         {
             foreach (var g in hides)
                 if (g != null) g.SetActive(false);
+            foreach (var r in hideRenderers)
+                if (r != null) r.enabled = false;
         }
 
         bool Inside(Vector3 q)
