@@ -1,4 +1,4 @@
-Tricky Madness Level Hook v2.16.0 — required for every custom map pack
+Tricky Madness Level Hook v2.17.0 — required for every custom map pack
 ========================================================================
 
 This is the plugin that makes custom map packs (SSX Tricky Ports, SSX 3 Ports,
@@ -50,7 +50,33 @@ WHAT IT DOES
     with an optional grid layout (grouped by source game) for once you've got
     a lot of custom courses installed.
 
-WHAT'S NEW IN v2.16.0
+WHAT'S NEW IN v2.17.0
+---------------------
+  >>> REQUIRED FOR THE CURRENT TRICKY MADNESS UPDATE <<<
+  Tricky Madness's latest update rewrote how CPU riders follow the course.
+  With v2.16.0 or older, EVERY custom map loads to a black screen on the new
+  game version. Update the Hook — no map pack needs re-downloading.
+
+  ON EVERY CUSTOM MAP (no map re-download)
+
+  - Custom maps load again on the updated game. The Hook now builds each
+    course's CPU racing lines the way the new game expects them.
+  - Where a course's racing line forks and re-joins, CPU riders actually take
+    the branches now, instead of only wandering onto one by accident.
+  - CPU riders crouch to load up before the jumps they see coming, as on
+    the game's own four courses. (Measured: no change to their pace.)
+  - Low-gravity zones float you again. The game update quietly dropped that
+    effect, and it also added a new push off overhangs that was too weak on
+    converted maps' scale; both are corrected.
+  - A balloon (or any prop that pops) disappears when you hit it, instead of
+    staying there after its burst effect plays.
+
+  COMPATIBILITY
+
+  Needs the current Tricky Madness update. Still works with every course pack
+  ever released.
+
+PREVIOUSLY, IN v2.16.0
 ---------------------
   Eight releases' worth (2.9.0 through 2.16.0). Most of it is new things the
   Hook can draw for a course that asks for them, so it only shows up on maps
