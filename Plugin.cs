@@ -3195,8 +3195,13 @@ namespace TrickyMaddnessLevelHook
         {
             float s = WorldScale > 0f ? WorldScale : 1f;
             int grounded = 0, seeded = 0, blind = 0, knots = 0, built = 0;
-            foreach (var d in routes)
+            // Only the sidecar pool (race line + SSX fragments) gets wired; maker
+            // paths from the bundle are taken as authored.
+            var links = routes.Contains(raceLine) ? SplitAndLink(routes, raceLine, s) : new List<KeyValuePair<int, int>>();
+            var made = new AIPath3D[routes.Count];
+            for (int ri = 0; ri < routes.Count; ri++)
             {
+                var d = routes[ri];
                 try
                 {
                     var go = new GameObject(d.Name);
@@ -3235,6 +3240,7 @@ namespace TrickyMaddnessLevelHook
                         kp.windup = d.Windups[k];
                     }
                     path.MarkDirty();
+                    made[ri] = path;
                     knots += d.Points.Count;
                     built++;
                 }
@@ -3243,6 +3249,26 @@ namespace TrickyMaddnessLevelHook
                     Log.LogError($"[AIPaths] building '{d.Name}' failed: {e}");
                 }
             }
+            int wired = 0;
+            foreach (var link in links)
+            {
+                int from = link.Key, to = link.Value;
+                if (made[from] == null || made[to] == null) continue;
+                if (made[from].m_connections == null) made[from].m_connections = new List<AIPath3D.PathConnection>();
+                made[from].m_connections.Add(new AIPath3D.PathConnection
+                {
+                    type = AIPath3D.ConnectionType.Path,
+                    path = made[to],
+                    selectionWeight = 1f,
+                    enabled = true,
+                });
+                wired++;
+            }
+            int deadEnds = 0;
+            foreach (var p in made)
+                if (p != null && (p.m_connections == null || p.m_connections.Count == 0)) deadEnds++;
+            if (links.Count > 0)
+                Log.LogInfo($"[AIPaths] wired {wired} connection(s); {deadEnds} route(s) end with none (the finish, or a fragment that merges nowhere)");
             var network = root.AddComponent<AIPathNetwork>();
             network.SyncPaths();
             Log.LogInfo($"[AIPaths] AIPathNetwork: {built} AIPath3D route(s), {knots} knot(s) at scale {s:0.###}; "
@@ -3250,6 +3276,138 @@ namespace TrickyMaddnessLevelHook
             if (blind > 0)
                 Log.LogWarning($"[AIPaths] {blind} route point(s) found no ground and no height to borrow — they sit at y=0 and riders there will not acquire the route.");
             return network;
+        }
+
+        // Why the race line is cut up: AIPathNetwork.TryAcquirePath keeps a rider on
+        // its current route for as long as it is inside that route's volume, and
+        // only at the route's END does it take one of the route's m_connections
+        // (picked once, weighted, by ChooseConnection). One whole-course race line
+        // is inside-everywhere, so a rider that starts on it never leaves it and
+        // the branches go unraced. So: cut the race line wherever a fragment forks
+        // off or merges back, and link piece → next piece, piece → each fragment
+        // forking there, fragment → the piece at its merge point. The connection's
+        // own bridge (TryProjectConnection) covers the gap between a piece's end and
+        // a fragment's first point. Replaces the race line in `routes` with its
+        // pieces, may reverse fragments drawn uphill, and returns index pairs into
+        // the rewritten list.
+        const float MinRaceLinePiece = 100f;   // 1x units; well past the AI's speed*0.5 look-ahead
+        const float FragmentJoinReach = 40f;   // 1x units; fragment end → another fragment's start
+        private static List<KeyValuePair<int, int>> SplitAndLink(List<RouteDraft> routes, RouteDraft raceLine, float s)
+        {
+            var links = new List<KeyValuePair<int, int>>();
+            var line = raceLine.Points;
+            int n = line.Count;
+            if (n < 2) return links;
+            var cum = new float[n];
+            for (int i = 1; i < n; i++)
+            {
+                float dx = line[i].x - line[i - 1].x, dz = line[i].z - line[i - 1].z;
+                cum[i] = cum[i - 1] + Mathf.Sqrt(dx * dx + dz * dz);
+            }
+            float reach = SpineHalfWidth * s;
+            var branches = new List<RouteDraft>();
+            foreach (var d in routes) if (d != raceLine) branches.Add(d);
+            var fork = new int[branches.Count];   // race-line index, or -1 = not on the line
+            var merge = new int[branches.Count];
+            int reversed = 0;
+            for (int b = 0; b < branches.Count; b++)
+            {
+                var d = branches[b];
+                int i0 = NearestOnLine(line, d.Points[0], out float d0);
+                int i1 = NearestOnLine(line, d.Points[d.Points.Count - 1], out float d1);
+                if (i1 < i0)
+                {
+                    // Drawn against the race: the AI would ride it uphill.
+                    d.Points.Reverse(); d.Windups.Reverse();
+                    int ti = i0; i0 = i1; i1 = ti;
+                    float td = d0; d0 = d1; d1 = td;
+                    reversed++;
+                }
+                fork[b] = d0 <= reach ? i0 : -1;
+                merge[b] = d1 <= reach ? i1 : -1;
+            }
+
+            // Cut points, thinned so no piece is shorter than MinRaceLinePiece.
+            var wanted = new SortedSet<int>();
+            for (int b = 0; b < branches.Count; b++)
+            {
+                if (fork[b] > 0) wanted.Add(fork[b]);
+                if (merge[b] >= 0 && merge[b] < n - 1) wanted.Add(merge[b]);
+            }
+            float minPiece = MinRaceLinePiece * s;
+            var bounds = new List<int> { 0 };
+            foreach (int c in wanted)
+                if (cum[c] - cum[bounds[bounds.Count - 1]] >= minPiece && cum[n - 1] - cum[c] >= minPiece)
+                    bounds.Add(c);
+            bounds.Add(n - 1);
+            int pieces = bounds.Count - 1;
+            routes.Clear();
+            for (int k = 0; k < pieces; k++)
+            {
+                var piece = new RouteDraft { Name = "AIPath3D (race line " + k.ToString(CultureInfo.InvariantCulture) + ")", Spine = true };
+                for (int i = bounds[k]; i <= bounds[k + 1]; i++)
+                {
+                    piece.Points.Add(line[i]);
+                    piece.Windups.Add(raceLine.Windups[i]);
+                }
+                routes.Add(piece);
+                if (k > 0) links.Add(new KeyValuePair<int, int>(k - 1, k));
+            }
+            int forks = 0, merges = 0, joins = 0, offLine = 0;
+            for (int b = 0; b < branches.Count; b++)
+            {
+                int ri = pieces + b;
+                routes.Add(branches[b]);
+                if (fork[b] >= 0)
+                {
+                    int k = SnapToBound(bounds, cum, fork[b]);
+                    // k == 0 is the start gate: riders pick among the start volumes by
+                    // TryAcquirePath's scan, so nothing needs to hand off to it.
+                    if (k > 0) { links.Add(new KeyValuePair<int, int>(k - 1, ri)); forks++; }
+                }
+                if (merge[b] >= 0)
+                {
+                    int k = SnapToBound(bounds, cum, merge[b]);
+                    if (k < pieces) { links.Add(new KeyValuePair<int, int>(ri, k)); merges++; }
+                }
+                else
+                {
+                    var end = branches[b].Points[branches[b].Points.Count - 1];
+                    for (int o = 0; o < branches.Count; o++)
+                    {
+                        if (o == b) continue;
+                        var st = branches[o].Points[0];
+                        float dx = st.x - end.x, dz = st.z - end.z;
+                        if (dx * dx + dz * dz <= FragmentJoinReach * s * FragmentJoinReach * s)
+                        { links.Add(new KeyValuePair<int, int>(ri, pieces + o)); joins++; }
+                    }
+                }
+                if (fork[b] < 0 && merge[b] < 0) offLine++;
+            }
+            Log.LogInfo($"[AIPaths] race line cut into {pieces} piece(s); {forks} fork link(s), {merges} merge link(s), "
+                + $"{joins} fragment→fragment link(s); {reversed} fragment(s) reversed to run downhill, {offLine} touch the race line at neither end");
+            return links;
+        }
+
+        private static int NearestOnLine(List<Vector3> line, Vector3 p, out float dist)
+        {
+            int best = 0; float b2 = float.MaxValue;
+            for (int i = 0; i < line.Count; i++)
+            {
+                float dx = line[i].x - p.x, dz = line[i].z - p.z, d2 = dx * dx + dz * dz;
+                if (d2 < b2) { b2 = d2; best = i; }
+            }
+            dist = Mathf.Sqrt(b2);
+            return best;
+        }
+
+        // Index into `bounds` of the cut nearest race-line index i, by distance along the line.
+        private static int SnapToBound(List<int> bounds, float[] cum, int i)
+        {
+            int best = 0;
+            for (int k = 1; k < bounds.Count; k++)
+                if (Mathf.Abs(cum[bounds[k]] - cum[i]) < Mathf.Abs(cum[bounds[best]] - cum[i])) best = k;
+            return best;
         }
 
         // Height for a 2D route point. Seed from the nearest race-line point (the
@@ -8477,6 +8635,48 @@ namespace TrickyMaddnessLevelHook
         {
             HandleKeys();
             TrackRespawns();
+            TrackRoutes();
+        }
+
+        // Which AIPath3D each AI rider is on, sampled twice a second: the only
+        // evidence of whether riders actually spread across the branch routes
+        // (a whole-course race line is inside-everywhere, so without the
+        // SplitAndLink wiring nobody ever left it).
+        static readonly System.Reflection.FieldInfo fController = AccessTools.Field(typeof(Snowboarder), "snowboardController");
+        static readonly System.Reflection.FieldInfo fPathLoc = AccessTools.Field(typeof(AISnowboarder), "m_pathLocation");
+        readonly Dictionary<Snowboarder, List<string>> _routes = new Dictionary<Snowboarder, List<string>>();
+        float _nextRouteSample;
+
+        void TrackRoutes()
+        {
+            if (Time.time < _nextRouteSample || fController == null || fPathLoc == null) return;
+            _nextRouteSample = Time.time + 0.5f;
+            foreach (var sb in FindObjectsOfType<Snowboarder>())
+            {
+                var ai = fController.GetValue(sb) as AISnowboarder;
+                if (ai == null) continue;
+                var path = ((AIPath3D.PathLocation)fPathLoc.GetValue(ai)).path;
+                if (path == null) continue;
+                if (!_routes.TryGetValue(sb, out var seq)) _routes[sb] = seq = new List<string>();
+                string name = path.gameObject.name;
+                if (seq.Count == 0 || seq[seq.Count - 1] != name) seq.Add(name);
+            }
+        }
+
+        void DumpRoutes()
+        {
+            if (_routes.Count == 0) return;
+            var branches = new HashSet<string>();
+            int r = 0;
+            foreach (var kv in _routes)
+            {
+                int onBranch = 0;
+                foreach (var n in kv.Value)
+                    if (n.Contains("sidecar")) { onBranch++; branches.Add(n); }
+                string seq = string.Join(" > ", kv.Value.ConvertAll(n => n.Replace("AIPath3D (", "").Replace(")", "")).ToArray());
+                Plugin.Log.LogInfo($"[AIPaths] AI {r++}: {kv.Value.Count} route change(s), {onBranch} on branches: {seq}");
+            }
+            Plugin.Log.LogInfo($"[AIPaths] route use: {_routes.Count} AI rider(s) rode {branches.Count} distinct branch route(s)");
         }
 
         void HandleKeys()
@@ -9006,6 +9206,7 @@ namespace TrickyMaddnessLevelHook
 
         void DumpRespawns()
         {
+            DumpRoutes();
             // Several reports, deliberately separate, because the first ride showed they
             // do NOT measure the same thing: 4 position jumps against riders that
             // visibly stop racing for most of a run. Whichever of these is large is
