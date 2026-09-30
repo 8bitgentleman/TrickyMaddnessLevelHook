@@ -8636,6 +8636,7 @@ namespace TrickyMaddnessLevelHook
             HandleKeys();
             TrackRespawns();
             TrackRoutes();
+            TrackTricks();
         }
 
         // Which AIPath3D each AI rider is on, sampled twice a second: the only
@@ -8677,6 +8678,92 @@ namespace TrickyMaddnessLevelHook
                 Plugin.Log.LogInfo($"[AIPaths] AI {r++}: {kv.Value.Count} route change(s), {onBranch} on branches: {seq}");
             }
             Plugin.Log.LogInfo($"[AIPaths] route use: {_routes.Count} AI rider(s) rode {branches.Count} distinct branch route(s)");
+        }
+
+        // Why the stock COM look passive (no tuck, few grabs). Every gate below is
+        // read straight off the game's own decision (AISnowboarder.GetCrouchingInput
+        // / GetGrabInput / GetJumpHeldInput, Snowboarder.UpdateGrounded IL_0828–0863):
+        // tuck needs the random m_crouchInput roll AND |steeringSpring| < 0.5 AND
+        // boardPress == 0 AND !stopping, so time-weighting each gate while grounded
+        // says which one is eating the tuck. Rolls happen at spawn and on each
+        // landing only, so competence (their odds) is logged too.
+        static readonly System.Reflection.FieldInfo fCrouchRoll = AccessTools.Field(typeof(AISnowboarder), "m_crouchInput");
+        static readonly System.Reflection.FieldInfo fCompSq = AccessTools.Field(typeof(AISnowboarder), "m_competenceSq");
+        static readonly System.Reflection.FieldInfo fGrabRoll = AccessTools.Field(typeof(AISnowboarder), "m_grabInput");
+        static readonly System.Reflection.FieldInfo fWindup = AccessTools.Field(typeof(AISnowboarder), "m_windup");
+        static readonly System.Reflection.FieldInfo fSteerSpring = AccessTools.Field(typeof(Snowboarder), "steeringSpring");
+        static readonly System.Reflection.FieldInfo fCrouching = AccessTools.Field(typeof(Snowboarder), "crouching");
+        static readonly System.Reflection.FieldInfo fBoardPress = AccessTools.Field(typeof(Snowboarder), "boardPress");
+        static readonly System.Reflection.FieldInfo fStopping = AccessTools.Field(typeof(Snowboarder), "stopping");
+        static readonly System.Reflection.FieldInfo fIsGrabbing = AccessTools.Field(typeof(Snowboarder), "isGrabbing");
+
+        class TrickTally
+        {
+            public float ground, rollOn, steerBlock, pressBlock, stopBlock, crouching;
+            public float air, grabRollOn, grabbing, windup, compSq;
+            public int grabs, airs; public bool wasGrabbing, wasAir;
+        }
+        readonly Dictionary<Snowboarder, TrickTally> _tricks = new Dictionary<Snowboarder, TrickTally>();
+        bool _trickProbeWarned;
+
+        void TrackTricks()
+        {
+            if (fController == null || fCrouchRoll == null || fCompSq == null || fGrabRoll == null
+                || fWindup == null || fSteerSpring == null || fCrouching == null || fBoardPress == null
+                || fStopping == null || fIsGrabbing == null)
+            {
+                if (!_trickProbeWarned) { Plugin.Log.LogWarning("[AITricks] a probed field is gone — trick probe off"); _trickProbeWarned = true; }
+                return;
+            }
+            float dt = Time.deltaTime;
+            foreach (var sb in FindObjectsOfType<Snowboarder>())
+            {
+                var ai = fController.GetValue(sb) as AISnowboarder;
+                if (ai == null || sb.Finished() || sb.Dead()) continue;
+                if (!_tricks.TryGetValue(sb, out var t)) _tricks[sb] = t = new TrickTally();
+                t.compSq = (float)fCompSq.GetValue(ai);
+                bool air = sb.Airborne();
+                if (sb.Grounded())
+                {
+                    t.ground += dt;
+                    bool roll = (bool)fCrouchRoll.GetValue(ai);
+                    var spring = fSteerSpring.GetValue(sb) as Spring;
+                    if (roll)
+                    {
+                        t.rollOn += dt;
+                        if (spring != null && Mathf.Abs(spring.GetValue()) >= 0.5f) t.steerBlock += dt;
+                        if ((float)fBoardPress.GetValue(sb) != 0f) t.pressBlock += dt;
+                        if ((bool)fStopping.GetValue(sb)) t.stopBlock += dt;
+                    }
+                    if ((bool)fCrouching.GetValue(sb)) t.crouching += dt;
+                    if ((bool)fWindup.GetValue(ai)) t.windup += dt;
+                }
+                else if (air)
+                {
+                    t.air += dt;
+                    if ((int)fGrabRoll.GetValue(ai) != 0) t.grabRollOn += dt;
+                    bool g = (bool)fIsGrabbing.GetValue(sb);
+                    if (g) t.grabbing += dt;
+                    if (g && !t.wasGrabbing) t.grabs++;
+                    t.wasGrabbing = g;
+                }
+                if (air && !t.wasAir) t.airs++;
+                t.wasAir = air;
+            }
+        }
+
+        static string Pct(float part, float whole) { return whole > 0f ? (100f * part / whole).ToString("0") + "%" : "-"; }
+
+        void DumpTricks()
+        {
+            if (_tricks.Count == 0) return;
+            Plugin.Log.LogInfo("[AITricks] per AI rider — grounded: tuck-roll on / of which blocked by steering≥0.5, board press, stopping / actually tucking / on a windup knot; airborne: grab-roll on / grabbing");
+            int r = 0;
+            foreach (var t in _tricks.Values)
+                Plugin.Log.LogInfo($"[AITricks] AI {r++}: competence² {t.compSq:0.00} | ground {t.ground:0}s: roll {Pct(t.rollOn, t.ground)}, "
+                    + $"blocked steer {Pct(t.steerBlock, t.rollOn)} press {Pct(t.pressBlock, t.rollOn)} stop {Pct(t.stopBlock, t.rollOn)}, "
+                    + $"TUCKING {Pct(t.crouching, t.ground)}, windup {Pct(t.windup, t.ground)} | air {t.air:0}s over {t.airs} jump(s): "
+                    + $"grab roll {Pct(t.grabRollOn, t.air)}, grabbing {Pct(t.grabbing, t.air)} ({t.grabs} grab(s))");
         }
 
         void HandleKeys()
@@ -9207,6 +9294,7 @@ namespace TrickyMaddnessLevelHook
         void DumpRespawns()
         {
             DumpRoutes();
+            DumpTricks();
             // Several reports, deliberately separate, because the first ride showed they
             // do NOT measure the same thing: 4 position jumps against riders that
             // visibly stop racing for most of a run. Whichever of these is large is
