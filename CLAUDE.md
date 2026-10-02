@@ -46,9 +46,18 @@ numbering.
   against the SSX volumes near it.
   ⚠️ A weak updraft on a GROUNDED rider can be projected away entirely by
   `Snowboarder.Integrate` (it strips the away-from-ground component when
-  `WillCatchAir()` predicts no real arc); a horizontal push along the slope is
-  untouched. Suspect that before the rating if a vent feels dead.
-  `AirStream`/`LowGravity` are the game's own tags — zero Hook code.
+  `WillCatchAir()` is false — its simulated path stays within 2.5 + radius of
+  the ground for 80 steps — and `caster.airTime > 0.1`); a ground-normal
+  mismatch (dot < 0.5) or a path that leaves the ground takes off instead. A
+  horizontal push along the slope is untouched. Suspect that before the rating
+  if a vent feels dead.
+  `AirStream` is the game's own tag — zero Hook code (entry sets an exact exit
+  speed of 38, `HOOK_NOTES.md` §11). ⚠️ **`LowGravity` is NOT zero Hook code any
+  more**: the game counts the zones but only drives the "OuterSpace" audio RTPC.
+  `RestoreLowGravity` (in the `Integrate` transpiler) re-inserts `g *= 0.7` and
+  must stay **custom-bundle-only** so built-in courses keep stock behaviour. It
+  does not fix `Caster.Cast`, so predicted landings inside a low-G zone run
+  slightly short.
   **`Launch` DOES have Hook code** (`LaunchVolume`, one-shot velocity SET on
   entry; `_lap<N>` in the name caps how many times it fires per rider, `_ctr`
   first slides the rider onto the box axis). Its box
@@ -86,7 +95,11 @@ numbering.
 - §20 The `Rail.GetClosestPosition` transpiler is the **only** Hook patch that
   changes built-in levels — hence config-gated + bails out unchanged on any
   mismatch. ⚠️ Every future base-game fix gets those same two properties, or a
-  Hook install silently alters the game everyone already has.
+  Hook install silently alters the game everyone already has. On TM ≥ 25617730
+  the game fixed the bug itself, so the transpiler is **redundant but harmless**:
+  it still binds (one multiply) and `RailProject` on an already-unit vector
+  changes nothing beyond float rounding. That is read from IL, not run in game.
+  Its "corrected" log line no longer means anything was corrected.
 - §21 `group`/`order` lay out the level-select grid and the Hook holds **no**
   table of map names — a map declares its own section heading and global sort
   position, which is why the grid works for somebody else's levels too. Sections
