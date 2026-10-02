@@ -1578,6 +1578,12 @@ namespace TrickyMaddnessLevelHook
             AccessTools.Field(typeof(LevelManager), "snowflakes");
         static readonly System.Reflection.FieldInfo fSpeedLabel =
             AccessTools.Field(typeof(LevelManager), "speedLabel");
+        // TM build 25638975 added weather snow. Null on older builds — TrySpawnTmSnow
+        // then falls back to the Hook's own SnowFall, so neither is ERROR-logged.
+        static readonly System.Reflection.FieldInfo fFallingSnow =
+            AccessTools.Field(typeof(LevelManager), "fallingSnow");
+        static readonly System.Reflection.FieldInfo fFallingSnowPrefab =
+            AccessTools.Field(typeof(LevelManager), "fallingSnowPrefab");
         // TM build 25617730 replaced pathsParent/dividersParent (flat 2D AIPath
         // polylines under a transform) with one AIPathNetwork of 3D spline volumes.
         static readonly System.Reflection.FieldInfo fPathNetwork =
@@ -1632,6 +1638,34 @@ namespace TrickyMaddnessLevelHook
                 return null;
             }
             return f.GetValue(target);
+        }
+
+        // TM's own weather snow for "SnowFX_" maps. The levelmanager prefab carries a
+        // fallingSnowPrefab (ParticleSystem + FallingSnow + the game's snowflake material)
+        // that the game never instantiates — the official courses put a copy in the scene
+        // and point LevelManager.fallingSnow at it, and LevelManager.Start binds it to the
+        // camera and player. We do the same before Start runs, so a custom map gets TM's
+        // look plus its speed/boost smear and roof cut-off. The component is looked up by
+        // name so this method still JITs on a TM build without the type; false = fall back.
+        static bool TrySpawnTmSnow(LevelManager lm, float intensity, out string why)
+        {
+            if (fFallingSnow == null || fFallingSnowPrefab == null)
+            { why = "this TM build has no LevelManager.fallingSnow"; return false; }
+            var prefab = fFallingSnowPrefab.GetValue(lm) as GameObject;
+            if (prefab == null) { why = "LevelManager.fallingSnowPrefab is null"; return false; }
+            var go = Instantiate(prefab);
+            var fs = go.GetComponent("FallingSnow");
+            if (fs == null) { Destroy(go); why = "fallingSnowPrefab has no FallingSnow"; return false; }
+            // Same clamp and meaning as SnowFall: snowIntensity scales emission and cap.
+            intensity = Mathf.Clamp(intensity, 0.05f, 8f);
+            var ps = go.GetComponent<ParticleSystem>();
+            var main = ps.main;
+            main.maxParticles = Mathf.CeilToInt(main.maxParticles * intensity);
+            var em = ps.emission;
+            em.rateOverTimeMultiplier *= intensity;
+            fFallingSnow.SetValue(lm, fs);
+            why = $"intensity {intensity:F2}, rate {em.rateOverTimeMultiplier:F0}/s, cap {main.maxParticles}";
+            return true;
         }
 
         // "SnowSSX_<chance>_<intensity>_<unitsPerMetre>" + str2 on its disabled renderer
@@ -2916,8 +2950,9 @@ namespace TrickyMaddnessLevelHook
                 Log.LogInfo($"[Destructible] wired {smashWired} smashable(s) with {smashFrags} shard fragment(s)");
 
             // Atmospheric falling snow. Naming contract with SSXImporter.BuildLighting:
-            // an empty GO "SnowFX_<intensity>". We build a camera-follow ParticleSystem
-            // at runtime (SnowFall) — a bundle-baked system would be engine-module-stripped
+            // an empty GO "SnowFX_<intensity>". That gets TM's own FallingSnow when the
+            // build has it (TrySpawnTmSnow), else a camera-follow ParticleSystem built at
+            // runtime (SnowFall) — a bundle-baked system would be engine-module-stripped
             // and, world-simulated, couldn't stay wrapped around the chase cam. One system
             // total (there's only ever one marker); intensity scales emission + cap.
             // "SnowSSX_<chance>_<intensity>_<unitsPerMetre>" is SSX Tricky's decoded
@@ -2953,8 +2988,13 @@ namespace TrickyMaddnessLevelHook
                         si = 1f;
                         Log.LogDebug($"[SnowFall] '{t.name}' has no parseable intensity -> default {si:F2}");
                     }
-                    SnowFall.Spawn(si);
-                    Log.LogInfo($"[SnowFall] camera-follow snow spawned (intensity {si:F2})");
+                    if (TrySpawnTmSnow(levelManager, si, out string tmWhy))
+                        Log.LogInfo($"[SnowFall] TM's own falling snow wired ({tmWhy})");
+                    else
+                    {
+                        SnowFall.Spawn(si);
+                        Log.LogInfo($"[SnowFall] camera-follow snow spawned (intensity {si:F2}); TM snow unavailable: {tmWhy}");
+                    }
                     snowDone = true;
                     break;
                 }
