@@ -103,6 +103,7 @@ namespace TrickyMaddnessLevelHook
         // UV-units PER FRAME at the PS2's 60 Hz, so UVScrollBehaviour multiplies by
         // this to get UV-units/second. 60 = authentic speed. Tunable, no rebuild.
         internal static ConfigEntry<float> uvScrollFrameRate;
+        internal static ConfigEntry<float> terrainDetail;
         // World scale of the active custom map, from the optional "scale <f>"
         // header line in its .aipaths.txt sidecar (gen_aipaths.py --scale).
         // 1.0 for built-in levels, sidecar-less maps, and maps with no scale line
@@ -564,6 +565,13 @@ namespace TrickyMaddnessLevelHook
                 "LCD scanlines, jumbotrons, boost-pad chevrons, river water. The " +
                 "authored rates are per-frame at the PS2's 60 Hz, so 60 = authentic " +
                 "speed, 0 = frozen. No rebuild needed, just relaunch.");
+            terrainDetail = Config.Bind("Visual", "TerrainDetail", 1f,
+                "Strength of the surface relief and snow sheen added to some converted " +
+                "courses' ground textures (generated normal maps — not in the original " +
+                "games). 1 = as the map ships, 0 = off (the original flat look), in " +
+                "between scales both together. Only touches that added detail: a source " +
+                "game's own normal maps (SSX 2012) and TM's own courses are unaffected. " +
+                "Applies on the next map load.");
 
             MapsDir = ResolveMapsDir();
             Logger.LogInfo($"Maps directory resolved to: {MapsDir}");
@@ -878,6 +886,11 @@ namespace TrickyMaddnessLevelHook
                     }
                 }
 
+                int detailed = 0;
+                foreach (var mat in seen) if (ApplyTerrainDetail(mat)) detailed++;
+                if (detailed > 0)
+                    Log.LogInfo($"[TerrainDetail] scene '{scene.name}': {detailed} material(s) at strength {terrainDetail.Value:0.##}");
+
                 // Clip-only materials: the V2-ported animation flipbooks (crowd cd
                 // frames, sign frames) live ONLY inside AnimationClips until their
                 // first frame swaps them onto a renderer — the renderer walk above
@@ -980,6 +993,34 @@ namespace TrickyMaddnessLevelHook
             bool gameOrigin = GameShaderIds != null && sh != null && GameShaderIds.Contains(sh.GetInstanceID());
             string kw = sh == null ? "" : string.Join(" ", mat.shaderKeywords);
             Log.LogInfo($"[ShaderDiag] mat '{mat.name}' shader '{(sh == null ? "<null>" : sh.name)}' gameOrigin={gameOrigin} isSupported={(sh != null && sh.isSupported)} keywords=[{kw}] -> {action}");
+        }
+
+        // Scales the importer's generated detail (Overrides.json textures[].normal,
+        // whose _BumpMap it names "tmdetail_*") by the TerrainDetail slider. The
+        // bundle's values are cached per material so a reloaded map scales from the
+        // shipped value instead of compounding. A source game's own normal map has no
+        // such name and is left alone.
+        static readonly Dictionary<int, Vector3> _detailBase = new Dictionary<int, Vector3>();
+        private static bool ApplyTerrainDetail(Material mat)
+        {
+            if (!mat.HasProperty("_BumpMap")) return false;
+            var bump = mat.GetTexture("_BumpMap");
+            if (bump == null || !bump.name.StartsWith("tmdetail_", StringComparison.Ordinal)) return false;
+            int id = mat.GetInstanceID();
+            if (!_detailBase.TryGetValue(id, out var b))
+            {
+                // z = keyword state AFTER FixMaterial: off the native-GPU path
+                // PruneKeywords has dropped _NORMALMAP (§4) and it must stay dropped.
+                b = new Vector3(mat.GetFloat("_BumpScale"),
+                                mat.HasProperty("_Smoothness") ? mat.GetFloat("_Smoothness") : 0f,
+                                mat.IsKeywordEnabled("_NORMALMAP") ? 1f : 0f);
+                _detailBase[id] = b;
+            }
+            float k = Mathf.Max(0f, terrainDetail != null ? terrainDetail.Value : 1f);
+            mat.SetFloat("_BumpScale", b.x * k);
+            if (mat.HasProperty("_Smoothness")) mat.SetFloat("_Smoothness", Mathf.Clamp01(b.y * k));
+            if (k > 0f && b.z > 0f) mat.EnableKeyword("_NORMALMAP"); else mat.DisableKeyword("_NORMALMAP");
+            return true;
         }
 
         private static void FixMaterial(Material mat, HashSet<string> missing,
