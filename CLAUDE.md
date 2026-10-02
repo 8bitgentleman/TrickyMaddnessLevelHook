@@ -92,14 +92,11 @@ numbering.
   moving *away* can never carry the rider.
 - §18/§19 Classify movers and pickups by **wiring and shape, never by name** —
   community courses use arbitrary names (Snow Belline shipped 39 gems as scenery).
-- §20 The `Rail.GetClosestPosition` transpiler is the **only** Hook patch that
-  changes built-in levels — hence config-gated + bails out unchanged on any
-  mismatch. ⚠️ Every future base-game fix gets those same two properties, or a
-  Hook install silently alters the game everyone already has. On TM ≥ 25617730
-  the game fixed the bug itself, so the transpiler is **redundant but harmless**:
-  it still binds (one multiply) and `RailProject` on an already-unit vector
-  changes nothing beyond float rounding. That is read from IL, not run in game.
-  Its "corrected" log line no longer means anything was corrected.
+- §20 A Hook patch that changes **built-in** levels (a base-game bug fix) must be
+  config-gated **and** bail out unchanged on any IL mismatch, or a Hook install
+  silently alters the game everyone already has. There is currently **none**: the
+  `Rail.GetClosestPosition` transpiler was the only one, and was deleted once TM
+  25617730 fixed the bug itself (it had become a no-op still logging "corrected").
 - §21 `group`/`order` lay out the level-select grid and the Hook holds **no**
   table of map names — a map declares its own section heading and global sort
   position, which is why the grid works for somebody else's levels too. Sections
