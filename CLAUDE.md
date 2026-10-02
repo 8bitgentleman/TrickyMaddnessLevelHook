@@ -1,7 +1,7 @@
 # LevelHook — runtime invariants
 
 <!-- tm-build-stamp -->
-> **RE'd against Tricky Madness build `21290881`** (v3.0, Unity 2022.3.62f1, `Assembly-CSharp.dll` sha256 `88636067…55efa4`).
+> **RE'd against Tricky Madness build `25638975`** (v3.0, Unity 2022.3.62f3, `Assembly-CSharp.dll` sha256 `e37a95c5…9279a0`).
 > Findings below are true of **that** build. TM is in active development — run `python3 tm_re_baseline.py check`
 > to see what a newer build moved before trusting any of it (`tm_baseline/README.md`).
 <!-- /tm-build-stamp -->
