@@ -3563,6 +3563,52 @@ namespace TrickyMaddnessLevelHook
             return lips;
         }
 
+        // AIPath3D's bake builds a NativeSpline (up-vector + length caches) that
+        // costs ~1 ms per knot under Mono — 2.8 s for SSX 3 R&B's 2923 knots, paid
+        // on every load and restart. AIPath3D re-samples between knots every
+        // sampleSpacing anyway, so a knot that sits on the line between its
+        // neighbours adds nothing. Douglas-Peucker in 3D (keeps jump lips), never
+        // across a windup on/off boundary. 1x units, so it scales with the map.
+        const float RouteTrimTolerance = 1f;
+
+        // Rewrites d.Points/d.Windups (with grounded `placed` as the new points).
+        private static void TrimRoute(List<Vector3> placed, RouteDraft d, float tol)
+        {
+            int n = placed.Count;
+            if (n < 3 || d.Windups.Count != n || tol <= 0f) { d.Points.Clear(); d.Points.AddRange(placed); return; }
+            var keep = new bool[n];
+            keep[0] = keep[n - 1] = true;
+            for (int k = 1; k < n; k++)
+                if (d.Windups[k] != d.Windups[k - 1]) { keep[k] = true; keep[k - 1] = true; }
+            float tol2 = tol * tol;
+            var stack = new Stack<KeyValuePair<int, int>>();
+            int a0 = 0;
+            for (int k = 1; k < n; k++)
+                if (keep[k]) { if (k - a0 > 1) stack.Push(new KeyValuePair<int, int>(a0, k)); a0 = k; }
+            while (stack.Count > 0)
+            {
+                var span = stack.Pop();
+                Vector3 a = placed[span.Key], ab = placed[span.Value] - a;
+                float len2 = ab.sqrMagnitude;
+                int worst = -1; float worstD = tol2;
+                for (int k = span.Key + 1; k < span.Value; k++)
+                {
+                    Vector3 ap = placed[k] - a;
+                    float t = len2 > 1e-6f ? Mathf.Clamp01(Vector3.Dot(ap, ab) / len2) : 0f;
+                    float d2 = (ap - ab * t).sqrMagnitude;
+                    if (d2 > worstD) { worstD = d2; worst = k; }
+                }
+                if (worst < 0) continue;
+                keep[worst] = true;
+                if (worst - span.Key > 1) stack.Push(new KeyValuePair<int, int>(span.Key, worst));
+                if (span.Value - worst > 1) stack.Push(new KeyValuePair<int, int>(worst, span.Value));
+            }
+            var w = new List<bool>(d.Windups);
+            d.Points.Clear(); d.Windups.Clear();
+            for (int k = 0; k < n; k++)
+                if (keep[k]) { d.Points.Add(placed[k]); d.Windups.Add(w[k]); }
+        }
+
         // Turns the drafts into AIPath3D children of `root` under one
         // AIPathNetwork. AIPath3D bakes its samples lazily from the SplineContainer
         // (world space via the transform, so an identity root = world knots), and
@@ -3570,7 +3616,7 @@ namespace TrickyMaddnessLevelHook
         private static AIPathNetwork BuildAIPathNetwork(GameObject root, List<RouteDraft> routes, RouteDraft raceLine)
         {
             float s = WorldScale > 0f ? WorldScale : 1f;
-            int grounded = 0, seeded = 0, blind = 0, knots = 0, built = 0;
+            int grounded = 0, seeded = 0, blind = 0, knots = 0, built = 0, trimmed = 0;
             int braceLips = 0, braceRoutes = 0;
             var sw = System.Diagnostics.Stopwatch.StartNew();
             long tSplit, tGround = 0, tSpline = 0, tAdd = 0, tProfile = 0, tDirty = 0, tWire, tSync;
@@ -3597,6 +3643,7 @@ namespace TrickyMaddnessLevelHook
                     var container = go.AddComponent<UnityEngine.Splines.SplineContainer>();
                     var spline = container.Spline;
                     float prevY = float.NaN;
+                    int raw = d.Points.Count;
                     var placed = new List<Vector3>(d.Points.Count);
                     for (int k = 0; k < d.Points.Count; k++)
                     {
@@ -3609,12 +3656,15 @@ namespace TrickyMaddnessLevelHook
                         }
                         prevY = p.y;
                         placed.Add(p);
-                        // Linear: the old AIPath was a polyline, and auto-smoothing
-                        // dense SSX points overshoots at sharp fragment corners.
-                        spline.Add(new Unity.Mathematics.float3(p.x, p.y, p.z), UnityEngine.Splines.TangentMode.Linear);
                     }
                     int lips = MarkBracePoints(placed, d.Windups, s);
                     if (lips > 0) { braceLips += lips; braceRoutes++; }
+                    TrimRoute(placed, d, RouteTrimTolerance * s);
+                    trimmed += raw - d.Points.Count;
+                    foreach (var p in d.Points)
+                        // Linear: the old AIPath was a polyline, and auto-smoothing
+                        // dense SSX points overshoots at sharp fragment corners.
+                        spline.Add(new Unity.Mathematics.float3(p.x, p.y, p.z), UnityEngine.Splines.TangentMode.Linear);
                     long t1 = sw.ElapsedTicks;
                     tSpline += t1 - t0;
                     var path = go.AddComponent<AIPath3D>();
@@ -3680,6 +3730,7 @@ namespace TrickyMaddnessLevelHook
                 + $"activate (bake) {tDirty * ms:0} ms, wiring {tWire * ms:0} ms, AIPathNetwork add+SyncPaths {tSync * ms:0} ms, total {sw.ElapsedTicks * ms:0} ms");
             Log.LogInfo($"[AIPaths] AIPathNetwork: {built} AIPath3D route(s), {knots} knot(s) at scale {s:0.###}; "
                 + $"2D points grounded by raycast {grounded}, from race-line/previous height {seeded}, unresolved {blind}");
+            Log.LogInfo($"[AIPaths] trimmed {trimmed} near-collinear knot(s) (tolerance {RouteTrimTolerance * s:0.##}) — AIPath3D's spline setup costs ~1 ms per knot");
             Log.LogInfo($"[AIPaths] brace points: {braceLips} lip(s) on {braceRoutes} route(s) got a {BraceSpan * s:0} unit windup run-up");
             if (blind > 0)
                 Log.LogWarning($"[AIPaths] {blind} route point(s) found no ground and no height to borrow — they sit at y=0 and riders there will not acquire the route.");
