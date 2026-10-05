@@ -108,11 +108,6 @@ namespace TrickyMaddnessLevelHook
         // 1.0 for built-in levels, sidecar-less maps, and maps with no scale line
         // — i.e. everything that exists today.
         internal static float WorldScale = 1f;
-
-        // Every rail the Hook converted on the current map — the candidate set for
-        // Snowboarder_UpdateGrinding_Handover. Rebuilt per map; a built-in course
-        // never matches it, so the handover is inert there.
-        internal static readonly List<Rail> HookRails = new List<Rail>();
         // Per-map gravity multiplier from the optional "gravity <f>" header line in
         // the active custom map's .aipaths.txt sidecar. INDEPENDENT of WorldScale:
         // applies at 1x too, so a course can ask for heavier (>1) or lighter (<1)
@@ -2085,7 +2080,6 @@ namespace TrickyMaddnessLevelHook
             //Convert From Make Rails to Game Rails
             var RailObjects = FindObjectsByType(typeof(MakerRails), FindObjectsSortMode.None) as MakerRails[];
             int railColliders = 0, railSegments = 0;
-            HookRails.Clear();
             GameObject probeRailGO = null;
             List<Rail.Segment> probeSegments = null;
             for (int i = 0; i < RailObjects.Length; i++)
@@ -2131,7 +2125,6 @@ namespace TrickyMaddnessLevelHook
                 if (BuildRailCollider(RailObjects[i].gameObject, NewSegments))
                 {
                     railColliders++;
-                    HookRails.Add(NewRail);
                     if (probeRailGO == null)
                     {
                         probeRailGO = RailObjects[i].gameObject;
@@ -5456,77 +5449,6 @@ namespace TrickyMaddnessLevelHook
         public static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
         {
             return Plugin.ScaleGravityLiterals(instructions, "Snowboarder.UpdateGrinding", new[] { 17f });
-        }
-    }
-
-    // Rail-to-rail handover at a rail's end. The game has one already
-    // (UpdateGrinding, on MoveOnRail's end flag: OverlapSphere(2*radius) on layer 9,
-    // switch rail/railDistance/railDirection) but it misses SSX funnel stubs — short
-    // rails that merge INTO a longer one mid-span (R&B's first rail), launching the
-    // rider at the merge. This does the same three-field switch a frame or two
-    // early, against the Hook's own rail list instead of a physics overlap, so it
-    // fires whenever this rail's end lies on another rail travelling the same way.
-    // Speed carries over: UpdateGrinding rebuilds velocity from its magnitude.
-    [HarmonyPatch(typeof(Snowboarder), "UpdateGrinding")]
-    public class Snowboarder_UpdateGrinding_Handover
-    {
-        static readonly System.Reflection.FieldInfo fRail =
-            AccessTools.Field(typeof(Snowboarder), "rail");
-        static readonly System.Reflection.FieldInfo fRailDistance =
-            AccessTools.Field(typeof(Snowboarder), "railDistance");
-        static readonly System.Reflection.FieldInfo fRailDirection =
-            AccessTools.Field(typeof(Snowboarder), "railDirection");
-        static readonly System.Reflection.FieldInfo fVelocity =
-            AccessTools.Field(typeof(Snowboarder), "velocity");
-
-        // A rail meeting another this far off-axis is a crossing, not a merge.
-        const float MinAlignment = 0.7f;
-
-        [HarmonyPrefix]
-        public static void Prefix(Snowboarder __instance)
-        {
-            if (Plugin.HookRails.Count < 2) return;
-            var rail = fRail.GetValue(__instance) as Rail;
-            if (rail == null) return;
-            var data = rail.GetComponent<RailInstanceData>();
-            if (data == null || data.segments == null || data.segments.Count < 2) return;
-            var segs = data.segments;
-
-            float distance = (float)fRailDistance.GetValue(__instance);
-            int direction = (int)fRailDirection.GetValue(__instance);
-            Vector3 velocity = (Vector3)fVelocity.GetValue(__instance);
-
-            // Only near the end the rider is heading for: within two frames of travel
-            // (velocity can grow inside UpdateGrinding before MoveOnRail runs).
-            float length = segs[segs.Count - 1].distance;
-            float remaining = direction > 0 ? length - distance : distance;
-            if (remaining > velocity.magnitude * Time.deltaTime * 2f) return;
-
-            var endSeg = direction > 0 ? segs[segs.Count - 1] : segs[0];
-            Vector3 endPos = rail.transform.TransformPoint(endSeg.position);
-            Vector3 endFwd = rail.transform.rotation * endSeg.rotation * Vector3.forward * direction;
-            float tolerance = 0.25f * Plugin.WorldScale;
-
-            foreach (var other in Plugin.HookRails)
-            {
-                if (other == null || other == rail) continue;
-                Vector3 onOther = other.GetClosestPosition(endPos, out int otherEnd, out Quaternion otherRot, out _);
-                if ((onOther - endPos).sqrMagnitude > tolerance * tolerance) continue;
-                Vector3 otherFwd = otherRot * Vector3.forward;
-                float align = Vector3.Dot(endFwd, otherFwd);
-                if (Mathf.Abs(align) < MinAlignment) continue;
-                int otherDirection = align < 0f ? -1 : 1;
-                // The other rail also ends here, in the direction we'd ride it.
-                if (otherEnd == otherDirection) continue;
-
-                // Join at the rider's CURRENT spot, not the end — same line, so seamless.
-                other.GetClosestPosition(__instance.transform.position, out _, out _, out float otherDistance);
-                fRail.SetValue(__instance, other);
-                fRailDistance.SetValue(__instance, otherDistance);
-                fRailDirection.SetValue(__instance, otherDirection);
-                Plugin.Log.LogInfo($"[Rails] handover '{rail.name}' -> '{other.name}' at {otherDistance:F2} (dir {otherDirection})");
-                return;
-            }
         }
     }
 
