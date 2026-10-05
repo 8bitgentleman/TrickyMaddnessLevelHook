@@ -578,6 +578,13 @@ namespace TrickyMaddnessLevelHook
             // shaders that won't run on Metal. Re-bind each material to the game's
             // own (platform-correct) shader of the same name once the scene loads.
             SceneManager.sceneLoaded += OnSceneLoaded;
+            // A restart reloads the custom scene WITHOUT the LoadScene prefix, so
+            // start the load clock when that scene unloads instead.
+            SceneManager.sceneUnloaded += s =>
+            {
+                if (!LoadClock.Running && s.name == CustomSceneName())
+                    LoadClock.Begin(LoadedTrack != null ? LoadedTrack + " (reload)" : s.name + " (reload)");
+            };
 
             if (debugBundleLoad.Value)
             {
@@ -795,6 +802,11 @@ namespace TrickyMaddnessLevelHook
 
         private static void OnSceneLoaded(Scene scene, LoadSceneMode mode)
         {
+            if (LoadClock.Running && Instance != null)
+            {
+                LoadClock.Mark("Awake -> sceneLoaded");
+                Instance.StartCoroutine(LoadClock.ReportAfterFirstFrame());
+            }
             // Material fixing must only run for the custom bundle's own scene.
             // Gating on the flag alone is not enough — returning to the menu doesn't
             // go through MenuManager.LoadScene(LevelEntry), so the flag stays set and
@@ -1871,6 +1883,7 @@ namespace TrickyMaddnessLevelHook
 
         public static void LoadLevelManager()
         {
+            LoadClock.Mark("Unity scene load (bundle -> MakerLevelData.Awake)");
             //Find Main Starting Objects
             var levelManagerMaker = FindAnyObjectByType<MakerLevelData>();
 
@@ -1991,6 +2004,7 @@ namespace TrickyMaddnessLevelHook
                 if (!Mathf.Approximately(levelManagerMaker.TimeLeft, menuManager.freestyleTimeLimit))
                     Log.LogInfo($"[LevelEntry] freestyle clock {menuManager.freestyleTimeLimit:0} s "
                         + $"-> {levelManagerMaker.TimeLeft:0} s (this map's own)");
+                LoadClock.Mark("LevelEntry");
                 menuManager.freestyleTimeLimit = levelManagerMaker.TimeLeft;
             }
 
@@ -2141,6 +2155,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (RailObjects.Length > 0)
                 Log.LogInfo($"[Rails] converted {RailObjects.Length} rail(s), built {railColliders} collider(s), {railSegments} segment(s) total");
+            LoadClock.Mark("Rails");
             if (railColliderProbe.Value && probeRailGO != null && Instance != null)
                 Instance.StartCoroutine(RailProbe(probeRailGO, probeSegments));
 
@@ -2179,6 +2194,7 @@ namespace TrickyMaddnessLevelHook
             if (routes.Count > 0)
             {
                 Log.LogInfo($"[AIPaths] copied {routes.Count} maker path(s) from the bundle (sidecar ignored)");
+                LoadClock.Mark("AIPaths");
             }
             else
             {
@@ -2203,8 +2219,10 @@ namespace TrickyMaddnessLevelHook
                 else
                     Log.LogInfo($"[AIPaths] AI pool: {built} race-line path + {branches} branch path(s) = {built + branches} total"
                         + (multiPathAI.Value ? "" : " (MultiPathAI off)"));
+                    LoadClock.Mark("AIPaths");
             }
             var network = BuildAIPathNetwork(AIParent, routes, raceLineDraft);
+            LoadClock.Mark("BuildAIPathNetwork");
             SetGameField(fPathNetwork, "LevelManager.pathNetwork", levelManager, network);
 
             // ⚠️ A map with no MakerRaceLine is legal — this lookup can and does
@@ -2244,6 +2262,7 @@ namespace TrickyMaddnessLevelHook
                 }
 
                 TempRaceLine.CalculateSegments();
+                LoadClock.Mark("RaceLine.CalculateSegments");
 
                 SetGameField(fRaceLine, "LevelManager.raceLine", levelManager, TempRaceLine);
             }
@@ -2315,6 +2334,7 @@ namespace TrickyMaddnessLevelHook
                 {
                     SetGameField(fRespawnPointsParent, "LevelManager.respawnPointsParent", levelManager, respawnParent.transform);
                     Log.LogInfo($"[Respawn] built {made} race-line respawn marker(s) ({moved} seated on ground, {dropped} dropped as airborne), replacing maker branch-head markers");
+                    LoadClock.Mark("Respawn");
                 }
                 else
                 {
@@ -2397,6 +2417,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (glassStripped > 0)
                 Log.LogInfo($"[Glass] stripped {glassStripped} thin vertical layer-8 'glass'-named collider(s) (bounce fix)");
+            LoadClock.Mark("Glass");
 
             //Convert pipeline-marked props into crashable PhysicsProps
             // Naming contract with the map pipeline: any GameObject named
@@ -2435,6 +2456,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (propsConverted > 0 || propsSkipped > 0)
                 Log.LogInfo($"[PhysProps] converted {propsConverted} crashable prop(s), skipped {propsSkipped}");
+            LoadClock.Mark("PhysProps");
 
             // Trick-multiplier pickups: hand the flakes to the GAME's own snowflake
             // behaviour instead of the Maker's generic one.
@@ -2506,6 +2528,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (flakes > 0)
                 Log.LogInfo($"[Snowflakes] converted {flakes} pickup(s) to the game's Snowflake behaviour, {flakeSpheres} sphere trigger(s)");
+            LoadClock.Mark("Snowflakes");
             LowerScaledGems(levelManagerMaker.gameObject.scene);
 
             // Phase 4 custom items — Wind volumes. Naming contract with SSXImporter.BuildItems:
@@ -2552,6 +2575,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (windAttached > 0 || windSkipped > 0)
                 Log.LogInfo($"[Wind] attached {windAttached} wind volume(s), skipped {windSkipped}");
+            LoadClock.Mark("Wind");
 
             // Phase 4 custom items — Teleport volumes. Naming contract with
             // SSXImporter.BuildItems: a GO named "Teleport_<i>" carries a BoxCollider (the
@@ -2579,6 +2603,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (tpAttached > 0 || tpSkipped > 0)
                 Log.LogInfo($"[Teleport] attached {tpAttached} teleport volume(s), skipped {tpSkipped}");
+            LoadClock.Mark("Teleport");
 
             // Phase 4 custom items — Launch volumes. Naming contract with
             // SSXImporter.BuildItems: a GO named "Launch_<i>_<speed>" (plus an optional
@@ -2634,6 +2659,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (launchAttached > 0 || launchSkipped > 0)
                 Log.LogInfo($"[Launch] attached {launchAttached} launch volume(s), skipped {launchSkipped}");
+            LoadClock.Mark("Launch");
 
             // Phase 4 custom items — TriggerAnim ("door") volumes. Naming contract with
             // SSXImporter.BuildItems: a GO named "TriggerAnim_*" ships fully authored —
@@ -2676,6 +2702,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (taAttached > 0 || taSkipped > 0)
                 Log.LogInfo($"[TriggerAnim] attached {taAttached} door trigger(s), skipped {taSkipped}");
+            LoadClock.Mark("TriggerAnim");
 
             // AnimDoor (feature: gameplay.animDoors). Naming contract with
             // SSXImporter.BuildAnimDoors:
@@ -2716,6 +2743,7 @@ namespace TrickyMaddnessLevelHook
                 }
             if (adDoors > 0 || adTrig > 0 || adSkip > 0)
                 Log.LogInfo($"[AnimDoor] attached {adTrig} trigger(s) driving {adDoors} door(s), skipped {adSkip}");
+            LoadClock.Mark("AnimDoor");
 
             // MovingSurface (feature: gameplay.movingColliders). Same relay as AnimDoor with one
             // difference that is the whole point of the feature: keepColliders. A door disables its
@@ -2769,6 +2797,7 @@ namespace TrickyMaddnessLevelHook
             if (msSurf > 0 || msTrig > 0 || msSkip > 0)
                 Log.LogInfo($"[MoveSurf] attached {msTrig} trigger(s) driving {msSurf} mover(s), skipped {msSkip}"
                     + (msHaz > 0 ? $", {msHaz} hazard(s)" : ""));
+            LoadClock.Mark("MoveSurf");
 
             // ParticleTrigger (feature: lighting.particleTriggers). Contract on the class.
             int ptTrig = 0, ptSys = 0, ptSkip = 0, ptImp = 0, ptHide = 0;
@@ -2826,6 +2855,7 @@ namespace TrickyMaddnessLevelHook
                     }
             if (pfxShotByKey.Count > 0 || ptSkip > 0)
                 Log.LogInfo($"[ParticleTrig] attached {ptTrig} trigger(s) ({ptImp} impact, {ptHide} hide) over {pfxShotByKey.Count} group(s), {ptSys} emitter bind(s), skipped {ptSkip}");
+            LoadClock.Mark("ParticleTrig");
 
             // Per-level sky-fill override. Naming contract with SSXImporter.BuildLighting:
             // an empty marker GO named "SkyFill_<RRGGBB>" (from Overrides.json
@@ -2843,6 +2873,7 @@ namespace TrickyMaddnessLevelHook
                     {
                         SceneSkyFill = fill;
                         Log.LogInfo($"[Skydome] per-level sky fill {hex} (overrides [Skydome] FillColor)");
+                        LoadClock.Mark("Skydome");
                     }
                     else
                         Log.LogWarning($"[Skydome] sky-fill marker '{t.name}' not parseable; using [Skydome] FillColor");
@@ -2867,6 +2898,7 @@ namespace TrickyMaddnessLevelHook
                     {
                         t.gameObject.AddComponent<DrawDistance>().far = far;
                         Log.LogInfo($"[DrawDist] per-level camera far clip {far:F1}");
+                        LoadClock.Mark("DrawDist");
                     }
                     else
                         Log.LogWarning($"[DrawDist] marker '{t.name}' not parseable; far clip left alone");
@@ -2892,6 +2924,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (skydomes > 0)
                 Log.LogInfo($"[Skydome] attached camera-follow to {skydomes} skydome(s)");
+            LoadClock.Mark("Skydome");
 
             // Animated textures (feature 14). Naming contract with SSXImporter.BuildProps:
             // a GO named "UVScroll_<u>_<v>_<originalName>" (rates written with the
@@ -2924,6 +2957,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (uvAttached > 0 || uvSkipped > 0)
                 Log.LogInfo($"[UVScroll] attached {uvAttached} UV-scroller(s), skipped {uvSkipped}");
+            LoadClock.Mark("UVScroll");
 
             // Smashable glass / breakables. Naming contract with SSXImporter.BuildProps:
             // a GO named "Destructible_<orig>" carries the intact model (render mesh, NO
@@ -2992,6 +3026,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (smashWired > 0)
                 Log.LogInfo($"[Destructible] wired {smashWired} smashable(s) with {smashFrags} shard fragment(s)");
+            LoadClock.Mark("Destructible");
 
             // Atmospheric falling snow. Naming contract with SSXImporter.BuildLighting:
             // an empty GO "SnowFX_<intensity>". That gets TM's own FallingSnow when the
@@ -3038,6 +3073,7 @@ namespace TrickyMaddnessLevelHook
                     {
                         SnowFall.Spawn(si);
                         Log.LogInfo($"[SnowFall] camera-follow snow spawned (intensity {si:F2}); TM snow unavailable: {tmWhy}");
+                        LoadClock.Mark("SnowFall");
                     }
                     snowDone = true;
                     break;
@@ -3057,6 +3093,7 @@ namespace TrickyMaddnessLevelHook
                     if (!gs.Init()) { UnityEngine.Object.Destroy(gs); continue; }
                     var gm = t.GetComponent<MeshFilter>().sharedMesh;
                     Log.LogInfo($"[Glow] '{t.name}': {gm.vertexCount / 4} halo quads driven");
+                    LoadClock.Mark("Glow");
                 }
             }
 
@@ -3087,6 +3124,7 @@ namespace TrickyMaddnessLevelHook
                     }
                     PostFX.Enable(bi, bt);
                     Log.LogInfo($"[PostFX] bloom enabled (intensity {bi:F2}, threshold {bt:F2})");
+                    LoadClock.Mark("PostFX");
                 }
                 if (PostFX.Active) break;
             }
@@ -3122,6 +3160,7 @@ namespace TrickyMaddnessLevelHook
                 }
                 else if (BundleSource == "ssx3")
                     Log.LogInfo($"[Painter] no '{Path.GetFileName(painterPath)}' next to this SSX 3 map; baked fog, no per-zone fog or tint");
+                LoadClock.Mark("Painter");
             }
 
             if (lightingRamp == null || lightingRamp.Value)
@@ -3172,6 +3211,7 @@ namespace TrickyMaddnessLevelHook
             // NB: the open-top sky-fill is started from OnSceneLoaded (not here) —
             // SolidColorSky captures the ACTIVE scene name, which isn't the custom scene
             // yet at LoadLevelManager time, so starting it here exits immediately.
+            LoadClock.Mark("LoadLevelManager tail");
         }
 
         // Resolves a Destructible DisableRef_ marker back to the live scene GO. The
@@ -3532,16 +3572,25 @@ namespace TrickyMaddnessLevelHook
             float s = WorldScale > 0f ? WorldScale : 1f;
             int grounded = 0, seeded = 0, blind = 0, knots = 0, built = 0;
             int braceLips = 0, braceRoutes = 0;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            long tSplit, tGround = 0, tSpline = 0, tAdd = 0, tProfile = 0, tDirty = 0, tWire, tSync;
             // Only the sidecar pool (race line + SSX fragments) gets wired; maker
             // paths from the bundle are taken as authored.
             var links = routes.Contains(raceLine) ? SplitAndLink(routes, raceLine, s) : new List<KeyValuePair<int, int>>();
+            tSplit = sw.ElapsedTicks;
             var made = new AIPath3D[routes.Count];
             for (int ri = 0; ri < routes.Count; ri++)
             {
                 var d = routes[ri];
                 try
                 {
+                    long t0 = sw.ElapsedTicks;
                     var go = new GameObject(d.Name);
+                    // Built inactive: AIPath3D.OnEnable bakes unconditionally at its
+                    // default 1-unit spacing, and our spacing/profile changes after it
+                    // force a second lazy bake on first query (~6 s on SSX 3 R&B).
+                    // Activating once everything is set bakes once, at our spacing.
+                    go.SetActive(false);
                     go.transform.SetParent(root.transform, false);
                     // Container first and filled BEFORE AIPath3D exists, so its
                     // OnEnable bakes once instead of re-syncing on every knot.
@@ -3554,7 +3603,9 @@ namespace TrickyMaddnessLevelHook
                         Vector3 p = d.Points[k];
                         if (float.IsNaN(p.y))
                         {
+                            long tg = sw.ElapsedTicks;
                             p.y = GroundUnderRoute(p, raceLine, prevY, s, ref grounded, ref seeded, ref blind);
+                            tGround += sw.ElapsedTicks - tg;
                         }
                         prevY = p.y;
                         placed.Add(p);
@@ -3564,7 +3615,11 @@ namespace TrickyMaddnessLevelHook
                     }
                     int lips = MarkBracePoints(placed, d.Windups, s);
                     if (lips > 0) { braceLips += lips; braceRoutes++; }
+                    long t1 = sw.ElapsedTicks;
+                    tSpline += t1 - t0;
                     var path = go.AddComponent<AIPath3D>();
+                    long t2 = sw.ElapsedTicks;
+                    tAdd += t2 - t1;
                     if (fSampleSpacing != null)
                         fSampleSpacing.SetValue(path, Mathf.Max(1f, 2f * s));
                     if (path.m_knotProfiles == null) path.m_knotProfiles = new List<AIPath3D.KnotProfile>();
@@ -3580,7 +3635,10 @@ namespace TrickyMaddnessLevelHook
                         kp.heightAbove = RouteHeightAbove * s;
                         kp.windup = d.Windups[k];
                     }
-                    path.MarkDirty();
+                    long t3 = sw.ElapsedTicks;
+                    tProfile += t3 - t2;
+                    go.SetActive(true);
+                    tDirty += sw.ElapsedTicks - t3;
                     made[ri] = path;
                     knots += d.Points.Count;
                     built++;
@@ -3590,6 +3648,7 @@ namespace TrickyMaddnessLevelHook
                     Log.LogError($"[AIPaths] building '{d.Name}' failed: {e}");
                 }
             }
+            long tw = sw.ElapsedTicks;
             int wired = 0;
             foreach (var link in links)
             {
@@ -3610,8 +3669,15 @@ namespace TrickyMaddnessLevelHook
                 if (p != null && (p.m_connections == null || p.m_connections.Count == 0)) deadEnds++;
             if (links.Count > 0)
                 Log.LogInfo($"[AIPaths] wired {wired} connection(s); {deadEnds} route(s) end with none (the finish, or a fragment that merges nowhere)");
+            tWire = sw.ElapsedTicks - tw;
+            long ts = sw.ElapsedTicks;
             var network = root.AddComponent<AIPathNetwork>();
             network.SyncPaths();
+            tSync = sw.ElapsedTicks - ts;
+            double ms = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            Log.LogInfo($"[LoadTime] BuildAIPathNetwork breakdown: SplitAndLink {tSplit * ms:0} ms, spline fill {tSpline * ms:0} ms "
+                + $"(of which GroundUnderRoute {tGround * ms:0} ms), AddComponent<AIPath3D> {tAdd * ms:0} ms, knot profiles {tProfile * ms:0} ms, "
+                + $"activate (bake) {tDirty * ms:0} ms, wiring {tWire * ms:0} ms, AIPathNetwork add+SyncPaths {tSync * ms:0} ms, total {sw.ElapsedTicks * ms:0} ms");
             Log.LogInfo($"[AIPaths] AIPathNetwork: {built} AIPath3D route(s), {knots} knot(s) at scale {s:0.###}; "
                 + $"2D points grounded by raycast {grounded}, from race-line/previous height {seeded}, unresolved {blind}");
             Log.LogInfo($"[AIPaths] brace points: {braceLips} lip(s) on {braceRoutes} route(s) got a {BraceSpan * s:0} unit windup run-up");
@@ -4566,6 +4632,64 @@ namespace TrickyMaddnessLevelHook
     }
 
 
+    // Wall-clock readout of a custom map's load, one table per load in LogOutput.log
+    // under [LoadTime]. Each row is the time since the PREVIOUS mark, so a phase
+    // that logged nothing (and so set no mark) is folded into the next row.
+    // Marks with the same label sum. Custom maps only: Begin is in the LoadScene
+    // prefix, and every other Mark is a no-op until it has run.
+    internal static class LoadClock
+    {
+        static readonly System.Diagnostics.Stopwatch watch = new System.Diagnostics.Stopwatch();
+        static readonly List<KeyValuePair<string, double>> rows = new List<KeyValuePair<string, double>>();
+        static double last;
+        static string map;
+        internal static bool Running => watch.IsRunning;
+
+        internal static void Begin(string mapName)
+        {
+            rows.Clear();
+            map = mapName;
+            last = 0;
+            watch.Restart();
+        }
+
+        internal static void Mark(string label)
+        {
+            if (!watch.IsRunning) return;
+            double now = watch.Elapsed.TotalMilliseconds;
+            int i = rows.FindIndex(r => r.Key == label);
+            if (i < 0) rows.Add(new KeyValuePair<string, double>(label, now - last));
+            else rows[i] = new KeyValuePair<string, double>(label, rows[i].Value + now - last);
+            last = now;
+        }
+
+        internal static System.Collections.IEnumerator ReportAfterFirstFrame()
+        {
+            yield return null; // Start()s run before this frame's Update
+            Mark("Start()s -> first frame");
+            yield return null;
+            Mark("second frame");
+            watch.Stop();
+            var sb = new System.Text.StringBuilder();
+            sb.Append($"[LoadTime] '{map}' {last / 1000.0:F2} s total (LoadScene prefix -> second frame):");
+            foreach (var r in rows)
+                sb.Append($"\n[LoadTime]   {r.Value,9:F0} ms  {r.Key}");
+            Plugin.Log.LogInfo(sb.ToString());
+        }
+    }
+
+    // Splits LoadClock's "Start()s -> first frame" row around LevelManager.Start,
+    // outermost on both sides so every other mod's Start patch lands inside it.
+    [HarmonyPatch(typeof(LevelManager), "Start")]
+    public class LevelManager_Start_LoadClock
+    {
+        [HarmonyPrefix, HarmonyPriority(Priority.First)]
+        public static void Prefix() => LoadClock.Mark("sceneLoaded -> LevelManager.Start");
+
+        [HarmonyPostfix, HarmonyPriority(Priority.Last)]
+        public static void Postfix() => LoadClock.Mark("LevelManager.Start (+ all patches)");
+    }
+
     [HarmonyPatch(typeof(MenuManager), "LoadScene", new System.Type[] { typeof(LevelEntry) })]
     public class MenuManager_SelectLevel
     {
@@ -4618,6 +4742,7 @@ namespace TrickyMaddnessLevelHook
             {
                 string path = levelEntry.sceneName.TrimStart('$');
                 Plugin.Log.LogInfo($"LoadScene prefix: loading custom map bundle '{levelEntry.name}' from {path}");
+                LoadClock.Begin(levelEntry.name);
 
                 // 1. A previous custom load may still be in flight. Unloading its
                 // bundle now (to load another) would pull the rug from a pending
@@ -4664,6 +4789,7 @@ namespace TrickyMaddnessLevelHook
                     // 5. Load the bundle. Null means the file is missing/corrupt or
                     // already loaded elsewhere — abort with state still cleared.
                     bundle = AssetBundle.LoadFromFile(path);
+                    LoadClock.Mark("AssetBundle.LoadFromFile");
                     if (bundle == null)
                     {
                         Plugin.Log.LogError($"LoadScene prefix: bundle load failed (file missing/corrupt or already loaded): {path}");
