@@ -4783,14 +4783,21 @@ namespace TrickyMaddnessLevelHook
         // Set immediately before the game's own Respawn() call on the OOB branch and
         // consumed by Snowboarder_Respawn's prefix on the same call stack, so no
         // frame-boundary staleness is possible.
+        // ⚠️ The game returns before its OOB branch when the rider is Dead (state 4,
+        //   first instruction of the method), so a wrecked rider sliding into a reset
+        //   volume is NOT respawned by it. Flagging that contact anyway left the flag
+        //   stale, and the rider's own death-timer Respawn then read as OOB — the 1 s
+        //   window — so the crash route never counted a single death of that loop.
         internal static string PendingOobCollider;
 
         [HarmonyPrefix]
-        public static void Prefix(ControllerColliderHit hit)
+        public static void Prefix(Snowboarder __instance, ControllerColliderHit hit)
         {
-            if (hit == null) return;
+            if (hit == null || __instance == null) return;
             var col = hit.collider;
             if (col == null || col.gameObject.layer != OobLayer) return;
+            object st = Traverse.Create(__instance).Field("state").GetValue();
+            if (st != null && Convert.ToInt32(st) == 4) return;   // 4 = State.Dead
             PendingOobCollider = col.gameObject.name;
             PerfHarness.NoteOobHit(PendingOobCollider, col.transform.position);
         }
@@ -4844,8 +4851,10 @@ namespace TrickyMaddnessLevelHook
         public static void Postfix(Snowboarder __instance, bool __runOriginal)
         {
             // Harmony runs postfixes even when a prefix skipped the original, so a
-            // respawn WE blocked above must not be recorded as one that happened.
-            if (!__runOriginal || __instance == null) return;
+            // respawn WE blocked above must not be recorded as one that happened. Its
+            // OOB flag is spent all the same, or the next real respawn inherits it.
+            if (!__runOriginal || __instance == null)
+            { Snowboarder_OnControllerColliderHit.PendingOobCollider = null; return; }
             bool wasOob = Snowboarder_OnControllerColliderHit.PendingOobCollider != null;
             Snowboarder_OnControllerColliderHit.PendingOobCollider = null;
             bool wasCrash = PendingCrash;
