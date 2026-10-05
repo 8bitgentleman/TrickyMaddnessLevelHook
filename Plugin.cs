@@ -1629,8 +1629,6 @@ namespace TrickyMaddnessLevelHook
         // as it has been in the file. See the write-back site for what that cost.
         static readonly System.Reflection.MethodInfo mSetLastLevelEntry =
             AccessTools.PropertySetter(typeof(MenuManager), "lastLevelEntry");
-        static readonly System.Reflection.FieldInfo fRailSegments =
-            AccessTools.Field(typeof(Rail), "segments");
         static readonly System.Reflection.FieldInfo fPropSoundName =
             AccessTools.Field(typeof(PhysicsProp), "soundName");
         static readonly System.Reflection.FieldInfo fDestrFragmentList =
@@ -2086,9 +2084,15 @@ namespace TrickyMaddnessLevelHook
             List<Rail.Segment> probeSegments = null;
             for (int i = 0; i < RailObjects.Length; i++)
             {
-                var NewRail = RailObjects[i].gameObject.AddComponent<RailInvis>();
-
                 List<Rail.Segment> NewSegments = BuildRailSegments(RailObjects[i]);
+
+                // Since TM 25714710 a rail's path lives on a sibling RailInstanceData,
+                // which Rail.Awake caches with GetComponent — so the data component
+                // must exist BEFORE the Rail is added, or Awake caches null and every
+                // rail falls back to its transform position (ungrindable, no error).
+                var NewData = RailObjects[i].gameObject.AddComponent<RailInstanceData>();
+                NewData.segments = NewSegments;
+                var NewRail = RailObjects[i].gameObject.AddComponent<RailInvis>();
 
                 // The bool is checked, not discarded: on a miss TryParse yields
                 // default(RailMaterial) silently, which is indistinguishable from an
@@ -2100,8 +2104,6 @@ namespace TrickyMaddnessLevelHook
                         + $"using {material1} instead (grind sound/FX will be wrong on this rail).");
 
                 NewRail.material = material1;
-
-                SetGameField(fRailSegments, "Rail.segments", NewRail, NewSegments);
 
                 // Grind detection BoxCast/SphereCasts layer 9 ("Rail") and then does
                 // GetComponent<Rail>() on the collider's OWN GameObject — so a rail
@@ -3350,8 +3352,8 @@ namespace TrickyMaddnessLevelHook
                 yield break;
             }
             var rail = hit.collider.gameObject.GetComponent<Rail>();
-            var segs = rail == null ? null
-                : GetGameField(fRailSegments, "Rail.segments", rail) as List<Rail.Segment>;
+            var data = hit.collider.gameObject.GetComponent<RailInstanceData>();
+            var segs = data == null ? null : data.segments;
             Log.LogInfo($"[Rails] probe hit '{hit.collider.gameObject.name}' (layer {hit.collider.gameObject.layer}): Rail={(rail != null)}, segments={(segs == null ? 0 : segs.Count)}");
         }
 
