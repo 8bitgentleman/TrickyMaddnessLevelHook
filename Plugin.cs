@@ -2719,6 +2719,7 @@ namespace TrickyMaddnessLevelHook
             //   MoveSurfTrig_<idx>_<trig>   — trigger box relaying into it.
             int msSurf = 0, msTrig = 0, msSkip = 0, msHaz = 0;
             var moveSurfByIdx = new Dictionary<string, Animation>();
+            var moveSurfPlayerOnly = new HashSet<string>();
             foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
                 foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
                 {
@@ -2727,6 +2728,10 @@ namespace TrickyMaddnessLevelHook
                     if (anim == null) continue;   // static mover (no animated part) — nothing to drive
                     moveSurfByIdx[t.name.Substring("MoveSurf_".Length)] = anim;
                     msSurf++;
+                    // playerOnly:true -> only the human fires this mover's triggers. Same
+                    // marker-child contract as MoverHazard below, for the same reason.
+                    if (t.Find("MoverPlayerOnly") != null)
+                        moveSurfPlayerOnly.Add(t.name.Substring("MoveSurf_".Length));
                     // Contact with this mover wrecks the rider. Flagged by a marker CHILD
                     // rather than by the mover's own name, because the trigger join below
                     // parses "MoveSurfTrig_<mover>_<trig>" positionally — decorating
@@ -2751,6 +2756,7 @@ namespace TrickyMaddnessLevelHook
                     rel.target = surfAnim;
                     rel.clipName = "MoveSurf_" + segs[1];
                     rel.keepColliders = true;   // the collider MOVES — that is the feature
+                    rel.playerOnly = moveSurfPlayerOnly.Contains(segs[1]);
                     msTrig++;
                 }
             if (msSurf > 0 || msTrig > 0 || msSkip > 0)
@@ -8343,6 +8349,10 @@ namespace TrickyMaddnessLevelHook
         // surface (gameplay.movingColliders) must keep them so the animation drags the
         // collider — that motion IS the feature. See ssx/MOVING_COLLIDER_FEASIBILITY.md.
         public bool keepColliders;
+        // Fire for the HUMAN rider only (persistentMovers playerOnly:true, via the mover's
+        // MoverPlayerOnly marker). A set piece meant to be SEEN -- SSX 3's EBC3 plane crash --
+        // would otherwise be fired by a CPU rider ahead of you, out of your sight.
+        public bool playerOnly;
 
         Vector3 _halfLocal = new Vector3(0.5f, 0.5f, 0.5f);
         Vector3 _center = Vector3.zero;   // box.center: model-bounds offset from the instance origin
@@ -8373,6 +8383,9 @@ namespace TrickyMaddnessLevelHook
             {
                 _riders = UnityEngine.Object.FindObjectsOfType<Snowboarder>();
                 if (_riders.Length == 0) return; // riders not spawned yet
+                if (playerOnly)
+                    _riders = System.Array.FindAll(_riders, r => r != null &&
+                        !(Traverse.Create(r).Field("snowboardController").GetValue() is AISnowboarder));
             }
             foreach (var sb in _riders)
             {
