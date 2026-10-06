@@ -206,6 +206,15 @@ numbering.
   button, on every custom map — workaround and full mechanism:
   `AIMod-src/CLAUDE.md`.
 
+- ⚠️ **URP depth priming stays OFF on custom maps** (`SetDepthPriming`, called
+  from `OnSceneLoaded`; the game's own value goes back on built-in levels). TM's
+  SSAO feature makes priming active, and its depth prepass records our
+  opaque-queue alpha materials (sky cloud layers at q1000+, crowd cards) as
+  solid, so everything behind them fails ZTest Equal and the clear colour shows
+  through: Matterhorn's sky cut off above the clouds, fringed crowds. Disabling
+  the materials' `DepthOnly`/`DepthNormals` passes was playtested and does NOT
+  fix it. Don't re-enable priming, and don't write anything that depends on it.
+
 ## `Plugin.Instance` can go silently dead on some Windows installs
 
 Same root cause as `CharacterHook-src/CLAUDE.md`'s BepInEx-manager-destroyed
