@@ -847,6 +847,12 @@ namespace TrickyMaddnessLevelHook
             if (!isCustomScene && pendingSceneName == null)
                 SceneSkyFill = null;
 
+            // Same lifetime rule for depth priming: off for our maps, the game's own value
+            // back everywhere else (an intermediate loading scene during a custom load
+            // leaves it alone).
+            if (isCustomScene) SetDepthPriming(false);
+            else if (pendingSceneName == null) SetDepthPriming(true);
+
             // The skybox needs watching on EVERY scene: on built-in levels/menus we
             // only cache a known-good game skybox material (never modify anything);
             // on the custom scene we wait for the bundle's skybox to be bound —
@@ -1142,6 +1148,41 @@ namespace TrickyMaddnessLevelHook
         // sceneLoaded time; the scene's lighting settings bind during activation).
         // On non-custom scenes this only caches a known-good game skybox material;
         // on the custom scene it fixes a broken one.
+        // URP depth priming draws a depth-only prepass of everything in the opaque queue
+        // range, then shades with ZTest Equal. Our maps put alpha-blended materials in that
+        // range on purpose — the sky layers sit in the Background queue (1000+), and crowd
+        // cards and other alpha props are opaque-queue — and the prepass records their
+        // fully transparent texels as solid. Whatever lies behind them then fails the
+        // Equal test and the camera clear colour shows through: Matterhorn's sky cut off
+        // above the cloud layer, the clear-coloured fringe round the crowds. Disabling the
+        // material's DepthOnly/DepthNormals passes did NOT fix it (playtested); turning
+        // priming off did. The game's renderer ships with Auto, which is on here because
+        // the SSAO feature already forces a depth-normals prepass.
+        static readonly Dictionary<object, object> s_primingOriginal = new Dictionary<object, object>();
+        static void SetDepthPriming(bool restore)
+        {
+            const System.Reflection.BindingFlags BF = System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+            try
+            {
+                var rp = UnityEngine.Rendering.GraphicsSettings.currentRenderPipeline;
+                var list = rp?.GetType().GetField("m_RendererDataList", BF)?.GetValue(rp) as System.Array;
+                if (list == null) { if (!restore) Log.LogWarning("[DepthPriming] no URP renderer list; priming left as is"); return; }
+                foreach (var data in list)
+                {
+                    var prop = data?.GetType().GetProperty("depthPrimingMode", BF);
+                    if (prop == null) continue;
+                    object cur = prop.GetValue(data);
+                    if (!s_primingOriginal.ContainsKey(data)) s_primingOriginal[data] = cur;
+                    object want = restore ? s_primingOriginal[data] : System.Enum.ToObject(prop.PropertyType, 0); // 0 = Disabled
+                    if (Equals(cur, want)) continue;
+                    prop.SetValue(data, want);
+                    Log.LogInfo($"[DepthPriming] {cur} -> {want} ({(restore ? "left custom map" : "custom map")})");
+                }
+            }
+            catch (System.Exception e) { Log.LogWarning("[DepthPriming] could not change depth priming: " + e.Message); }
+        }
+
         private static System.Collections.IEnumerator SkyboxWatch(bool isCustomScene)
         {
             float deadline = Time.realtimeSinceStartup + 15f;
