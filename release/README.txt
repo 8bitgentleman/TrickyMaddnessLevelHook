@@ -1,4 +1,4 @@
-Tricky Madness Level Hook v2.17.0 — required for every custom map pack
+Tricky Madness Level Hook v2.18.0 — required for every custom map pack
 ========================================================================
 
 This is the plugin that makes custom map packs (SSX Tricky Ports, SSX 3 Ports,
@@ -50,7 +50,47 @@ WHAT IT DOES
     with an optional grid layout (grouped by source game) for once you've got
     a lot of custom courses installed.
 
-WHAT'S NEW IN v2.17.0
+WHAT'S NEW IN v2.18.0
+---------------------
+  >>> REQUIRED FOR THE CURRENT TRICKY MADNESS UPDATE <<<
+  The latest Tricky Madness update changed how the game stores grind rails.
+  With v2.17.0 or older, rails on custom maps can't be ground at all on the
+  new game version. Update the Hook — no map pack needs re-downloading.
+
+  ON EVERY CUSTOM MAP (no map re-download)
+
+  - Rails are grindable again on the updated game.
+  - Grinding off the end of one rail piece carries you onto the next one.
+    SSX rails come in several joined pieces and you used to get thrown off
+    at the first join (SSX 3's R&B was the worst of it).
+  - The sky no longer cuts off. On some courses (Super Alpine's Matterhorn
+    most of all) the sky above the cloud layer showed as a flat band of
+    colour, and crowds had a hard fringe round them. Both were the same
+    graphics setting, which the Hook now turns off on custom maps only.
+  - Crashing over and over in the same spot no longer traps you there. The
+    Hook's stuck-in-a-loop guard was missing crashes that ended near an
+    out-of-bounds edge, so it never moved you on; now it counts them.
+  - Snowfall on maps that use the game's own snow stays in front of the
+    camera at racing speed, instead of being left behind.
+  - Courses load faster, and restart faster, the bigger the course the
+    bigger the saving (SSX 3's R&B: about 9.8 s down to 6 s to load, 7.5 s
+    down to 3.5 s to restart).
+  - New slider: TerrainDetail under [Visual]. It scales the extra surface
+    relief (bumps and sheen) the converted courses add on top of the original
+    games' flat terrain. 1 is the default look; 0 puts it back to how the
+    original games looked.
+
+  NEW THING A COURSE CAN ASK FOR
+
+  - A scripted set piece that only fires for you, not for a CPU rider who
+    reaches it first out of sight (SSX 3's plane crash). Needs a map built
+    for it.
+
+  COMPATIBILITY
+  Needs the current Tricky Madness update. Still works with every course pack
+  ever released.
+
+PREVIOUSLY, IN v2.17.0
 ---------------------
   >>> REQUIRED FOR THE CURRENT TRICKY MADNESS UPDATE <<<
   Tricky Madness's latest update rewrote how CPU riders follow the course.
