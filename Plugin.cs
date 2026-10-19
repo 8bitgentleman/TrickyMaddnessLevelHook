@@ -2343,12 +2343,18 @@ namespace TrickyMaddnessLevelHook
                 // otherwise escalate riders onto the previous map's markers.
                 Plugin.RaceLineRespawns.Clear();
                 Snowboarder_Respawn.ResetLoopState();
-                var rpts = TempRaceLine.m_points;
+                // Scene-scoped for the same reason DeriveBudgets is: a global lookup
+                // on a second load would cut this line at the PREVIOUS map's finish.
+                var finishLine = FindInScene<MakerFinishLine>(levelManagerMaker.gameObject.scene);
                 bool seat = Plugin.SpawnSnapMode != Plugin.SpawnSnap.Off;
+                var rpts = RespawnLine(TempRaceLine.m_points,
+                    MakerSpawnPoint != null ? MakerSpawnPoint.transform : null,
+                    finishLine != null ? finishLine.transform : null, seat, out string lineNote);
+                if (lineNote != null) Log.LogInfo($"[Respawn] marker line: {lineNote}");
                 int made = 0, moved = 0, dropped = 0;
                 for (int i = 0; i < rpts.Count; i++)
                 {
-                    Vector3 p = rpts[i].position;
+                    Vector3 p = rpts[i];
                     if (seat)
                     {
                         if (!GroundSeat(p, out float sy, out _, out _)) { dropped++; continue; }
@@ -2360,8 +2366,8 @@ namespace TrickyMaddnessLevelHook
                     go.transform.parent = respawnParent.transform;
                     go.transform.position = p;
                     Vector3 fwd = (i + 1 < rpts.Count)
-                        ? rpts[i + 1].position - rpts[i].position
-                        : rpts[i].position - rpts[i - 1].position;
+                        ? rpts[i + 1] - rpts[i]
+                        : rpts[i] - rpts[i - 1];
                     fwd.y = 0f;
                     if (fwd.sqrMagnitude > 1e-6f)
                         go.transform.rotation = Quaternion.LookRotation(fwd.normalized, Vector3.up);
@@ -4026,6 +4032,95 @@ namespace TrickyMaddnessLevelHook
             }
         }
 
+        // The polyline the race-line respawn markers are built along: the race line
+        // cut short of the finish, with its long gaps filled in.
+        //
+        // ⚠️ Cut at the finish because a race line need not stop there (avalanche
+        // crs01's runs 247 u on, into a run-out that ends at a collision wall). A
+        // marker past the gate is one no rider can finish from, and the crash-loop
+        // guard escalated COM riders onto exactly those: they hit the end wall, died,
+        // respawned at the nearest marker — the same one — forever. Stops a clip
+        // tolerance short of the finish rather than on it: that clears the importer's
+        // 12 * scale-deep finish trigger (15 * scale > 6 * scale), so a respawn never
+        // lands inside the gate and finishes the race for free. Same on-route test as
+        // DeriveBudgets — an off-route or lap-course finish leaves the line whole.
+        //
+        // Densified because the game and both guards count in MARKERS, not distance:
+        // with crs01's 14 points one segment is 45% of the course, so "3 markers on"
+        // skipped the finish entirely. Any segment over twice the median is split
+        // into median-length pieces. A fill is a straight chord, not the course: on
+        // crs01 five of them leave the mesh where the course bends away. Only the
+        // ground-seat pass downstream makes them safe (it drops a point with no
+        // terrain in its band), so `densify` is off when spawnsnap is off.
+        private static List<Vector3> RespawnLine(List<RaceLine.Point> rpts, Transform spawn,
+            Transform finish, bool densify, out string note)
+        {
+            note = null;
+            var pts = new List<Vector3>(rpts.Count);
+            foreach (var rp in rpts) pts.Add(rp.position);
+            float len = 0f;
+            for (int i = 1; i < pts.Count; i++) len += Vector3.Distance(pts[i - 1], pts[i]);
+
+            if (finish != null && len > 1f)
+            {
+                float tol = Mathf.Max(15f * (WorldScale > 0f ? WorldScale : 1f), 0.02f * len);
+                ProjectOnRoute(pts, finish.position, out float sFinish, out float dFinish);
+                float sSpawn = 0f, dSpawn = float.MaxValue;
+                if (spawn != null) ProjectOnRoute(pts, spawn.position, out sSpawn, out dSpawn);
+                float a0 = dSpawn <= tol ? sSpawn : 0f;
+                float cut = sFinish - tol;
+                if (dFinish <= tol && cut > a0 && sFinish < len - 1f)
+                {
+                    var kept = new List<Vector3> { pts[0] };
+                    float run = 0f;
+                    for (int i = 1; i < pts.Count; i++)
+                    {
+                        float seg = Vector3.Distance(pts[i - 1], pts[i]);
+                        if (run + seg >= cut)
+                        {
+                            float t = seg > 1e-6f ? (cut - run) / seg : 0f;
+                            kept.Add(Vector3.Lerp(pts[i - 1], pts[i], t));
+                            break;
+                        }
+                        kept.Add(pts[i]);
+                        run += seg;
+                    }
+                    note = $"cut {len - cut:0} u short of the line's end ({len - sFinish:0} u past the finish, {tol:0} u before it)";
+                    pts = kept;
+                }
+            }
+
+            if (densify && pts.Count >= 3)
+            {
+                var segs = new List<float>(pts.Count - 1);
+                for (int i = 1; i < pts.Count; i++) segs.Add(Vector3.Distance(pts[i - 1], pts[i]));
+                var sorted = new List<float>(segs);
+                sorted.Sort();
+                float median = sorted[sorted.Count / 2];
+                if (median > 1e-3f)
+                {
+                    var dense = new List<Vector3>(pts.Count) { pts[0] };
+                    int added = 0;
+                    for (int i = 1; i < pts.Count; i++)
+                    {
+                        if (segs[i - 1] > 2f * median)
+                        {
+                            int n = Mathf.Min(Mathf.CeilToInt(segs[i - 1] / median), 64);
+                            for (int k = 1; k < n; k++) dense.Add(Vector3.Lerp(pts[i - 1], pts[i], k / (float)n));
+                            added += n - 1;
+                        }
+                        dense.Add(pts[i]);
+                    }
+                    if (added > 0)
+                    {
+                        note = (note == null ? "" : note + "; ") + $"{added} point(s) filled into gaps over {2f * median:0} u";
+                        pts = dense;
+                    }
+                }
+            }
+            return pts;
+        }
+
         private static void DeriveBudgets(MakerLevelData ld)
         {
             if (ld == null) return;
@@ -5296,8 +5391,8 @@ namespace TrickyMaddnessLevelHook
             if (crashRoute) st.crashHits = 0; else st.oobHits = 0;
 
             int dest = Mathf.Min(near + adv, marks.Count - 1);
-            // Already at the last marker: the finish is right there and shunting them
-            // further is meaningless. Leave them to the game.
+            // Already at the last marker, which RespawnLine stops just short of the
+            // finish: shunting them further is meaningless. Leave them to the game.
             if (dest == near) return;
             var target = marks[dest];
             if (target == null) return;
