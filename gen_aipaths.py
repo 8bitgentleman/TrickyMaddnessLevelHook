@@ -33,6 +33,15 @@ Sidecar format (one token line per point, invariant-culture floats):
                           through 1:1 while 0.25 * 100 asks for a 25 m catch
                           radius around a 0.24 m rail. The corpus value is 0.625
                           (what a 2.5x SSX map gets).
+    routescale <f>     <- optional SSX-equivalent world scale for the Hook's
+                          route/respawn/medal/rail-chain tolerances, 0.1-20.
+                          Absent = the map's `scale`, which is right for every
+                          SSX-family map. Declare it only when `scale` is a raw
+                          unit ratio rather than an SSX port factor -- the
+                          scale-139 family (Mad Trix, Raw Thrills): there those
+                          tolerances come out ~55x too big (a 2 km respawn-line
+                          cut, COM routes that never split). The corpus value
+                          is 2.5 (an SSX Tricky port), matching railcatch 0.625.
     ridepace <f>       <- optional gold PACE in world units/second, 5-500. Absent =
                           the Hook's own 45 u/s fallback, which is what every map
                           shipped before this header existed uses. It is only read
@@ -95,7 +104,7 @@ Sidecar format (one token line per point, invariant-culture floats):
 
 Usage:
     python3 gen_aipaths.py [--scale <f>] [--gravity <f>] [--physics-hz <f>] \
-        [--rail-catch <f>] [--ride-pace <f>] \
+        [--rail-catch <f>] [--route-scale <f>] [--ride-pace <f>] \
         [--platform <mac|windows|none>] [--source <slug>] \
         [--spawnsnap <both|raise|off>] [--mapversion <v>] \
         [--group <label>] [--order <n>] [--displayname <text>] \
@@ -185,6 +194,7 @@ def main(argv):
     gravity = None
     physics_hz = None
     rail_catch = None
+    route_scale = None
     ride_pace = None
     platform = None
     source = None
@@ -241,6 +251,18 @@ def main(argv):
             # build time rather than being silently ignored at load time.
             if not (0.02 <= rail_catch <= 100.0):
                 print("--rail-catch must be 0.02-100 metres, got %r" % val,
+                      file=sys.stderr)
+                return 2
+        elif flag == "--route-scale":
+            try:
+                route_scale = float(val)
+            except ValueError:
+                print("--route-scale value must be a float, got %r" % val,
+                      file=sys.stderr)
+                return 2
+            # Same bounds the Hook enforces on read.
+            if not (0.1 <= route_scale <= 20.0):
+                print("--route-scale must be 0.1-20, got %r" % val,
                       file=sys.stderr)
                 return 2
         elif flag == "--ride-pace":
@@ -351,6 +373,8 @@ def main(argv):
                 f.write("physicshz %r\n" % physics_hz)
             if rail_catch is not None:
                 f.write("railcatch %r\n" % rail_catch)
+            if route_scale is not None:
+                f.write("routescale %r\n" % route_scale)
             if ride_pace is not None:
                 f.write("ridepace %r\n" % ride_pace)
             if plat is not None and plat != "none":

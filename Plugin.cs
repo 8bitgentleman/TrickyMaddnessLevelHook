@@ -177,6 +177,23 @@ namespace TrickyMaddnessLevelHook
         // ssx/make_pace_table.py; gen_aipaths.py copies it into the sidecar. Same
         // lifetime rule as WorldScale — reset on built-in selection and menu return.
         internal static float MapRidePace = 0f;
+        // Per-map ROUTE scale, from the sidecar's `routescale` header: the
+        // SSX-equivalent world scale the route-building, respawn-marker, medal and
+        // rail-chaining tolerances are multiplied by. 0 = not declared, and then
+        // RouteScale falls back to WorldScale — bit-identical for every map shipped
+        // before this header existed.
+        //
+        // WHY: those tolerances are SSX-sized lengths (15 u respawn cut, 80 u
+        // spine half-width, 100 u minimum split piece) scaled by WorldScale, which
+        // assumes scale/100 is the SSX port factor. The Raw Thrills family and
+        // Mad Trix declare `scale 139` as a raw->Unity ratio instead (1 raw = 1.39 u),
+        // so the same tolerances come out ~55x too big: Ski Camp's respawn line was
+        // cut 2088 u short of the finish and COM routes never split. Same idea as
+        // MapRailCatch — the map states its real size. Same lifetime rule as
+        // WorldScale: reset on built-in selection and on menu return.
+        internal static float MapRouteScale = 0f;
+        internal static float RouteScale =>
+            MapRouteScale > 0f ? MapRouteScale : (WorldScale > 0f ? WorldScale : 1f);
         // The game's own fixedDeltaTime, captured once at Awake before anything
         // can have modified it. Restoring from a snapshot taken at apply time
         // would re-capture an already-overridden value if two custom maps loaded
@@ -831,13 +848,14 @@ namespace TrickyMaddnessLevelHook
             // its tick rate applied to every level loaded afterwards.
             if (!isCustomScene && pendingSceneName == null
                 && (WorldScale != 1f || MapGravityMultiplier != 1f || MapPhysicsHz != 0f
-                    || MapRailCatch != 0f || MapRidePace != 0f))
+                    || MapRailCatch != 0f || MapRidePace != 0f || MapRouteScale != 0f))
             {
                 WorldScale = 1f;
                 MapGravityMultiplier = 1f;
                 MapPhysicsHz = 0f;
                 MapRailCatch = 0f;
                 MapRidePace = 0f;
+                MapRouteScale = 0f;
                 ApplyPhysicsRate("left custom map");
                 Log.LogInfo("[Gravity] left custom map; world scale + gravity multiplier reset to 1");
             }
@@ -3662,7 +3680,7 @@ namespace TrickyMaddnessLevelHook
         // pads m_knotProfiles to the knot count itself; we only fill the widths.
         private static AIPathNetwork BuildAIPathNetwork(GameObject root, List<RouteDraft> routes, RouteDraft raceLine)
         {
-            float s = WorldScale > 0f ? WorldScale : 1f;
+            float s = RouteScale;
             int grounded = 0, seeded = 0, blind = 0, knots = 0, built = 0, trimmed = 0;
             int braceLips = 0, braceRoutes = 0;
             var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -4063,7 +4081,7 @@ namespace TrickyMaddnessLevelHook
 
             if (finish != null && len > 1f)
             {
-                float tol = Mathf.Max(15f * (WorldScale > 0f ? WorldScale : 1f), 0.02f * len);
+                float tol = Mathf.Max(15f * RouteScale, 0.02f * len);
                 ProjectOnRoute(pts, finish.position, out float sFinish, out float dFinish);
                 float sSpawn = 0f, dSpawn = float.MaxValue;
                 if (spawn != null) ProjectOnRoute(pts, spawn.position, out sSpawn, out dSpawn);
@@ -4172,7 +4190,7 @@ namespace TrickyMaddnessLevelHook
             float clipped = len;
             if (spawn != null && finish != null && len > 1f)
             {
-                float clipTol = Mathf.Max(15f * (WorldScale > 0f ? WorldScale : 1f), 0.02f * len);
+                float clipTol = Mathf.Max(15f * RouteScale, 0.02f * len);
                 float sSpawn, dSpawn, sFinish, dFinish;
                 ProjectOnRoute(raceLine.m_points, spawn.transform.position, out sSpawn, out dSpawn);
                 ProjectOnRoute(raceLine.m_points, finish.transform.position, out sFinish, out dFinish);
@@ -4285,7 +4303,7 @@ namespace TrickyMaddnessLevelHook
         // AI-path point line. Matched on the first token, so a point line can
         // never be mistaken for a header (or the reverse) on a prefix.
         private static readonly string[] SidecarHeaders =
-        { "scale", "gravity", "physicshz", "railcatch", "ridepace", "platform", "source", "spawnsnap",
+        { "scale", "gravity", "physicshz", "railcatch", "ridepace", "routescale", "platform", "source", "spawnsnap",
           "mapversion", "group", "order", "displayname" };
 
         private static bool IsHeaderLine(string line)
@@ -4433,6 +4451,35 @@ namespace TrickyMaddnessLevelHook
             catch (Exception e)
             {
                 Log.LogError($"[Rails] failed reading rail catch sidecar for {bundlePath}: {e}");
+                return 0f;
+            }
+        }
+
+        // Per-map route scale (see Plugin.MapRouteScale). Bounds are a typo guard:
+        // the SSX family spans 1-5 (Tricky 2.5, SSX 3 chains ~1.4).
+        internal static float ReadRouteScale(string bundlePath)
+        {
+            try
+            {
+                string sidecarPath = Path.ChangeExtension(bundlePath, ".aipaths.txt");
+                if (!File.Exists(sidecarPath)) return 0f;
+                foreach (var raw in File.ReadAllLines(sidecarPath))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("#")) continue;
+                    var t = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (!HeaderMatches(t, "routescale", Path.GetFileName(sidecarPath))) continue;
+                    float w = float.Parse(t[1], CultureInfo.InvariantCulture);
+                    if (w >= 0.1f && w <= 20f) return w;
+                    Log.LogWarning($"[AIPaths] sidecar {Path.GetFileName(sidecarPath)} declares routescale {t[1]} "
+                        + "(must be 0.1-20); ignoring, using worldScale");
+                    return 0f;
+                }
+                return 0f;
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"[AIPaths] failed reading route scale sidecar for {bundlePath}: {e}");
                 return 0f;
             }
         }
@@ -4918,6 +4965,7 @@ namespace TrickyMaddnessLevelHook
                 Plugin.MapPhysicsHz = 0f;
                 Plugin.MapRailCatch = 0f;
                 Plugin.MapRidePace = 0f;
+                Plugin.MapRouteScale = 0f;
                 Plugin.ApplyPhysicsRate("built-in level selected");
                 Plugin.BundleNativePlatform = null;
                 Plugin.BundleSource = Plugin.DefaultSource;
@@ -5024,6 +5072,13 @@ namespace TrickyMaddnessLevelHook
                 if (Plugin.MapRailCatch > 0f)
                     Plugin.Log.LogInfo($"[Rails] map declares railcatch {Plugin.MapRailCatch.ToString(CultureInfo.InvariantCulture)} m "
                         + $"(absolute); ignoring the 0.25 * worldScale default of {(0.25f * Plugin.WorldScale).ToString(CultureInfo.InvariantCulture)} m");
+
+                // Per-map route scale (0 = no declaration, route tolerances keep
+                // scaling with WorldScale).
+                Plugin.MapRouteScale = Plugin.ReadRouteScale(path);
+                if (Plugin.MapRouteScale > 0f)
+                    Plugin.Log.LogInfo($"[AIPaths] map declares routescale {Plugin.MapRouteScale.ToString(CultureInfo.InvariantCulture)} "
+                        + $"(worldScale {Plugin.WorldScale.ToString(CultureInfo.InvariantCulture)}); route/respawn/medal tolerances use it");
 
                 // Per-map gold pace from the same sidecar (0 = no declaration, keep
                 // the 45 u/s fallback). Only the medal rescue in DeriveBudgets reads
@@ -5818,7 +5873,7 @@ namespace TrickyMaddnessLevelHook
             var endSeg = direction > 0 ? segs[segs.Count - 1] : segs[0];
             Vector3 endPos = rail.transform.TransformPoint(endSeg.position);
             Vector3 endFwd = rail.transform.rotation * endSeg.rotation * Vector3.forward * direction;
-            float tolerance = 0.25f * Plugin.WorldScale;
+            float tolerance = 0.25f * Plugin.RouteScale;
 
             foreach (var other in Plugin.HookRails)
             {
