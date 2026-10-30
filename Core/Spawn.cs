@@ -115,6 +115,145 @@ namespace TrickyMaddnessLevelHook
             }
             else Log.LogInfo($"[Spawn] {label} already seated (y={p.y:F2}, terrain y={terrainY:F2}, slope {Mathf.Acos(cosSlope) * Mathf.Rad2Deg:F0}deg)");
         }
+
+        static BuildContext FindMakers()
+        {
+            //Find Main Starting Objects
+            var levelManagerMaker = FindAnyObjectByType<MakerLevelData>();
+
+            var MakerSpawnPoint = FindAnyObjectByType<MakerSpawnPoint>();
+            var MakerRespawnPoint = FindAnyObjectByType<MakerRespawnPoints>();
+            return new BuildContext { Maker = levelManagerMaker, SpawnPoint = MakerSpawnPoint, RespawnPoints = MakerRespawnPoint };
+        }
+
+        static void ApplyTestPin(BuildContext ctx)
+        {
+            var MakerSpawnPoint = ctx.SpawnPoint;
+            // Playtest start pin: relocate the START before anything reads it.
+            // Everything downstream comes off this one transform — the ground-snap
+            // below, the starting-gate prop, LevelManager.startingGate, the rider
+            // seat and StartLaunchRedirect — so moving it here moves the whole start
+            // sequence and nothing else has to know about pins. It deliberately does
+            // NOT move the AI paths or the race line: the field still starts at the
+            // top, which is why this is a testing tool and not a race setup.
+            string pinTrack = menuManager != null ? menuManager.lastLevelEntry.name : null;
+            if (TestPin != null && MakerSpawnPoint != null && TestPinMap != null
+                && (menuManager == null || !EntryIsTrack(menuManager.lastLevelEntry, TestPinMap)))
+            {
+                Log.LogInfo($"[TestPin] pin belongs to '{TestPinMap}' and this is '{pinTrack}' — starting at the gate");
+            }
+            else if (TestPin != null && MakerSpawnPoint != null)
+            {
+                MakerSpawnPoint.transform.position = TestPin.Value;
+                if (TestPinHasYaw)
+                    MakerSpawnPoint.transform.rotation = Quaternion.Euler(0f, TestPinYaw, 0f);
+                Log.LogWarning($"[TestPin] start moved to {TestPin.Value.ToString("0.##", CultureInfo.InvariantCulture)}"
+                    + (TestPinHasYaw ? $" facing {TestPinYaw.ToString("0.#", CultureInfo.InvariantCulture)} deg" : "")
+                    + " — this map is NOT starting at its gate");
+                RescuePinY(MakerSpawnPoint.transform);
+            }
+        }
+
+        static void SnapStartMarkers(BuildContext ctx)
+        {
+            var MakerSpawnPoint = ctx.SpawnPoint;
+            var MakerRespawnPoint = ctx.RespawnPoints;
+            // --- Spawn / respawn ground-snap -------------------------------------
+            // The game seats the rider's CharacterController CENTER on the
+            // startingGate transform with NO ground-check for the START (respawns
+            // get only a 0.5 m down-probe). Two authoring failure modes result: an
+            // authored Y BELOW the terrain (the capsule straddles the floor, PhysX
+            // depenetrates DOWNWARD, rider drops through — e.g. SSX3 peak runs B/D
+            // stitched from peak-cap + race-body regions), and an authored Y ABOVE
+            // it (an immediate drop the instant the run starts). SnapMarkerToGround
+            // casts onto the terrain and, per the map's spawnsnap mode, seats each
+            // marker exactly on the surface (Both) or only lifts it clear (Raise);
+            // Off leaves everything authored (gari's hand-tuned start). This makes
+            // XZ the only coordinate a map author has to get right — Y is computed.
+            if (Plugin.SpawnSnapMode != Plugin.SpawnSnap.Off)
+            {
+                Physics.SyncTransforms();
+                if (MakerSpawnPoint != null)
+                    SnapMarkerToGround(MakerSpawnPoint.transform, "start");
+                if (MakerRespawnPoint != null)
+                    foreach (Transform rp in MakerRespawnPoint.transform)
+                        SnapMarkerToGround(rp, rp.name);
+            }
+        }
+
+        static void PlaceStartingGate(BuildContext ctx)
+        {
+            var MakerSpawnPoint = ctx.SpawnPoint;
+            //Insert Starting Gate
+            // The gate is NOT a plain bar. Measured off the live prefab
+            // (resources.assets, GameObject "StartingGate", one child mesh "gate",
+            // 912 verts, 1.5 root scale): SEVEN posts at gate-local x = 0, +/-1.5,
+            // +/-3.0, +/-4.5 — pitch exactly 1.5 — plus end caps at +/-5.7/+/-5.963.
+            // The posts are the dividers BETWEEN riders, so a rider belongs in a
+            // bay at gateX +/- 0.75, 2.25, 3.75, 5.25. EIGHT bays, and that is the
+            // whole gate: it cannot hold nine.
+            //
+            // The lanes are pinned to MakerSpawnPoint, not to this prop — we hand
+            // LevelManager.startingGate the spawn point below, and LevelManager.Start
+            // seats every rider at startingGate.position + rotation * (x, 0.45, 0):
+            // AI i at x = -6.75 + 1.5i (plus another 1.5 once i passes the player's
+            // slot) and the player at x = -5.25 + 1.5*slot. Whatever the slot draw,
+            // the occupied set is always lanes k = 1..N at x = -6.75 + 1.5k for
+            // N = racerEntries.Count.
+            //
+            // So a bay lands on a lane only when gateX is a MULTIPLE OF 1.5. Mid-field
+            // is 0.75N - 6, which is a multiple of 1.5 for EVEN N only; at odd N it
+            // lands on a lane and every post spears a rider. Snap it down to the lane
+            // midpoint grid instead — exact for even N, one bay left at odd N.
+            //
+            // ⚠️ At N = 9 the field is 1.5 wider than the gate and lane 9 (x = +6.75)
+            // stands off the right end. That is geometry, not a tuning choice: eight
+            // bays, nine riders. Snapping DOWN rather than up is what makes the odd
+            // one out an AI every time — the player's slot is Random.Range(0,7), so
+            // the human is always in lanes 1..7 and never in the one left outside.
+            //
+            // ⚠️ N = 9 is STOCK behaviour, not something a mod sets. SelectLevel
+            // adds the player and THEN Min(8, pool.Count) opponents, so any roster
+            // big enough to fill the pool (>= 10 entries — CharacterHook's is)
+            // fields nine. TM's own courses never show it because the stock roster
+            // is five, which leaves the pool short and the pad-to-8 loop in charge.
+            //
+            // Non-race modes keep the mode-locked slot 3 (the Random.Range only runs
+            // when GetMode() is Race, which is 0 — the game brtrue's past it for
+            // Freestyle/TimeTrials) and leave racerEntries holding the PREVIOUS
+            // race's list, so the count is only meaningful in Race. A lone rider
+            // sits at -5.25 + 1.5*3 = -0.75, which is a bay when gateX is 0.
+            float gateX = 0f;   // lone rider at slot 3 (x = -0.75) => the -0.75 bay
+            if (menuManager != null && menuManager.GetMode() == MenuManager.Mode.Race)
+            {
+                var racers = menuManager.racerEntries;
+                int lanes = racers != null ? racers.Count : 0;
+                if (lanes > 0) gateX = 1.5f * (lanes / 2) - 6f;   // int division: snap down
+            }
+            var StartingGate = Resources.Load<GameObject>("game/startinggate");
+            GameObject StartingGateObject = Instantiate(StartingGate);
+            StartingGateObject.transform.position = MakerSpawnPoint.transform.TransformPoint(new Vector3(gateX,0,0.5f));
+            StartingGateObject.transform.rotation = MakerSpawnPoint.transform.rotation;
+        }
+
+        static void AddStartLaunchRedirect(BuildContext ctx)
+        {
+            var MakerSpawnPoint = ctx.SpawnPoint;
+            // Custom-map start-launch fix: steer the human's launch down-course for
+            // the first fraction of a second so a sideways start slope can't fling it
+            // off the line, and trim the whole field's launch speed evenly (the
+            // game's countdown kick is purely vertical — see StartLaunchRedirect).
+            // Spawn facing is horizontal by construction (LookRotation, y-zeroed).
+            if (MakerSpawnPoint != null)
+            {
+                Vector3 courseFwd = MakerSpawnPoint.transform.forward; courseFwd.y = 0f;
+                if (courseFwd.sqrMagnitude > 1e-4f)
+                {
+                    var rd = new GameObject("StartLaunchRedirect").AddComponent<StartLaunchRedirect>();
+                    rd.CourseForward = courseFwd.normalized;
+                }
+            }
+        }
     }
 
     // Seats each start lane on the snow. LevelManager.Start instantiates every rider at

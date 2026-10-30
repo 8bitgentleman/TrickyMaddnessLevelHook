@@ -18,208 +18,44 @@ namespace TrickyMaddnessLevelHook
 {
     public partial class Plugin
     {
+        // What LoadLevelManager's blocks share: the three maker objects found up
+        // front, the LevelManager once it is instantiated, and the race line once
+        // built (the respawn markers are sampled off it). Nothing else crosses blocks.
+        internal sealed class BuildContext
+        {
+            public MakerLevelData Maker;
+            public MakerSpawnPoint SpawnPoint;
+            public MakerRespawnPoints RespawnPoints;
+            public LevelManager LevelManager;
+            public RaceLine RaceLine;
+        }
+
         public static void LoadLevelManager()
         {
             LoadClock.Mark("Unity scene load (bundle -> MakerLevelData.Awake)");
-            //Find Main Starting Objects
-            var levelManagerMaker = FindAnyObjectByType<MakerLevelData>();
+            var ctx = FindMakers();
+            var levelManagerMaker = ctx.Maker;
 
-            var MakerSpawnPoint = FindAnyObjectByType<MakerSpawnPoint>();
-            var MakerRespawnPoint = FindAnyObjectByType<MakerRespawnPoints>();
+            // Order: pin -> ground-snap -> gate -> launch redirect. The pin moves the start before anything reads it (§25).
+            ApplyTestPin(ctx);
 
-            // Playtest start pin: relocate the START before anything reads it.
-            // Everything downstream comes off this one transform — the ground-snap
-            // below, the starting-gate prop, LevelManager.startingGate, the rider
-            // seat and StartLaunchRedirect — so moving it here moves the whole start
-            // sequence and nothing else has to know about pins. It deliberately does
-            // NOT move the AI paths or the race line: the field still starts at the
-            // top, which is why this is a testing tool and not a race setup.
-            string pinTrack = menuManager != null ? menuManager.lastLevelEntry.name : null;
-            if (TestPin != null && MakerSpawnPoint != null && TestPinMap != null
-                && (menuManager == null || !EntryIsTrack(menuManager.lastLevelEntry, TestPinMap)))
-            {
-                Log.LogInfo($"[TestPin] pin belongs to '{TestPinMap}' and this is '{pinTrack}' — starting at the gate");
-            }
-            else if (TestPin != null && MakerSpawnPoint != null)
-            {
-                MakerSpawnPoint.transform.position = TestPin.Value;
-                if (TestPinHasYaw)
-                    MakerSpawnPoint.transform.rotation = Quaternion.Euler(0f, TestPinYaw, 0f);
-                Log.LogWarning($"[TestPin] start moved to {TestPin.Value.ToString("0.##", CultureInfo.InvariantCulture)}"
-                    + (TestPinHasYaw ? $" facing {TestPinYaw.ToString("0.#", CultureInfo.InvariantCulture)} deg" : "")
-                    + " — this map is NOT starting at its gate");
-                RescuePinY(MakerSpawnPoint.transform);
-            }
+            SnapStartMarkers(ctx);
+            ApplyLevelEntry(ctx);
 
-            // --- Spawn / respawn ground-snap -------------------------------------
-            // The game seats the rider's CharacterController CENTER on the
-            // startingGate transform with NO ground-check for the START (respawns
-            // get only a 0.5 m down-probe). Two authoring failure modes result: an
-            // authored Y BELOW the terrain (the capsule straddles the floor, PhysX
-            // depenetrates DOWNWARD, rider drops through — e.g. SSX3 peak runs B/D
-            // stitched from peak-cap + race-body regions), and an authored Y ABOVE
-            // it (an immediate drop the instant the run starts). SnapMarkerToGround
-            // casts onto the terrain and, per the map's spawnsnap mode, seats each
-            // marker exactly on the surface (Both) or only lifts it clear (Raise);
-            // Off leaves everything authored (gari's hand-tuned start). This makes
-            // XZ the only coordinate a map author has to get right — Y is computed.
-            if (Plugin.SpawnSnapMode != Plugin.SpawnSnap.Off)
-            {
-                Physics.SyncTransforms();
-                if (MakerSpawnPoint != null)
-                    SnapMarkerToGround(MakerSpawnPoint.transform, "start");
-                if (MakerRespawnPoint != null)
-                    foreach (Transform rp in MakerRespawnPoint.transform)
-                        SnapMarkerToGround(rp, rp.name);
-            }
-            //Find AI Paths Object
+            PlaceStartingGate(ctx);
 
-            //Update Level Entry
-            // ⚠️ LevelEntry is a STRUCT, so this is a COPY. The threshold ARRAYS are
-            // reference fields and the copy shares them with the registered entry, so
-            // the six writes below land on the real entry in place — which is the only
-            // reason medals have worked at all while the write-back underneath was dead.
-            // Do NOT "tidy" these into `new float[] { ... }`: that would silently give
-            // every custom map the placeholder medal times from RegisterLevels back.
-            // freestyleTimeLimit is a plain float on the struct and does NOT alias.
-            // Rescue the medal times, freestyle clock and score thresholds on maps
-            // built before the importer learned to derive them (see DeriveBudgets).
-            // Runs BEFORE the six writes below, so the rescued values are what lands.
-            DeriveBudgets(levelManagerMaker);
-
-            var LevelEntry = menuManager.lastLevelEntry;
-
-            LevelEntry.timeThresholds[2] = levelManagerMaker.GoldTime;
-            LevelEntry.timeThresholds[1] = levelManagerMaker.SilverTime;
-            LevelEntry.timeThresholds[0] = levelManagerMaker.BronzeTime;
-
-            LevelEntry.scoreThresholds[2] = levelManagerMaker.GoldPoints;
-            LevelEntry.scoreThresholds[1] = levelManagerMaker.SilverPoints;
-            LevelEntry.scoreThresholds[0] = levelManagerMaker.BronzePoints;
-
-            // The map's own freestyle clock. Held out of 2.7.1 because the baked
-            // TimeLeft was `200f * build scale` — a placeholder nobody had ridden,
-            // which would have taken a 2.5-scale course from the 150 s every player
-            // has actually experienced to 500 s, sight unseen. That reason is now
-            // spent: TimeLeft is DERIVED from the measured route (importer) or
-            // rescued from it at load (DeriveBudgets), and both floor it at TM's
-            // stock 150 s. So no map's clock can get SHORTER than what players ride
-            // today — only the long courses that currently run out of time halfway
-            // down move at all, and only upward. (The one way past that floor is a
-            // course explicitly pinning gameplay.freestyleTime in its Overrides.json,
-            // which is a deliberate act by whoever set it.)
-            LevelEntry.freestyleTimeLimit = levelManagerMaker.TimeLeft;
-
-            // Seat the copy back through the property's setter. The `Traverse.Field`
-            // chain this replaces never resolved (see mSetLastLevelEntry) and said
-            // nothing about it, so the entry the menu keeps has always been the one
-            // RegisterLevels made up.
-            if (mSetLastLevelEntry == null)
-            {
-                Log.LogError("[Reflection] MenuManager.lastLevelEntry's setter no longer resolves — "
-                    + "the level entry is NOT updated; run `python3 tm_re_baseline.py check`.");
-            }
-            else
-            {
-                mSetLastLevelEntry.Invoke(menuManager, new object[] { LevelEntry });
-            }
-
-            // ...and the freestyle clock separately, because the write-back above is
-            // one load too late for it. MenuManager copies lastLevelEntry's limit into
-            // its own public `freestyleTimeLimit` during LoadScene, which is already
-            // done by the time this Awake postfix runs; LevelManager.Start then reads
-            // THAT field (`time = MenuManager.Instance.freestyleTimeLimit`) and Start
-            // has not run yet. Without this line the author's clock would only take
-            // effect on a second run of the map. The field is public — no reflection,
-            // and a TM rename is a compile error rather than a silent miss.
-            // ⚠️ The twin of the write above, and BOTH are needed: the write-back
-            // above is one load too late on its own, because MenuManager has already
-            // copied lastLevelEntry's limit into this public field during LoadScene
-            // and LevelManager.Start reads THIS field, not the entry.
-            if (levelManagerMaker.TimeLeft > 0f)
-            {
-                if (!Mathf.Approximately(levelManagerMaker.TimeLeft, menuManager.freestyleTimeLimit))
-                    Log.LogInfo($"[LevelEntry] freestyle clock {menuManager.freestyleTimeLimit:0} s "
-                        + $"-> {levelManagerMaker.TimeLeft:0} s (this map's own)");
-                LoadClock.Mark("LevelEntry");
-                menuManager.freestyleTimeLimit = levelManagerMaker.TimeLeft;
-            }
-
-            //Insert Starting Gate
-            // The gate is NOT a plain bar. Measured off the live prefab
-            // (resources.assets, GameObject "StartingGate", one child mesh "gate",
-            // 912 verts, 1.5 root scale): SEVEN posts at gate-local x = 0, +/-1.5,
-            // +/-3.0, +/-4.5 — pitch exactly 1.5 — plus end caps at +/-5.7/+/-5.963.
-            // The posts are the dividers BETWEEN riders, so a rider belongs in a
-            // bay at gateX +/- 0.75, 2.25, 3.75, 5.25. EIGHT bays, and that is the
-            // whole gate: it cannot hold nine.
-            //
-            // The lanes are pinned to MakerSpawnPoint, not to this prop — we hand
-            // LevelManager.startingGate the spawn point below, and LevelManager.Start
-            // seats every rider at startingGate.position + rotation * (x, 0.45, 0):
-            // AI i at x = -6.75 + 1.5i (plus another 1.5 once i passes the player's
-            // slot) and the player at x = -5.25 + 1.5*slot. Whatever the slot draw,
-            // the occupied set is always lanes k = 1..N at x = -6.75 + 1.5k for
-            // N = racerEntries.Count.
-            //
-            // So a bay lands on a lane only when gateX is a MULTIPLE OF 1.5. Mid-field
-            // is 0.75N - 6, which is a multiple of 1.5 for EVEN N only; at odd N it
-            // lands on a lane and every post spears a rider. Snap it down to the lane
-            // midpoint grid instead — exact for even N, one bay left at odd N.
-            //
-            // ⚠️ At N = 9 the field is 1.5 wider than the gate and lane 9 (x = +6.75)
-            // stands off the right end. That is geometry, not a tuning choice: eight
-            // bays, nine riders. Snapping DOWN rather than up is what makes the odd
-            // one out an AI every time — the player's slot is Random.Range(0,7), so
-            // the human is always in lanes 1..7 and never in the one left outside.
-            //
-            // ⚠️ N = 9 is STOCK behaviour, not something a mod sets. SelectLevel
-            // adds the player and THEN Min(8, pool.Count) opponents, so any roster
-            // big enough to fill the pool (>= 10 entries — CharacterHook's is)
-            // fields nine. TM's own courses never show it because the stock roster
-            // is five, which leaves the pool short and the pad-to-8 loop in charge.
-            //
-            // Non-race modes keep the mode-locked slot 3 (the Random.Range only runs
-            // when GetMode() is Race, which is 0 — the game brtrue's past it for
-            // Freestyle/TimeTrials) and leave racerEntries holding the PREVIOUS
-            // race's list, so the count is only meaningful in Race. A lone rider
-            // sits at -5.25 + 1.5*3 = -0.75, which is a bay when gateX is 0.
-            float gateX = 0f;   // lone rider at slot 3 (x = -0.75) => the -0.75 bay
-            if (menuManager != null && menuManager.GetMode() == MenuManager.Mode.Race)
-            {
-                var racers = menuManager.racerEntries;
-                int lanes = racers != null ? racers.Count : 0;
-                if (lanes > 0) gateX = 1.5f * (lanes / 2) - 6f;   // int division: snap down
-            }
-            var StartingGate = Resources.Load<GameObject>("game/startinggate");
-            GameObject StartingGateObject = Instantiate(StartingGate);
-            StartingGateObject.transform.position = MakerSpawnPoint.transform.TransformPoint(new Vector3(gateX,0,0.5f));
-            StartingGateObject.transform.rotation = MakerSpawnPoint.transform.rotation;
-
-            // Custom-map start-launch fix: steer the human's launch down-course for
-            // the first fraction of a second so a sideways start slope can't fling it
-            // off the line, and trim the whole field's launch speed evenly (the
-            // game's countdown kick is purely vertical — see StartLaunchRedirect).
-            // Spawn facing is horizontal by construction (LookRotation, y-zeroed).
-            if (MakerSpawnPoint != null)
-            {
-                Vector3 courseFwd = MakerSpawnPoint.transform.forward; courseFwd.y = 0f;
-                if (courseFwd.sqrMagnitude > 1e-4f)
-                {
-                    var rd = new GameObject("StartLaunchRedirect").AddComponent<StartLaunchRedirect>();
-                    rd.CourseForward = courseFwd.normalized;
-                }
-            }
+            AddStartLaunchRedirect(ctx);
 
             //Insert Level Manager
             var LevelManagerObject = Resources.Load<GameObject>("game/levelmanager");
-            var gameObject = Instantiate(LevelManagerObject, levelManagerMaker.transform);
+            var gameObject = Instantiate(LevelManagerObject, ctx.Maker.transform);
 
             var levelManager = gameObject.GetComponent<LevelManager>();
+            ctx.LevelManager = levelManager;
 
             //Set Level Manager Data Points
-            SetGameField(fStartingGate, "LevelManager.startingGate", levelManager, MakerSpawnPoint.transform);
-            SetGameField(fRespawnPointsParent, "LevelManager.respawnPointsParent", levelManager, MakerRespawnPoint.transform);
+            SetGameField(fStartingGate, "LevelManager.startingGate", levelManager, ctx.SpawnPoint.transform);
+            SetGameField(fRespawnPointsParent, "LevelManager.respawnPointsParent", levelManager, ctx.RespawnPoints.transform);
             SetGameField(fSnowflakes, "LevelManager.snowflakes", levelManager, new GameObject("Temp")); //FIX to get all snowflakes and apply
 
             //Create UI Hooks
@@ -233,261 +69,14 @@ namespace TrickyMaddnessLevelHook
                 CanvasObjects[i].Generate(gameObject1.GetComponent<TextMeshProUGUI>());
             }
 
-            //Convert From Make Rails to Game Rails
-            var RailObjects = FindObjectsByType(typeof(MakerRails), FindObjectsSortMode.None) as MakerRails[];
-            int railColliders = 0, railSegments = 0;
-            HookRails.Clear();
-            GameObject probeRailGO = null;
-            List<Rail.Segment> probeSegments = null;
-            for (int i = 0; i < RailObjects.Length; i++)
-            {
-                List<Rail.Segment> NewSegments = BuildRailSegments(RailObjects[i]);
+            ConvertRails(ctx);
 
-                // Since TM 25714710 a rail's path lives on a sibling RailInstanceData,
-                // which Rail.Awake caches with GetComponent — so the data component
-                // must exist BEFORE the Rail is added, or Awake caches null and every
-                // rail falls back to its transform position (ungrindable, no error).
-                var NewData = RailObjects[i].gameObject.AddComponent<RailInstanceData>();
-                NewData.segments = NewSegments;
-                var NewRail = RailObjects[i].gameObject.AddComponent<RailInvis>();
+            BuildAIPaths(ctx);
 
-                // The bool is checked, not discarded: on a miss TryParse yields
-                // default(RailMaterial) silently, which is indistinguishable from an
-                // authored value and just changes the grind sound/FX for no visible reason.
-                Rail.RailMaterial material1;
-                if (!Enum.TryParse(RailObjects[i].Materials.ToString(), out material1))
-                    Log.LogWarning($"[Rails] '{RailObjects[i].gameObject.name}' declares material "
-                        + $"'{RailObjects[i].Materials}', which has no match in Rail.RailMaterial — "
-                        + $"using {material1} instead (grind sound/FX will be wrong on this rail).");
+            // Before the respawn markers, which are sampled off ctx.RaceLine.
+            BuildRaceLine(ctx);
 
-                NewRail.material = material1;
-
-                // Grind detection BoxCast/SphereCasts layer 9 ("Rail") and then does
-                // GetComponent<Rail>() on the collider's OWN GameObject — so a rail
-                // is only grindable with a collider on this exact GO, on layer 9.
-                // Maker rails ship with neither. (MakerRails.Start() sets the layer
-                // too, but a frame after scene build — set it now.)
-                RailObjects[i].gameObject.layer = 9;
-                railSegments += NewSegments.Count;
-                if (NewSegments.Count < 2)
-                {
-                    Log.LogDebug($"[Rails] '{RailObjects[i].name}': {NewSegments.Count} segment(s), no collider built");
-                    continue;
-                }
-                if (RailObjects[i].GetComponent<Collider>() != null)
-                {
-                    Log.LogDebug($"[Rails] '{RailObjects[i].name}': already has a collider, left as-is");
-                    continue;
-                }
-                if (BuildRailCollider(RailObjects[i].gameObject, NewSegments))
-                {
-                    railColliders++;
-                    HookRails.Add(NewRail);
-                    if (probeRailGO == null)
-                    {
-                        probeRailGO = RailObjects[i].gameObject;
-                        probeSegments = NewSegments;
-                    }
-                }
-            }
-            if (RailObjects.Length > 0)
-                Log.LogInfo($"[Rails] converted {RailObjects.Length} rail(s), built {railColliders} collider(s), {railSegments} segment(s) total");
-            LoadClock.Mark("Rails");
-            if (railColliderProbe.Value && probeRailGO != null && Instance != null)
-                Instance.StartCoroutine(RailProbe(probeRailGO, probeSegments));
-
-            // World-space objects hang off LevelData, never levelManager: the game's
-            // LevelManager root is a Screen Space - Overlay Canvas, which Unity
-            // re-lays-out on any window resize/fullscreen toggle, dragging every
-            // child with it (respawns landed 1.35x-scaled about z=0, under the course).
-            GameObject AIParent = new GameObject("AI Paths Parent");
-            AIParent.transform.parent = levelManagerMaker.transform;
-
-            // MakerAIPath.m_points is a List of a user-defined [Serializable]
-            // nested class, and Unity fails to deserialize those for
-            // runtime-loaded (BepInEx) assemblies — on custom maps every list
-            // comes back empty (engine limitation; lists of engine value types
-            // like the race line's List<Vector3> are fine). The maker copy below
-            // still wins whenever data DID arrive (future fixed bundles);
-            // otherwise the routes are rebuilt from a plain-text sidecar next to
-            // the .asset, or, failing that, from the race line.
-            var routes = new List<RouteDraft>();
-            var MakerAIPaths = FindObjectsByType(typeof(MakerAIPath), FindObjectsSortMode.None) as MakerAIPath[];
-            for (int i = 0; i < MakerAIPaths.Length; i++)
-            {
-                if (MakerAIPaths[i].m_points == null || MakerAIPaths[i].m_points.Count < 2)
-                    continue;
-                var d = new RouteDraft { Name = "AIPath3D (maker " + routes.Count.ToString(CultureInfo.InvariantCulture) + ")" };
-                foreach (var mp in MakerAIPaths[i].m_points)
-                {
-                    // Maker points are 2D (world XZ), like the old AIPath's.
-                    d.Points.Add(new Vector3(mp.position.x, float.NaN, mp.position.y));
-                    d.Windups.Add(mp.windup);
-                }
-                routes.Add(d);
-            }
-
-            var raceLineDraft = RaceLineRoute();
-            if (routes.Count > 0)
-            {
-                Log.LogInfo($"[AIPaths] copied {routes.Count} maker path(s) from the bundle (sidecar ignored)");
-                LoadClock.Mark("AIPaths");
-            }
-            else
-            {
-                // Build BOTH sources into the same pool: SSX branch fragments to race
-                // on, and the race line as the one route guaranteed to reach the
-                // finish. AIPathNetwork.TryAcquirePath keeps a rider on its current
-                // route while inside that route's volume and, once it leaves (a
-                // fragment end), re-picks the best-scoring volume it is inside — so
-                // the race line is the backstop a stranded rider falls back onto.
-                // Toggle MultiPathAI off for race-line-only racing without a rebuild.
-                int built = raceLineDraft == null ? 0 : 1;
-                if (raceLineDraft != null) routes.Add(raceLineDraft);
-                int branches = 0;
-                if (multiPathAI.Value || built == 0)
-                {
-                    var side = SidecarRoutes();
-                    branches = side.Count;
-                    routes.AddRange(side);
-                }
-                if (built + branches == 0)
-                    Log.LogWarning("[AIPaths] no AI path data (maker points empty, no usable race line, no sidecar); AI will hold the start gate but cannot race");
-                else
-                    Log.LogInfo($"[AIPaths] AI pool: {built} race-line path + {branches} branch path(s) = {built + branches} total"
-                        + (multiPathAI.Value ? "" : " (MultiPathAI off)"));
-                    LoadClock.Mark("AIPaths");
-            }
-            var network = BuildAIPathNetwork(AIParent, routes, raceLineDraft);
-            LoadClock.Mark("BuildAIPathNetwork");
-            SetGameField(fPathNetwork, "LevelManager.pathNetwork", levelManager, network);
-
-            // ⚠️ A map with no MakerRaceLine is legal — this lookup can and does
-            // return null, and dereferencing it threw an NRE straight out of a Unity
-            // Awake postfix. That lands in Player.log and NOWHERE in the BepInEx log
-            // (root CLAUDE.md, HOOK_NOTES §23), and it aborted the REST of
-            // LoadLevelManager: no respawn markers, no glass strip, no wind volumes,
-            // no skydome, no destructibles — a half-imported map with a clean log.
-            // BuildAIPathFromRaceLine already null-checks the same lookup; this is
-            // the other half of that guard.
-            var TempMakerRaceLine = FindAnyObjectByType<MakerRaceLine>();
-            RaceLine TempRaceLine = null;
-            if (TempMakerRaceLine == null || TempMakerRaceLine.m_points == null
-                || TempMakerRaceLine.m_points.Count == 0)
-            {
-                Log.LogWarning("[RaceLine] no usable MakerRaceLine in this map ("
-                    + (TempMakerRaceLine == null
-                        ? "no MakerRaceLine component anywhere in the scene"
-                        : "MakerRaceLine present but its m_points list is empty")
-                    + ") — LevelManager.raceLine stays NULL. Rank/position, race-line respawn "
-                    + "markers and the AI mod's race terminator are all off for this course; the "
-                    + "rest of the level build continues.");
-            }
-            else
-            {
-                TempRaceLine = TempMakerRaceLine.gameObject.AddComponent<RaceLine>();
-
-                TempRaceLine.m_points = new List<RaceLine.Point>();
-
-                for (int i = 0;i < TempMakerRaceLine.m_points.Count;i++)
-                {
-                    var RaceLinePoint = new RaceLine.Point();
-
-                    RaceLinePoint.position = TempMakerRaceLine.m_points[i];
-
-                    TempRaceLine.m_points.Add(RaceLinePoint);
-                }
-
-                TempRaceLine.CalculateSegments();
-                LoadClock.Mark("RaceLine.CalculateSegments");
-
-                SetGameField(fRaceLine, "LevelManager.raceLine", levelManager, TempRaceLine);
-            }
-
-            // Respawn markers ALONG the race line (MECHANICS_DIAGNOSIS Bug 2).
-            // The maker respawn points are SSX per-racer branch-line HEADS,
-            // scattered off the ridden route; the game's Respawn picks the nearest
-            // marker, so a fallen rider gets teleported to an off-route pocket they
-            // "have never seen" — worse at 2.5x marker spacing. Replace the parent
-            // with markers sampled on the reconstructed race line, each facing
-            // down-line (Respawn's down-course 2x penalty reads child.forward), so
-            // every respawn drops the rider back ONTO the route facing downhill.
-            // The game re-enumerates children live per respawn, so runtime-built
-            // markers just work. Falls back to the maker parent if the race line is
-            // too short to sample.
-            // ⚠️ Seat these on the snow, and DROP the ones with nothing under them.
-            // SnapMarkerToGround above only ever sees the MAKER markers, which this
-            // block then throws away — so before this, every race-line respawn was
-            // used exactly as authored. That is fine for an SSX/SSX3 race line
-            // (ground-following AI data) and wrong for one derived from a recorded
-            // human run: alps0101's ghost line has 53% of its points more than 5 m
-            // up and 13% more than 40 m, so half its respawns were into freefall.
-            // Dropping the unreachable ones beats snapping them, because what is
-            // under a big jump is not the course (one alps0101 point flies a ravine
-            // whose floor is 122 m down); the game picks the NEAREST marker and
-            // they sit ~25 m apart, so the neighbours cover the gap. Gated on
-            // spawnsnap so a map that opts out (gari) keeps its authored markers.
-            // Outside the race-line block on purpose: the wedge watchdog needs no
-            // markers, so it must still be cleared on a map that has no race line.
-            Snowboarder_AirborneStuckGuard.ResetState();
-            AvalancheHazard.ResetState();
-            if (TempRaceLine != null && TempRaceLine.m_points != null && TempRaceLine.m_points.Count >= 2)
-            {
-                var respawnParent = new GameObject("Respawn Points (race line)");
-                respawnParent.transform.parent = levelManagerMaker.transform;
-                // Static, so it outlives the scene it belongs to: a second map would
-                // otherwise escalate riders onto the previous map's markers.
-                Plugin.RaceLineRespawns.Clear();
-                Snowboarder_Respawn.ResetLoopState();
-                // Scene-scoped for the same reason DeriveBudgets is: a global lookup
-                // on a second load would cut this line at the PREVIOUS map's finish.
-                var finishLine = FindInScene<MakerFinishLine>(levelManagerMaker.gameObject.scene);
-                bool seat = Plugin.SpawnSnapMode != Plugin.SpawnSnap.Off;
-                var rpts = RespawnLine(TempRaceLine.m_points,
-                    MakerSpawnPoint != null ? MakerSpawnPoint.transform : null,
-                    finishLine != null ? finishLine.transform : null, seat, out string lineNote);
-                if (lineNote != null) Log.LogInfo($"[Respawn] marker line: {lineNote}");
-                int made = 0, moved = 0, dropped = 0;
-                for (int i = 0; i < rpts.Count; i++)
-                {
-                    Vector3 p = rpts[i];
-                    if (seat)
-                    {
-                        if (!GroundSeat(p, out float sy, out _, out _)) { dropped++; continue; }
-                        if (Plugin.SpawnSnapMode == Plugin.SpawnSnap.Raise) sy = Mathf.Max(p.y, sy);
-                        if (Mathf.Abs(sy - p.y) > 0.01f) moved++;
-                        p.y = sy;
-                    }
-                    var go = new GameObject("Respawn " + i.ToString(CultureInfo.InvariantCulture));
-                    go.transform.parent = respawnParent.transform;
-                    go.transform.position = p;
-                    Vector3 fwd = (i + 1 < rpts.Count)
-                        ? rpts[i + 1] - rpts[i]
-                        : rpts[i] - rpts[i - 1];
-                    fwd.y = 0f;
-                    if (fwd.sqrMagnitude > 1e-6f)
-                        go.transform.rotation = Quaternion.LookRotation(fwd.normalized, Vector3.up);
-                    Plugin.RaceLineRespawns.Add(go.transform);
-                    made++;
-                }
-                // Every point airborne means the cast never found the terrain at all
-                // (bad ground layers, say) — keep the maker markers rather than hand
-                // the game an empty parent, which would strand a fallen rider.
-                if (made > 0)
-                {
-                    SetGameField(fRespawnPointsParent, "LevelManager.respawnPointsParent", levelManager, respawnParent.transform);
-                    Log.LogInfo($"[Respawn] built {made} race-line respawn marker(s) ({moved} seated on ground, {dropped} dropped as airborne), replacing maker branch-head markers");
-                    LoadClock.Mark("Respawn");
-                }
-                else
-                {
-                    UnityEngine.Object.Destroy(respawnParent);
-                    // The markers we just recorded are about to be destroyed; leaving
-                    // them listed would have the loop guard escalate onto nulls.
-                    Plugin.RaceLineRespawns.Clear();
-                    Log.LogWarning($"[Respawn] all {rpts.Count} race-line points are airborne — keeping maker branch-head markers");
-                }
-            }
+            BuildRaceLineRespawns(ctx);
 
             // Kill the "bouncy glass" (MECHANICS_DIAGNOSIS Bug 4). SSX glass panes
             // import as SOLID thin double-sided MeshColliders on layer 8; a

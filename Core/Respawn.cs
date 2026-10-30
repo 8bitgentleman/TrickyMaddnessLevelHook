@@ -298,6 +298,173 @@ namespace TrickyMaddnessLevelHook
                     + $"=> gold {ld.GoldPoints:0} / silver {ld.SilverPoints:0} / bronze {ld.BronzePoints:0}.");
             }
         }
+
+        static void ApplyLevelEntry(BuildContext ctx)
+        {
+            var levelManagerMaker = ctx.Maker;
+            //Update Level Entry
+            // ⚠️ LevelEntry is a STRUCT, so this is a COPY. The threshold ARRAYS are
+            // reference fields and the copy shares them with the registered entry, so
+            // the six writes below land on the real entry in place — which is the only
+            // reason medals have worked at all while the write-back underneath was dead.
+            // Do NOT "tidy" these into `new float[] { ... }`: that would silently give
+            // every custom map the placeholder medal times from RegisterLevels back.
+            // freestyleTimeLimit is a plain float on the struct and does NOT alias.
+            // Rescue the medal times, freestyle clock and score thresholds on maps
+            // built before the importer learned to derive them (see DeriveBudgets).
+            // Runs BEFORE the six writes below, so the rescued values are what lands.
+            DeriveBudgets(levelManagerMaker);
+
+            var LevelEntry = menuManager.lastLevelEntry;
+
+            LevelEntry.timeThresholds[2] = levelManagerMaker.GoldTime;
+            LevelEntry.timeThresholds[1] = levelManagerMaker.SilverTime;
+            LevelEntry.timeThresholds[0] = levelManagerMaker.BronzeTime;
+
+            LevelEntry.scoreThresholds[2] = levelManagerMaker.GoldPoints;
+            LevelEntry.scoreThresholds[1] = levelManagerMaker.SilverPoints;
+            LevelEntry.scoreThresholds[0] = levelManagerMaker.BronzePoints;
+
+            // The map's own freestyle clock. Held out of 2.7.1 because the baked
+            // TimeLeft was `200f * build scale` — a placeholder nobody had ridden,
+            // which would have taken a 2.5-scale course from the 150 s every player
+            // has actually experienced to 500 s, sight unseen. That reason is now
+            // spent: TimeLeft is DERIVED from the measured route (importer) or
+            // rescued from it at load (DeriveBudgets), and both floor it at TM's
+            // stock 150 s. So no map's clock can get SHORTER than what players ride
+            // today — only the long courses that currently run out of time halfway
+            // down move at all, and only upward. (The one way past that floor is a
+            // course explicitly pinning gameplay.freestyleTime in its Overrides.json,
+            // which is a deliberate act by whoever set it.)
+            LevelEntry.freestyleTimeLimit = levelManagerMaker.TimeLeft;
+
+            // Seat the copy back through the property's setter. The `Traverse.Field`
+            // chain this replaces never resolved (see mSetLastLevelEntry) and said
+            // nothing about it, so the entry the menu keeps has always been the one
+            // RegisterLevels made up.
+            if (mSetLastLevelEntry == null)
+            {
+                Log.LogError("[Reflection] MenuManager.lastLevelEntry's setter no longer resolves — "
+                    + "the level entry is NOT updated; run `python3 tm_re_baseline.py check`.");
+            }
+            else
+            {
+                mSetLastLevelEntry.Invoke(menuManager, new object[] { LevelEntry });
+            }
+
+            // ...and the freestyle clock separately, because the write-back above is
+            // one load too late for it. MenuManager copies lastLevelEntry's limit into
+            // its own public `freestyleTimeLimit` during LoadScene, which is already
+            // done by the time this Awake postfix runs; LevelManager.Start then reads
+            // THAT field (`time = MenuManager.Instance.freestyleTimeLimit`) and Start
+            // has not run yet. Without this line the author's clock would only take
+            // effect on a second run of the map. The field is public — no reflection,
+            // and a TM rename is a compile error rather than a silent miss.
+            // ⚠️ The twin of the write above, and BOTH are needed: the write-back
+            // above is one load too late on its own, because MenuManager has already
+            // copied lastLevelEntry's limit into this public field during LoadScene
+            // and LevelManager.Start reads THIS field, not the entry.
+            if (levelManagerMaker.TimeLeft > 0f)
+            {
+                if (!Mathf.Approximately(levelManagerMaker.TimeLeft, menuManager.freestyleTimeLimit))
+                    Log.LogInfo($"[LevelEntry] freestyle clock {menuManager.freestyleTimeLimit:0} s "
+                        + $"-> {levelManagerMaker.TimeLeft:0} s (this map's own)");
+                LoadClock.Mark("LevelEntry");
+                menuManager.freestyleTimeLimit = levelManagerMaker.TimeLeft;
+            }
+        }
+
+        static void BuildRaceLineRespawns(BuildContext ctx)
+        {
+            var levelManagerMaker = ctx.Maker;
+            var MakerSpawnPoint = ctx.SpawnPoint;
+            var levelManager = ctx.LevelManager;
+            var TempRaceLine = ctx.RaceLine;
+            // Respawn markers ALONG the race line (MECHANICS_DIAGNOSIS Bug 2).
+            // The maker respawn points are SSX per-racer branch-line HEADS,
+            // scattered off the ridden route; the game's Respawn picks the nearest
+            // marker, so a fallen rider gets teleported to an off-route pocket they
+            // "have never seen" — worse at 2.5x marker spacing. Replace the parent
+            // with markers sampled on the reconstructed race line, each facing
+            // down-line (Respawn's down-course 2x penalty reads child.forward), so
+            // every respawn drops the rider back ONTO the route facing downhill.
+            // The game re-enumerates children live per respawn, so runtime-built
+            // markers just work. Falls back to the maker parent if the race line is
+            // too short to sample.
+            // ⚠️ Seat these on the snow, and DROP the ones with nothing under them.
+            // SnapMarkerToGround above only ever sees the MAKER markers, which this
+            // block then throws away — so before this, every race-line respawn was
+            // used exactly as authored. That is fine for an SSX/SSX3 race line
+            // (ground-following AI data) and wrong for one derived from a recorded
+            // human run: alps0101's ghost line has 53% of its points more than 5 m
+            // up and 13% more than 40 m, so half its respawns were into freefall.
+            // Dropping the unreachable ones beats snapping them, because what is
+            // under a big jump is not the course (one alps0101 point flies a ravine
+            // whose floor is 122 m down); the game picks the NEAREST marker and
+            // they sit ~25 m apart, so the neighbours cover the gap. Gated on
+            // spawnsnap so a map that opts out (gari) keeps its authored markers.
+            // Outside the race-line block on purpose: the wedge watchdog needs no
+            // markers, so it must still be cleared on a map that has no race line.
+            Snowboarder_AirborneStuckGuard.ResetState();
+            AvalancheHazard.ResetState();
+            if (TempRaceLine != null && TempRaceLine.m_points != null && TempRaceLine.m_points.Count >= 2)
+            {
+                var respawnParent = new GameObject("Respawn Points (race line)");
+                respawnParent.transform.parent = levelManagerMaker.transform;
+                // Static, so it outlives the scene it belongs to: a second map would
+                // otherwise escalate riders onto the previous map's markers.
+                Plugin.RaceLineRespawns.Clear();
+                Snowboarder_Respawn.ResetLoopState();
+                // Scene-scoped for the same reason DeriveBudgets is: a global lookup
+                // on a second load would cut this line at the PREVIOUS map's finish.
+                var finishLine = FindInScene<MakerFinishLine>(levelManagerMaker.gameObject.scene);
+                bool seat = Plugin.SpawnSnapMode != Plugin.SpawnSnap.Off;
+                var rpts = RespawnLine(TempRaceLine.m_points,
+                    MakerSpawnPoint != null ? MakerSpawnPoint.transform : null,
+                    finishLine != null ? finishLine.transform : null, seat, out string lineNote);
+                if (lineNote != null) Log.LogInfo($"[Respawn] marker line: {lineNote}");
+                int made = 0, moved = 0, dropped = 0;
+                for (int i = 0; i < rpts.Count; i++)
+                {
+                    Vector3 p = rpts[i];
+                    if (seat)
+                    {
+                        if (!GroundSeat(p, out float sy, out _, out _)) { dropped++; continue; }
+                        if (Plugin.SpawnSnapMode == Plugin.SpawnSnap.Raise) sy = Mathf.Max(p.y, sy);
+                        if (Mathf.Abs(sy - p.y) > 0.01f) moved++;
+                        p.y = sy;
+                    }
+                    var go = new GameObject("Respawn " + i.ToString(CultureInfo.InvariantCulture));
+                    go.transform.parent = respawnParent.transform;
+                    go.transform.position = p;
+                    Vector3 fwd = (i + 1 < rpts.Count)
+                        ? rpts[i + 1] - rpts[i]
+                        : rpts[i] - rpts[i - 1];
+                    fwd.y = 0f;
+                    if (fwd.sqrMagnitude > 1e-6f)
+                        go.transform.rotation = Quaternion.LookRotation(fwd.normalized, Vector3.up);
+                    Plugin.RaceLineRespawns.Add(go.transform);
+                    made++;
+                }
+                // Every point airborne means the cast never found the terrain at all
+                // (bad ground layers, say) — keep the maker markers rather than hand
+                // the game an empty parent, which would strand a fallen rider.
+                if (made > 0)
+                {
+                    SetGameField(fRespawnPointsParent, "LevelManager.respawnPointsParent", levelManager, respawnParent.transform);
+                    Log.LogInfo($"[Respawn] built {made} race-line respawn marker(s) ({moved} seated on ground, {dropped} dropped as airborne), replacing maker branch-head markers");
+                    LoadClock.Mark("Respawn");
+                }
+                else
+                {
+                    UnityEngine.Object.Destroy(respawnParent);
+                    // The markers we just recorded are about to be destroyed; leaving
+                    // them listed would have the loop guard escalate onto nulls.
+                    Plugin.RaceLineRespawns.Clear();
+                    Log.LogWarning($"[Respawn] all {rpts.Count} race-line points are airborne — keeping maker branch-head markers");
+                }
+            }
+        }
     }
 
     // The game's OOB contact handler, and the reason this map's frame rate collapses

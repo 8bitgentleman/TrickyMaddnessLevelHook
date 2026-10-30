@@ -586,5 +586,123 @@ namespace TrickyMaddnessLevelHook
             Log.LogInfo($"[AIPaths] race line gives 1 complete path ({d.Points.Count} points)");
             return d;
         }
+
+        static void BuildAIPaths(BuildContext ctx)
+        {
+            var levelManagerMaker = ctx.Maker;
+            var levelManager = ctx.LevelManager;
+            // World-space objects hang off LevelData, never levelManager: the game's
+            // LevelManager root is a Screen Space - Overlay Canvas, which Unity
+            // re-lays-out on any window resize/fullscreen toggle, dragging every
+            // child with it (respawns landed 1.35x-scaled about z=0, under the course).
+            GameObject AIParent = new GameObject("AI Paths Parent");
+            AIParent.transform.parent = levelManagerMaker.transform;
+
+            // MakerAIPath.m_points is a List of a user-defined [Serializable]
+            // nested class, and Unity fails to deserialize those for
+            // runtime-loaded (BepInEx) assemblies — on custom maps every list
+            // comes back empty (engine limitation; lists of engine value types
+            // like the race line's List<Vector3> are fine). The maker copy below
+            // still wins whenever data DID arrive (future fixed bundles);
+            // otherwise the routes are rebuilt from a plain-text sidecar next to
+            // the .asset, or, failing that, from the race line.
+            var routes = new List<RouteDraft>();
+            var MakerAIPaths = FindObjectsByType(typeof(MakerAIPath), FindObjectsSortMode.None) as MakerAIPath[];
+            for (int i = 0; i < MakerAIPaths.Length; i++)
+            {
+                if (MakerAIPaths[i].m_points == null || MakerAIPaths[i].m_points.Count < 2)
+                    continue;
+                var d = new RouteDraft { Name = "AIPath3D (maker " + routes.Count.ToString(CultureInfo.InvariantCulture) + ")" };
+                foreach (var mp in MakerAIPaths[i].m_points)
+                {
+                    // Maker points are 2D (world XZ), like the old AIPath's.
+                    d.Points.Add(new Vector3(mp.position.x, float.NaN, mp.position.y));
+                    d.Windups.Add(mp.windup);
+                }
+                routes.Add(d);
+            }
+
+            var raceLineDraft = RaceLineRoute();
+            if (routes.Count > 0)
+            {
+                Log.LogInfo($"[AIPaths] copied {routes.Count} maker path(s) from the bundle (sidecar ignored)");
+                LoadClock.Mark("AIPaths");
+            }
+            else
+            {
+                // Build BOTH sources into the same pool: SSX branch fragments to race
+                // on, and the race line as the one route guaranteed to reach the
+                // finish. AIPathNetwork.TryAcquirePath keeps a rider on its current
+                // route while inside that route's volume and, once it leaves (a
+                // fragment end), re-picks the best-scoring volume it is inside — so
+                // the race line is the backstop a stranded rider falls back onto.
+                // Toggle MultiPathAI off for race-line-only racing without a rebuild.
+                int built = raceLineDraft == null ? 0 : 1;
+                if (raceLineDraft != null) routes.Add(raceLineDraft);
+                int branches = 0;
+                if (multiPathAI.Value || built == 0)
+                {
+                    var side = SidecarRoutes();
+                    branches = side.Count;
+                    routes.AddRange(side);
+                }
+                if (built + branches == 0)
+                    Log.LogWarning("[AIPaths] no AI path data (maker points empty, no usable race line, no sidecar); AI will hold the start gate but cannot race");
+                else
+                    Log.LogInfo($"[AIPaths] AI pool: {built} race-line path + {branches} branch path(s) = {built + branches} total"
+                        + (multiPathAI.Value ? "" : " (MultiPathAI off)"));
+                    LoadClock.Mark("AIPaths");
+            }
+            var network = BuildAIPathNetwork(AIParent, routes, raceLineDraft);
+            LoadClock.Mark("BuildAIPathNetwork");
+            SetGameField(fPathNetwork, "LevelManager.pathNetwork", levelManager, network);
+        }
+
+        static void BuildRaceLine(BuildContext ctx)
+        {
+            var levelManager = ctx.LevelManager;
+            // ⚠️ A map with no MakerRaceLine is legal — this lookup can and does
+            // return null, and dereferencing it threw an NRE straight out of a Unity
+            // Awake postfix. That lands in Player.log and NOWHERE in the BepInEx log
+            // (root CLAUDE.md, HOOK_NOTES §23), and it aborted the REST of
+            // LoadLevelManager: no respawn markers, no glass strip, no wind volumes,
+            // no skydome, no destructibles — a half-imported map with a clean log.
+            // BuildAIPathFromRaceLine already null-checks the same lookup; this is
+            // the other half of that guard.
+            var TempMakerRaceLine = FindAnyObjectByType<MakerRaceLine>();
+            RaceLine TempRaceLine = null;
+            if (TempMakerRaceLine == null || TempMakerRaceLine.m_points == null
+                || TempMakerRaceLine.m_points.Count == 0)
+            {
+                Log.LogWarning("[RaceLine] no usable MakerRaceLine in this map ("
+                    + (TempMakerRaceLine == null
+                        ? "no MakerRaceLine component anywhere in the scene"
+                        : "MakerRaceLine present but its m_points list is empty")
+                    + ") — LevelManager.raceLine stays NULL. Rank/position, race-line respawn "
+                    + "markers and the AI mod's race terminator are all off for this course; the "
+                    + "rest of the level build continues.");
+            }
+            else
+            {
+                TempRaceLine = TempMakerRaceLine.gameObject.AddComponent<RaceLine>();
+
+                TempRaceLine.m_points = new List<RaceLine.Point>();
+
+                for (int i = 0;i < TempMakerRaceLine.m_points.Count;i++)
+                {
+                    var RaceLinePoint = new RaceLine.Point();
+
+                    RaceLinePoint.position = TempMakerRaceLine.m_points[i];
+
+                    TempRaceLine.m_points.Add(RaceLinePoint);
+                }
+
+                TempRaceLine.CalculateSegments();
+                LoadClock.Mark("RaceLine.CalculateSegments");
+
+                SetGameField(fRaceLine, "LevelManager.raceLine", levelManager, TempRaceLine);
+            }
+            ctx.RaceLine = TempRaceLine;
+        }
     }
 }
