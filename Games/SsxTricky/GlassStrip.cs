@@ -32,7 +32,7 @@ namespace TrickyMaddnessLevelHook
             return false;
         }
 
-        static void StripGlassColliders(BuildContext ctx, List<string> blocks)
+        static partial void StripGlassColliders(BuildContext ctx, List<string> blocks)
         {
             var levelManagerMaker = ctx.Maker;
             // Kill the "bouncy glass" (MECHANICS_DIAGNOSIS Bug 4). SSX glass panes

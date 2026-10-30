@@ -406,7 +406,7 @@ namespace TrickyMaddnessLevelHook
             // Outside the race-line block on purpose: the wedge watchdog needs no
             // markers, so it must still be cleared on a map that has no race line.
             Snowboarder_AirborneStuckGuard.ResetState();
-            AvalancheHazard.ResetState();
+            ResetGameState();
             if (TempRaceLine != null && TempRaceLine.m_points != null && TempRaceLine.m_points.Count >= 2)
             {
                 var respawnParent = new GameObject("Respawn Points (race line)");
