@@ -1,4 +1,4 @@
-Tricky Madness Level Hook v2.18.1 — required for every custom map pack
+Tricky Madness Level Hook v2.19.0 — required for every custom map pack
 ========================================================================
 
 This is the plugin that makes custom map packs (SSX Tricky Ports, SSX 3 Ports,
@@ -50,7 +50,28 @@ WHAT IT DOES
     with an optional grid layout (grouped by source game) for once you've got
     a lot of custom courses installed.
 
-WHAT'S NEW IN v2.18.1
+WHAT'S NEW IN v2.19.0
+---------------------
+  Groundwork for upcoming course packs. A straight copy-over from 2.18.1; no
+  map pack needs re-downloading, no settings changed, and every course pack
+  released so far plays exactly as it did on 2.18.1.
+
+  FOR NEWER COURSE PACKS (no effect on any pack released so far)
+
+  - Courses built at a very large scale can now tell the Hook how to size
+    their CPU racing lines, respawn points and medal checks separately from
+    the course itself. Without this, a respawn line on a big course could
+    stop kilometres short of the finish, and CPU riders never took the
+    alternate routes the course offers.
+  - A course can now route a CPU rider onto a specific grind rail. Tricky
+    Madness's CPU riders only grind a rail their route steers them onto, so
+    this is how a course pack gets them onto its rails.
+
+  COMPATIBILITY
+  Same as 2.18.1: needs the current Tricky Madness update, and still works
+  with every course pack ever released.
+
+PREVIOUSLY, IN v2.18.1
 ---------------------
   One bugfix. A straight copy-over from 2.18.0; no map pack needs
   re-downloading and no settings changed.
