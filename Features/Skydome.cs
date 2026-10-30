@@ -24,6 +24,60 @@ namespace TrickyMaddnessLevelHook
         // [Skydome] FillColor config wherever the Hook clears the camera. Null = no
         // override on the active map.
         internal static Color? SceneSkyFill;
+
+        static void ReadSkyFill(BuildContext ctx, List<string> blocks)
+        {
+            var levelManagerMaker = ctx.Maker;
+            // Per-level sky-fill override. Naming contract with SSXImporter.BuildLighting:
+            // an empty marker GO named "SkyFill_<RRGGBB>" (from Overrides.json
+            // lighting.skyFillColor). MUST be read before the SkydomeFollow attach below —
+            // its OnEnable samples the fill once. Always assigned (found or null) so a
+            // previous map's override can't leak onto the next one.
+            SceneSkyFill = null;
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("SkyFill_")) continue;
+                    string hex = "#" + t.name.Substring("SkyFill_".Length);
+                    if (ColorUtility.TryParseHtmlString(hex, out var fill))
+                    {
+                        SceneSkyFill = fill;
+                        Log.LogInfo($"[Skydome] per-level sky fill {hex} (overrides [Skydome] FillColor)");
+                        LoadClock.Mark("Skydome");
+                    }
+                    else
+                        Log.LogWarning($"[Skydome] sky-fill marker '{t.name}' not parseable; using [Skydome] FillColor");
+                }
+            }
+            blocks.Add($"skyfill={(SceneSkyFill.HasValue ? 1 : 0)}");
+        }
+
+        static void AttachSkydomeFollow(BuildContext ctx, List<string> blocks)
+        {
+            var levelManagerMaker = ctx.Maker;
+            // Skydome. Naming contract with SSXImporter.BuildSkybox: a GO named
+            // "Skydome" carries the level's unlit, Background-queue, ZWrite-off dome
+            // mesh (no collider). We attach SkydomeFollow so it stays centered on the
+            // camera — the dome is baked at map scale (only tens of units across), so
+            // without following, the rider would ride out of it and lose the sky. Only
+            // position follows; rotation stays world-fixed so the sky is compass-stable.
+            int skydomes = 0;
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (t.name != "Skydome") continue;
+                    if (t.GetComponent<SkydomeFollow>() != null) continue; // already attached
+                    t.gameObject.AddComponent<SkydomeFollow>();
+                    skydomes++;
+                }
+            }
+            if (skydomes > 0)
+                Log.LogInfo($"[Skydome] attached camera-follow to {skydomes} skydome(s)");
+            blocks.Add($"skydome={skydomes}");
+            LoadClock.Mark("Skydome");
+        }
     }
 
     public class SkydomeFollow : MonoBehaviour

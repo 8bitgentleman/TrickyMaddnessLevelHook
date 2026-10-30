@@ -16,6 +16,39 @@ using UnityEngine.UI;
 
 namespace TrickyMaddnessLevelHook
 {
+    public partial class Plugin
+    {
+        static void SpawnSsx3Painter(BuildContext ctx)
+        {
+            var levelManagerMaker = ctx.Maker;
+            // SSX 3 per-zone fog + ScreenTint (WorldPainter slots 5/7) from the plain-text
+            // "<map>.painter.txt" sidecar — a sidecar so it needs no bundle rebuild. Absent
+            // file or [Visual] Ssx3WorldPainter = false: the bundle's baked fog, no tint.
+            if (ssx3WorldPainter == null || ssx3WorldPainter.Value)
+            {
+                string painterPath = Path.ChangeExtension(LoadedAssetBundle, ".painter.txt");
+                if (File.Exists(painterPath))
+                {
+                    try
+                    {
+                        if (Ssx3Painter.TrySpawn(painterPath, WorldScale, ssx3FogReach == null ? 0f : ssx3FogReach.Value,
+                                                 levelManagerMaker.gameObject.scene, out string why))
+                            Log.LogInfo($"[Painter] {why}");
+                        else
+                            Log.LogWarning($"[Painter] '{Path.GetFileName(painterPath)}': {why}; keeping the baked fog, no tint");
+                    }
+                    catch (Exception e)
+                    {
+                        Log.LogWarning($"[Painter] '{Path.GetFileName(painterPath)}' unreadable ({e.Message}); keeping the baked fog, no tint");
+                    }
+                }
+                else if (BundleSource == "ssx3")
+                    Log.LogInfo($"[Painter] no '{Path.GetFileName(painterPath)}' next to this SSX 3 map; baked fog, no per-zone fog or tint");
+                LoadClock.Mark("Painter");
+            }
+        }
+    }
+
     // SSX 3's per-zone depth fog and ScreenTint: WorldPainter slots 5 and 7, emitted by
     // ssx/ssx3_painter.py as the plain-text sidecar "<map>.painter.txt" (HOOK_NOTES §37).
     // Two independent zone maps (fog zones and tint zones are separate quadtrees in the

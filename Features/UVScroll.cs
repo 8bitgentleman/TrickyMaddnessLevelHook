@@ -16,6 +16,47 @@ using UnityEngine.UI;
 
 namespace TrickyMaddnessLevelHook
 {
+    public partial class Plugin
+    {
+        static void AttachUVScrollers(BuildContext ctx, List<string> blocks)
+        {
+            var levelManagerMaker = ctx.Maker;
+            // Animated textures (feature 14). Naming contract with SSXImporter.BuildProps:
+            // a GO named "UVScroll_<u>_<v>_<originalName>" (rates written with the
+            // invariant-culture round-trip format) renders SSX geometry whose material
+            // UVs scroll — LCD scanlines, jumbotrons, boost-pad chevrons, river water.
+            // The original name may itself contain underscores, so only the first three
+            // '_'-separated segments are parsed. UVScrollBehaviour instantiates the
+            // renderers' materials once and scrolls their base-map offset per frame.
+            int uvAttached = 0, uvSkipped = 0;
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("UVScroll_")) continue;
+                    if (t.GetComponent<UVScrollBehaviour>() != null) continue; // already attached
+                    string[] seg = t.name.Split(new[] { '_' }, 4);
+                    float ru, rv;
+                    if (seg.Length < 4 ||
+                        !float.TryParse(seg[1], NumberStyles.Float, CultureInfo.InvariantCulture, out ru) ||
+                        !float.TryParse(seg[2], NumberStyles.Float, CultureInfo.InvariantCulture, out rv))
+                    {
+                        uvSkipped++;
+                        Log.LogDebug($"[UVScroll] '{t.name}' skipped: unparseable rates");
+                        continue;
+                    }
+                    var us = t.gameObject.AddComponent<UVScrollBehaviour>();
+                    us.RatePerFrame = new Vector2(ru, rv);
+                    uvAttached++;
+                }
+            }
+            if (uvAttached > 0 || uvSkipped > 0)
+                Log.LogInfo($"[UVScroll] attached {uvAttached} UV-scroller(s), skipped {uvSkipped}");
+            blocks.Add($"uvscroll={uvAttached}/{uvSkipped}");
+            LoadClock.Mark("UVScroll");
+        }
+    }
+
     // Scrolls the material UVs of everything under this GO — the runtime half of the
     // animated-texture pipeline (SSX's UVScrolling effect: LCD scanlines, jumbotrons,
     // boost-pad chevrons, river water). The importer bakes the decoded rates into the

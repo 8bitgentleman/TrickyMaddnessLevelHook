@@ -16,6 +16,59 @@ using UnityEngine.UI;
 
 namespace TrickyMaddnessLevelHook
 {
+    public partial class Plugin
+    {
+        static void SpawnLightingRamp(BuildContext ctx, List<string> blocks)
+        {
+            var levelManagerMaker = ctx.Maker;
+            // Time-of-day ramp. Naming contract with SSXImporter.BuildLightStops: empty GOs
+            // "LightStop_<region>_<y>_<sunI>_<sunHex>_<ambR>_<ambG>_<ambB>_<fillHex>_
+            // <fogHex>_<fogDen>_<terrHex>", one per source course of a whole-mountain chain.
+            // A Unity scene bakes ONE lighting grade; SSX 3's final descent is daylight at
+            // the summit and night by Metro-City, so LightingRamp blends between the stops
+            // by rider elevation. Needs at least two — one stop is just the baked grade.
+            // Attached after the skydome and terrain exist, because it drives their
+            // materials.
+            int rampStops = -1;   // -1 = [Visual] LightingRamp off
+            if (lightingRamp == null || lightingRamp.Value)
+            {
+                var stops = new List<LightingRamp.Stop>();
+                int badStops = 0;
+                foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+                    foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                    {
+                        if (!t.name.StartsWith("LightStop_")) continue;
+                        LightingRamp.Stop s;
+                        if (LightingRamp.TryParse(t.name, out s)) stops.Add(s);
+                        else
+                        {
+                            badStops++;
+                            Log.LogWarning($"[LightingRamp] marker '{t.name}' is malformed; ignored");
+                        }
+                    }
+                // A partly-parsed ramp is worse than none: it would blend across the stops
+                // that dropped out, so a whole course's stretch of mountain silently takes
+                // its neighbours' grade. Refuse the whole thing and say so.
+                if (badStops > 0 && stops.Count > 0)
+                {
+                    Log.LogWarning($"[LightingRamp] {badStops} of {stops.Count + badStops} stop marker(s) "
+                        + "unreadable — ramp DISABLED; the map keeps its single baked grade. Rebuild it.");
+                }
+                else if (stops.Count >= 2)
+                {
+                    LightingRamp.Spawn(stops);
+                }
+                else if (stops.Count == 1)
+                {
+                    Log.LogWarning("[LightingRamp] only 1 stop marker found; a ramp needs 2 to "
+                        + "interpolate, so the map keeps its single baked grade.");
+                }
+                rampStops = stops.Count;
+            }
+            blocks.Add($"ramp={rampStops}");
+        }
+    }
+
     // Time-of-day ramp for whole-mountain chain maps.
     //
     // A Unity scene bakes exactly ONE lighting grade. That is right for a single course and

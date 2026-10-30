@@ -16,6 +16,72 @@ using UnityEngine.UI;
 
 namespace TrickyMaddnessLevelHook
 {
+    public partial class Plugin
+    {
+        static void AttachParticleTriggers(BuildContext ctx, List<string> blocks)
+        {
+            var levelManagerMaker = ctx.Maker;
+            // ParticleTrigger (feature: lighting.particleTriggers). Contract on the class.
+            int ptTrig = 0, ptSys = 0, ptSkip = 0, ptImp = 0, ptHide = 0;
+            var pfxShotByKey = new Dictionary<string, Transform>();
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                    if (t.name.StartsWith("PfxShot_")) pfxShotByKey[t.name.Substring("PfxShot_".Length)] = t;
+            if (pfxShotByKey.Count > 0)
+                foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+                    foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                    {
+                        if (!t.name.StartsWith("ParticleTrig_")) continue;
+                        if (t.GetComponent<ParticleTrigger>() != null) continue;   // already attached
+                        var rel = t.gameObject.AddComponent<ParticleTrigger>();
+                        foreach (Transform c in t)
+                        {
+                            if (c.name.StartsWith("PfxImpact_"))
+                            {
+                                rel.impact = true;
+                                string ra = c.name.Substring("PfxImpact_".Length);
+                                rel.rearm = ra == "once" ? -1f
+                                    : float.TryParse(ra, System.Globalization.NumberStyles.Float,
+                                                     System.Globalization.CultureInfo.InvariantCulture, out var rs) ? rs : -1f;
+                                continue;
+                            }
+                            if (c.name == "PfxHideSelf")
+                            {
+                                // Meshes only: the PfxShot_ burst lives under the same mover part.
+                                var surf = t.parent;
+                                while (surf != null && !surf.name.StartsWith("MoveSurf_")) surf = surf.parent;
+                                if (surf != null)
+                                {
+                                    foreach (var r in surf.GetComponentsInChildren<Renderer>(true))
+                                        if (!(r is ParticleSystemRenderer)) rel.hideRenderers.Add(r);
+                                    ptHide++;
+                                }
+                                else { ptSkip++; Log.LogDebug($"[ParticleTrig] '{t.name}' PfxHideSelf has no MoveSurf_ ancestor — skipped"); }
+                                continue;
+                            }
+                            if (c.name.StartsWith("PfxHide_"))
+                            {
+                                var hideGO = FindSceneGOByInstanceName(t.gameObject.scene, c.name.Substring("PfxHide_".Length));
+                                if (hideGO != null) { rel.hides.Add(hideGO); ptHide++; }
+                                else { ptSkip++; Log.LogDebug($"[ParticleTrig] '{t.name}' hide '{c.name}' resolved to nothing — skipped"); }
+                                continue;
+                            }
+                            if (!c.name.StartsWith("PfxTarget_")) continue;
+                            if (!pfxShotByKey.TryGetValue(c.name.Substring("PfxTarget_".Length), out var shot))
+                            { ptSkip++; Log.LogDebug($"[ParticleTrig] '{t.name}' target '{c.name}' has no matching PfxShot_ — skipped"); continue; }
+                            rel.targets.AddRange(shot.GetComponentsInChildren<ParticleSystem>(true));
+                        }
+                        ptSys += rel.targets.Count;
+                        ptTrig++;
+                        if (rel.impact) ptImp++;
+                    }
+            if (pfxShotByKey.Count > 0 || ptSkip > 0)
+                Log.LogInfo($"[ParticleTrig] attached {ptTrig} trigger(s) ({ptImp} impact, {ptHide} hide) over {pfxShotByKey.Count} group(s), {ptSys} emitter bind(s), skipped {ptSkip}");
+            blocks.Add($"particletrig={ptTrig}/{pfxShotByKey.Count}/{ptSkip}");
+            LoadClock.Mark("ParticleTrig");
+        }
+    }
+
     // Trigger-fired SSX particle effects (feature: lighting.particleTriggers — fireworks, pyro).
     // Naming contract with SSXImporter.BuildParticleEmitters:
     //   PfxShot_<host>_<hdr>     — group of stopped ParticleSystems at the SSX host instance.

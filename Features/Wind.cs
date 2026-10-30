@@ -16,6 +16,60 @@ using UnityEngine.UI;
 
 namespace TrickyMaddnessLevelHook
 {
+    public partial class Plugin
+    {
+        static void AttachWindVolumes(BuildContext ctx, List<string> blocks)
+        {
+            var levelManagerMaker = ctx.Maker;
+            // Phase 4 custom items — Wind volumes. Naming contract with SSXImporter.BuildItems:
+            // a GO named "Wind_<accel>" carries a BoxCollider (geometry only) and is oriented
+            // so its forward (+Z) is the world push direction. We attach a WindVolume behavior
+            // that, while a Snowboarder is inside the box, adds accel*dt along the push direction
+            // to that rider's velocity every physics step (Snowboarder.velocity is the exact field
+            // UpdateGrounded feeds to CharacterController.Move). Containment is done analytically
+            // (OBB test in WindVolume) and the collider is DISABLED at runtime — so a wind box
+            // never blocks the rider and is never mistaken for ground by the game's ground
+            // SphereCast (which hits triggers by default). The number is an ACCELERATION in Unity
+            // units/s^2, parsed invariant-culture, matching the importer — it is SSX's own
+            // BoostAmount passed through 1:1 (WindVolume's header has the why).
+            int windAttached = 0, windSkipped = 0;
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("Wind_")) continue;
+                    var windGO = t.gameObject;
+                    if (windGO.GetComponent<WindVolume>() != null) continue; // already attached
+                    if (windGO.GetComponent<BoxCollider>() == null)
+                    { windSkipped++; Log.LogDebug($"[Wind] '{windGO.name}' skipped: no BoxCollider"); continue; }
+                    float accel;
+                    string tail = t.name.Substring("Wind_".Length);
+                    if (!float.TryParse(tail, NumberStyles.Float, CultureInfo.InvariantCulture, out accel))
+                    {
+                        // Shouldn't happen — the importer always bakes a number. 60 is SSX's own
+                        // conveyor rating, i.e. about 3x gravity, so a malformed name degrades to
+                        // something mild rather than to a no-op or a rocket.
+                        accel = 60f;
+                        Log.LogDebug($"[Wind] '{windGO.name}' name has no parseable acceleration -> default {accel}");
+                    }
+                    var wv = windGO.AddComponent<WindVolume>();
+                    // Push direction: an optional "Dir" child (importer emits it for SSX boost
+                    // fields, whose push vector is independent of the box's own orientation — the
+                    // box is oriented to the source volume so its OBB containment matches). No
+                    // Dir child (editor-drawn wind volumes) => the box's own forward, as before.
+                    var windDir = t.Find("Dir");
+                    wv.WorldDir = windDir != null ? windDir.forward : t.forward;
+                    wv.Accel = accel;
+                    windAttached++;
+                }
+            }
+            if (windAttached > 0 || windSkipped > 0)
+                Log.LogInfo($"[Wind] attached {windAttached} wind volume(s), skipped {windSkipped}");
+            blocks.Add($"wind={windAttached}/{windSkipped}");
+            LoadClock.Mark("Wind");
+        }
+    }
+
     // A wind push volume. Attached by the Hook's scene scan to every "Wind_<accel>" GO the
     // importer emits. The number in the name is an ACCELERATION in Unity units/s^2: while a
     // Snowboarder's origin is inside the (oriented) box, each physics step adds Accel*dt along

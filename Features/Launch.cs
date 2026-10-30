@@ -16,6 +16,70 @@ using UnityEngine.UI;
 
 namespace TrickyMaddnessLevelHook
 {
+    public partial class Plugin
+    {
+        static void AttachLaunchVolumes(BuildContext ctx, List<string> blocks)
+        {
+            var levelManagerMaker = ctx.Maker;
+            // Phase 4 custom items — Launch volumes. Naming contract with
+            // SSXImporter.BuildItems: a GO named "Launch_<i>_<speed>" (plus an optional
+            // "_lap<N>") carries a BoxCollider (geometry only), AXIS-ALIGNED like SSX's own
+            // trigger, with the launch direction on a "Dir" child. LaunchVolume SETS the
+            // rider's velocity to that direction * speed the moment they cross in — the one-shot throw SSX Tricky's own
+            // SubType 15/18/24 verbs perform, and what makes megaple's fan shaft a lap
+            // course. "_lap<N>" caps it at N launches per rider so the final descent rides
+            // through to the finish; absent, the volume fires every time. Speed is parsed
+            // invariant-culture, matching the importer.
+            int launchAttached = 0, launchSkipped = 0;
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("Launch_")) continue;
+                    var lnGO = t.gameObject;
+                    if (lnGO.GetComponent<LaunchVolume>() != null) continue; // already attached
+                    if (lnGO.GetComponent<BoxCollider>() == null)
+                    { launchSkipped++; Log.LogDebug($"[Launch] '{lnGO.name}' skipped: no BoxCollider"); continue; }
+
+                    var seg = t.name.Split('_');
+                    float speed;
+                    if (seg.Length < 3 ||
+                        !float.TryParse(seg[2], NumberStyles.Float, CultureInfo.InvariantCulture, out speed) ||
+                        speed <= 0f)
+                    { launchSkipped++; Log.LogWarning($"[Launch] '{lnGO.name}' skipped: no parseable speed in the name"); continue; }
+
+                    // Trailing option tokens are SCANNED, not indexed by position — "_lap<N>"
+                    // and "_ctr" are independent and either may be absent, so seg[3] is not
+                    // a fixed slot. (The editor-side parsers scan the same way.)
+                    int laps = 0;      // 0 = fires every time
+                    bool center = false;
+                    for (int si = 3; si < seg.Length; si++)
+                    {
+                        if (seg[si] == "ctr") { center = true; continue; }
+                        if (!seg[si].StartsWith("lap")) continue;
+                        if (!int.TryParse(seg[si].Substring(3), NumberStyles.Integer, CultureInfo.InvariantCulture, out laps) || laps < 1)
+                        { laps = 0; Log.LogWarning($"[Launch] '{lnGO.name}': '{seg[si]}' is not a lap count — firing every time"); }
+                    }
+
+                    var lv = lnGO.AddComponent<LaunchVolume>();
+                    // Launch direction: an optional "Dir" child overrides the box's own
+                    // forward, same channel WindVolume uses for the SSX boost fields whose
+                    // push vector is independent of the volume's orientation.
+                    var lnDir = t.Find("Dir");
+                    lv.WorldDir = lnDir != null ? lnDir.forward : t.forward;
+                    lv.Speed = speed;
+                    lv.Laps = laps;
+                    lv.Center = center;
+                    launchAttached++;
+                }
+            }
+            if (launchAttached > 0 || launchSkipped > 0)
+                Log.LogInfo($"[Launch] attached {launchAttached} launch volume(s), skipped {launchSkipped}");
+            blocks.Add($"launch={launchAttached}/{launchSkipped}");
+            LoadClock.Mark("Launch");
+        }
+    }
+
     // A LAUNCH VOLUME — the rider's velocity is SET to WorldDir * Speed the moment they
     // cross into the box, replaced rather than added to. This is Tokyo Megaplex's fan
     // shaft, and it is a general primitive: SSX Tricky's own lap and boost verbs are all
