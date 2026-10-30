@@ -16,6 +16,22 @@ using UnityEngine.UI;
 
 namespace TrickyMaddnessLevelHook
 {
+    public partial class Plugin
+    {
+        static void SpawnPerfHarnessIfArmed()
+        {
+            // Respawn / OOB instrumentation. Last, so it belongs to the scene the
+            // player will actually ride and dies with it (which is what guarantees
+            // its report gets written).
+            // Either switch spawns it: the two halves are independent reports, but
+            // both need the same rider resolution (LevelManager.player), which is
+            // the one expensive thing the harness does.
+            if ((perfHarness != null && perfHarness.Value)
+                || (riderTelemetry != null && riderTelemetry.Value))
+                PerfHarness.Spawn();
+        }
+    }
+
     // Respawn / out-of-bounds instrumentation for custom maps (Debug/PerfHarness,
     // off by default). Written for the SSX 3 whole-mountain chain, whose frame rate
     // turned out to be a respawn storm rather than a rendering cost: riders in

@@ -16,6 +16,41 @@ using UnityEngine.UI;
 
 namespace TrickyMaddnessLevelHook
 {
+    public partial class Plugin
+    {
+        static void AttachDrawDistance(BuildContext ctx, List<string> blocks)
+        {
+            var levelManagerMaker = ctx.Maker;
+            // Per-level camera draw distance. Naming contract with SSXImporter.BuildLighting:
+            // an empty marker GO named "DrawDist_<unity units>" (from Overrides.json
+            // lighting.drawDistanceRaw — SSX Tricky's per-course WorldConf terrain cull
+            // distance, ssx/NOTES.md). The component lives on the marker, so it dies with
+            // the level scene and restores the camera's far clip on the way out. MUST attach
+            // before SkydomeFollow below: both hook beginCameraRendering, and subscription
+            // order is call order, so the dome fits to the clipped far plane from frame one.
+            int drawDists = 0;
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("DrawDist_")) continue;
+                    if (t.GetComponent<DrawDistance>() != null) continue;
+                    if (float.TryParse(t.name.Substring("DrawDist_".Length), NumberStyles.Float,
+                                       CultureInfo.InvariantCulture, out float far) && far > 1f)
+                    {
+                        t.gameObject.AddComponent<DrawDistance>().far = far;
+                        drawDists++;
+                        Log.LogInfo($"[DrawDist] per-level camera far clip {far:F1}");
+                        LoadClock.Mark("DrawDist");
+                    }
+                    else
+                        Log.LogWarning($"[DrawDist] marker '{t.name}' not parseable; far clip left alone");
+                }
+            }
+            blocks.Add($"drawdist={drawDists}");
+        }
+    }
+
     // Keeps a skydome mesh centered on the camera and sized to envelop the whole visible
     // course, so a finite (map-scaled) dome reads as a distant sky. The importer emits an
     // unlit, Background-queue, ZWrite-off, cull-off dome named "Skydome" with no collider.

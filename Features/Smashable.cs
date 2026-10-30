@@ -16,6 +16,83 @@ using UnityEngine.UI;
 
 namespace TrickyMaddnessLevelHook
 {
+    public partial class Plugin
+    {
+        static void WireDestructibles(BuildContext ctx, List<string> blocks)
+        {
+            var levelManagerMaker = ctx.Maker;
+            // Smashable glass / breakables. Naming contract with SSXImporter.BuildProps:
+            // a GO named "Destructible_<orig>" carries the intact model (render mesh, NO
+            // collider) plus inactive "Frag_<i>" children (per-shard meshes) and optional
+            // "DisableRef_<name>" markers. We wire the game's own Destructible on it, plus a
+            // Hook-side Smashable that DRIVES the break. WHY not rely on the game's trigger:
+            // Snowboarder.OnTriggerEnter does call Destructible.Break, but only if the pane's
+            // trigger fires an enter event for the rider's CharacterController — unreliable
+            // for us (the rider crosses at 150-190 mph → ~1.5 m/tick, tunnelling a thin pane;
+            // and a bundle-added trigger on the glass layer isn't guaranteed to fire against
+            // the rider's layer). Smashable does a SWEPT test instead (can't tunnel) and calls
+            // the public Break directly. The BoxCollider (render-mesh bounds, min 0.3 m thick)
+            // is a geometry carrier for Smashable and for Break's GetComponent<Collider>() —
+            // Smashable DISABLES it at runtime; layer 2 (the game's glass layer, excluded from
+            // the ground SphereCast) keeps an intact pane from ever reading as ground. Private
+            // serialized List<T>/string fields arrive null on runtime-added components
+            // (feature 7): Traverse-set all four — lists may be empty but NEVER null
+            // (Break foreach-es fragmentList; soundName null would PostEvent(null)).
+            int smashWired = 0, smashFrags = 0;
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("Destructible_")) continue;
+                    var dGO = t.gameObject;
+                    if (dGO.GetComponent<Destructible>() != null) continue; // already wired
+                    var box = dGO.AddComponent<BoxCollider>();
+                    var dmf = dGO.GetComponent<MeshFilter>();
+                    if (dmf != null && dmf.sharedMesh != null)
+                    {
+                        var b = dmf.sharedMesh.bounds;
+                        box.center = b.center;
+                        box.size = Vector3.Max(b.size, new Vector3(0.3f, 0.3f, 0.3f));
+                    }
+                    box.isTrigger = true;
+                    dGO.layer = 2;
+                    var frags = new List<DestructibleFragment>();
+                    var disables = new List<GameObject>();
+                    foreach (Transform child in t)
+                    {
+                        if (child.name.StartsWith("Frag_"))
+                        {
+                            child.gameObject.SetActive(false);
+                            child.gameObject.layer = 0;
+                            frags.Add(child.gameObject.AddComponent<DestructibleFragment>());
+                        }
+                        else if (child.name.StartsWith("DisableRef_"))
+                        {
+                            // Resolve by original instance name; the scene GO may carry a
+                            // pipeline prefix (UVScroll_/PhysProp_). Unresolved refs are
+                            // fine — megaple's invisible Glass_Surface proxies are dropped
+                            // at import, and the pane needs no wall (it's a pure trigger).
+                            string target = child.name.Substring("DisableRef_".Length);
+                            var found = FindSceneGOByInstanceName(levelManagerMaker.gameObject.scene, target);
+                            if (found != null) disables.Add(found);
+                        }
+                    }
+                    var destr = dGO.AddComponent<Destructible>();
+                    SetGameField(fDestrFragmentList, "Destructible.fragmentList", destr, frags);
+                    SetGameField(fDestrDisableList, "Destructible.disableList", destr, disables);
+                    SetGameField(fDestrHideSelf, "Destructible.hideSelf", destr, true);
+                    SetGameField(fDestrSoundName, "Destructible.soundName", destr, "Play_GlassSmash_Large");
+                    dGO.AddComponent<Smashable>(); // drives Break via swept detection; disables the box
+                    smashWired++; smashFrags += frags.Count;
+                }
+            }
+            if (smashWired > 0)
+                Log.LogInfo($"[Destructible] wired {smashWired} smashable(s) with {smashFrags} shard fragment(s)");
+            blocks.Add($"destructible={smashWired}/{smashFrags}");
+            LoadClock.Mark("Destructible");
+        }
+    }
+
     // Drives the game's own Destructible.Break on a smashable pane/prop when the rider
     // rides through it. WHY NOT the game's trigger path: Snowboarder.OnTriggerEnter DOES
     // call Destructible.Break(velocity) — but only when a live trigger fires an enter

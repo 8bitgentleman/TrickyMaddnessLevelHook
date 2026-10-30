@@ -16,6 +16,42 @@ using UnityEngine.UI;
 
 namespace TrickyMaddnessLevelHook
 {
+    public partial class Plugin
+    {
+        static void AttachTeleportVolumes(BuildContext ctx, List<string> blocks)
+        {
+            var levelManagerMaker = ctx.Maker;
+            // Phase 4 custom items — Teleport volumes. Naming contract with
+            // SSXImporter.BuildItems: a GO named "Teleport_<i>" carries a BoxCollider (the
+            // source region) and a child "Target" transform (the destination pos + facing).
+            // TeleportVolume repositions any rider that ENTERS the box to the Target, using
+            // the game's own CharacterController-teleport idiom (disable CC -> set transform
+            // -> re-enable CC -> zero velocity, RE'd from Snowboarder.Respawn). Edge-triggered
+            // (once per entry). Same collider-free OBB containment as WindVolume.
+            int tpAttached = 0, tpSkipped = 0;
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("Teleport")) continue;
+                    var tpGO = t.gameObject;
+                    if (tpGO.GetComponent<TeleportVolume>() != null) continue; // already attached
+                    if (tpGO.GetComponent<BoxCollider>() == null)
+                    { tpSkipped++; Log.LogDebug($"[Teleport] '{tpGO.name}' skipped: no BoxCollider"); continue; }
+                    var target = t.Find("Target");
+                    if (target == null)
+                    { tpSkipped++; Log.LogDebug($"[Teleport] '{tpGO.name}' skipped: no Target child"); continue; }
+                    tpGO.AddComponent<TeleportVolume>();   // reads box + Target child in Awake
+                    tpAttached++;
+                }
+            }
+            if (tpAttached > 0 || tpSkipped > 0)
+                Log.LogInfo($"[Teleport] attached {tpAttached} teleport volume(s), skipped {tpSkipped}");
+            blocks.Add($"teleport={tpAttached}/{tpSkipped}");
+            LoadClock.Mark("Teleport");
+        }
+    }
+
     // A teleport volume. Attached by the Hook's scene scan to every "Teleport_*" GO the
     // importer emits (source box + a child "Target" transform for the destination). When a
     // Snowboarder ENTERS the (oriented) box it is repositioned to the Target — edge-triggered

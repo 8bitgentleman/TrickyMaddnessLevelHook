@@ -16,6 +16,33 @@ using UnityEngine.UI;
 
 namespace TrickyMaddnessLevelHook
 {
+    public partial class Plugin
+    {
+        static void AttachGlowSprites(BuildContext ctx, List<string> blocks)
+        {
+            var levelManagerMaker = ctx.Maker;
+            // Engine-drawn lamp halos. Naming contract with SSXImporter.BuildGlowSprites:
+            // a "GlowSprites*" MeshRenderer baked DISABLED whose vertex channels carry the
+            // halos. GlowSprites rebuilds the camera-facing quads every camera and enables
+            // the renderer only once the data reads back whole.
+            int glows = 0;
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("GlowSprites") || t.GetComponent<GlowSprites>() != null) continue;
+                    var gs = t.gameObject.AddComponent<GlowSprites>();
+                    if (!gs.Init()) { UnityEngine.Object.Destroy(gs); continue; }
+                    glows++;
+                    var gm = t.GetComponent<MeshFilter>().sharedMesh;
+                    Log.LogInfo($"[Glow] '{t.name}': {gm.vertexCount / 4} halo quads driven");
+                    LoadClock.Mark("Glow");
+                }
+            }
+            blocks.Add($"glow={glows}");
+        }
+    }
+
     // Engine-drawn light halos (X-Games Snowboarder's glow sprites; contract is source-
     // agnostic). The importer bakes Glows.json into ONE mesh named "GlowSprites*" whose
     // verts are all parked on their halo centre and whose renderer is baked DISABLED --
