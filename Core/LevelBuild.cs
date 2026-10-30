@@ -517,6 +517,10 @@ namespace TrickyMaddnessLevelHook
             // signs, billboards, bridge/wall/barrier/checkpoint props, ~14,000
             // instances across all 159 shipped maps) is a false positive this
             // name gate saves.
+            // One count per scene-scan block, logged unconditionally at the end in call
+            // order, so a block that stops running (or moves) shows in a log diff even on
+            // a map where it finds nothing. The per-block lines above only fire on > 0.
+            var blocks = new List<string>();
             int glassStripped = 0;
             foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
             {
@@ -560,6 +564,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (glassStripped > 0)
                 Log.LogInfo($"[Glass] stripped {glassStripped} thin vertical layer-8 'glass'-named collider(s) (bounce fix)");
+            blocks.Add($"glass={glassStripped}");
             LoadClock.Mark("Glass");
 
             //Convert pipeline-marked props into crashable PhysicsProps
@@ -599,6 +604,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (propsConverted > 0 || propsSkipped > 0)
                 Log.LogInfo($"[PhysProps] converted {propsConverted} crashable prop(s), skipped {propsSkipped}");
+            blocks.Add($"physprop={propsConverted}/{propsSkipped}");
             LoadClock.Mark("PhysProps");
 
             // Trick-multiplier pickups: hand the flakes to the GAME's own snowflake
@@ -671,6 +677,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (flakes > 0)
                 Log.LogInfo($"[Snowflakes] converted {flakes} pickup(s) to the game's Snowflake behaviour, {flakeSpheres} sphere trigger(s)");
+            blocks.Add($"flake={flakes}/{flakeSpheres}");
             LoadClock.Mark("Snowflakes");
             LowerScaledGems(levelManagerMaker.gameObject.scene);
 
@@ -718,6 +725,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (windAttached > 0 || windSkipped > 0)
                 Log.LogInfo($"[Wind] attached {windAttached} wind volume(s), skipped {windSkipped}");
+            blocks.Add($"wind={windAttached}/{windSkipped}");
             LoadClock.Mark("Wind");
 
             // Phase 4 custom items — Teleport volumes. Naming contract with
@@ -746,6 +754,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (tpAttached > 0 || tpSkipped > 0)
                 Log.LogInfo($"[Teleport] attached {tpAttached} teleport volume(s), skipped {tpSkipped}");
+            blocks.Add($"teleport={tpAttached}/{tpSkipped}");
             LoadClock.Mark("Teleport");
 
             // Phase 4 custom items — Launch volumes. Naming contract with
@@ -802,6 +811,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (launchAttached > 0 || launchSkipped > 0)
                 Log.LogInfo($"[Launch] attached {launchAttached} launch volume(s), skipped {launchSkipped}");
+            blocks.Add($"launch={launchAttached}/{launchSkipped}");
             LoadClock.Mark("Launch");
 
             // Phase 4 custom items — TriggerAnim ("door") volumes. Naming contract with
@@ -845,6 +855,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (taAttached > 0 || taSkipped > 0)
                 Log.LogInfo($"[TriggerAnim] attached {taAttached} door trigger(s), skipped {taSkipped}");
+            blocks.Add($"triggeranim={taAttached}/{taSkipped}");
             LoadClock.Mark("TriggerAnim");
 
             // AnimDoor (feature: gameplay.animDoors). Naming contract with
@@ -886,6 +897,7 @@ namespace TrickyMaddnessLevelHook
                 }
             if (adDoors > 0 || adTrig > 0 || adSkip > 0)
                 Log.LogInfo($"[AnimDoor] attached {adTrig} trigger(s) driving {adDoors} door(s), skipped {adSkip}");
+            blocks.Add($"animdoor={adTrig}/{adDoors}/{adSkip}");
             LoadClock.Mark("AnimDoor");
 
             // MovingSurface (feature: gameplay.movingColliders). Same relay as AnimDoor with one
@@ -940,6 +952,7 @@ namespace TrickyMaddnessLevelHook
             if (msSurf > 0 || msTrig > 0 || msSkip > 0)
                 Log.LogInfo($"[MoveSurf] attached {msTrig} trigger(s) driving {msSurf} mover(s), skipped {msSkip}"
                     + (msHaz > 0 ? $", {msHaz} hazard(s)" : ""));
+            blocks.Add($"movesurf={msTrig}/{msSurf}/{msSkip}/{msHaz}");
             LoadClock.Mark("MoveSurf");
 
             // ParticleTrigger (feature: lighting.particleTriggers). Contract on the class.
@@ -998,6 +1011,7 @@ namespace TrickyMaddnessLevelHook
                     }
             if (pfxShotByKey.Count > 0 || ptSkip > 0)
                 Log.LogInfo($"[ParticleTrig] attached {ptTrig} trigger(s) ({ptImp} impact, {ptHide} hide) over {pfxShotByKey.Count} group(s), {ptSys} emitter bind(s), skipped {ptSkip}");
+            blocks.Add($"particletrig={ptTrig}/{pfxShotByKey.Count}/{ptSkip}");
             LoadClock.Mark("ParticleTrig");
 
             // Per-level sky-fill override. Naming contract with SSXImporter.BuildLighting:
@@ -1022,6 +1036,7 @@ namespace TrickyMaddnessLevelHook
                         Log.LogWarning($"[Skydome] sky-fill marker '{t.name}' not parseable; using [Skydome] FillColor");
                 }
             }
+            blocks.Add($"skyfill={(SceneSkyFill.HasValue ? 1 : 0)}");
 
             // Per-level camera draw distance. Naming contract with SSXImporter.BuildLighting:
             // an empty marker GO named "DrawDist_<unity units>" (from Overrides.json
@@ -1030,6 +1045,7 @@ namespace TrickyMaddnessLevelHook
             // the level scene and restores the camera's far clip on the way out. MUST attach
             // before SkydomeFollow below: both hook beginCameraRendering, and subscription
             // order is call order, so the dome fits to the clipped far plane from frame one.
+            int drawDists = 0;
             foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
             {
                 foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
@@ -1040,6 +1056,7 @@ namespace TrickyMaddnessLevelHook
                                        CultureInfo.InvariantCulture, out float far) && far > 1f)
                     {
                         t.gameObject.AddComponent<DrawDistance>().far = far;
+                        drawDists++;
                         Log.LogInfo($"[DrawDist] per-level camera far clip {far:F1}");
                         LoadClock.Mark("DrawDist");
                     }
@@ -1047,6 +1064,7 @@ namespace TrickyMaddnessLevelHook
                         Log.LogWarning($"[DrawDist] marker '{t.name}' not parseable; far clip left alone");
                 }
             }
+            blocks.Add($"drawdist={drawDists}");
 
             // Skydome. Naming contract with SSXImporter.BuildSkybox: a GO named
             // "Skydome" carries the level's unlit, Background-queue, ZWrite-off dome
@@ -1067,6 +1085,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (skydomes > 0)
                 Log.LogInfo($"[Skydome] attached camera-follow to {skydomes} skydome(s)");
+            blocks.Add($"skydome={skydomes}");
             LoadClock.Mark("Skydome");
 
             // Animated textures (feature 14). Naming contract with SSXImporter.BuildProps:
@@ -1100,6 +1119,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (uvAttached > 0 || uvSkipped > 0)
                 Log.LogInfo($"[UVScroll] attached {uvAttached} UV-scroller(s), skipped {uvSkipped}");
+            blocks.Add($"uvscroll={uvAttached}/{uvSkipped}");
             LoadClock.Mark("UVScroll");
 
             // Smashable glass / breakables. Naming contract with SSXImporter.BuildProps:
@@ -1169,6 +1189,7 @@ namespace TrickyMaddnessLevelHook
             }
             if (smashWired > 0)
                 Log.LogInfo($"[Destructible] wired {smashWired} smashable(s) with {smashFrags} shard fragment(s)");
+            blocks.Add($"destructible={smashWired}/{smashFrags}");
             LoadClock.Mark("Destructible");
 
             // Atmospheric falling snow. Naming contract with SSXImporter.BuildLighting:
@@ -1182,6 +1203,7 @@ namespace TrickyMaddnessLevelHook
             // still consumes the marker. "WeatherSSX3_<S>_<x0>_<y0>_<rawPerPixel>" is SSX 3's
             // zone-mapped weather (Ssx3SnowFall, BakeSsx3WeatherMarker).
             bool snowDone = SnowFall.Active || SsxSnowFall.Active || Ssx3SnowFall.Active;
+            string snowKind = snowDone ? "active" : "none";
             foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
             {
                 if (snowDone) break;
@@ -1190,6 +1212,7 @@ namespace TrickyMaddnessLevelHook
                     if (t.name.StartsWith("SnowSSX_"))
                     {
                         SpawnSsxSnow(t);
+                        snowKind = "ssx";
                         snowDone = true;
                         break;
                     }
@@ -1199,6 +1222,7 @@ namespace TrickyMaddnessLevelHook
                             Log.LogInfo($"[SnowFall] SSX 3 weather snow spawned: {why}");
                         else
                             Log.LogWarning($"[SnowFall] SSX 3 weather: {why}");
+                        snowKind = "ssx3";
                         snowDone = true;
                         break;
                     }
@@ -1210,10 +1234,12 @@ namespace TrickyMaddnessLevelHook
                         si = 1f;
                         Log.LogDebug($"[SnowFall] '{t.name}' has no parseable intensity -> default {si:F2}");
                     }
+                    snowKind = "tm";
                     if (TrySpawnTmSnow(levelManager, si, out string tmWhy))
                         Log.LogInfo($"[SnowFall] TM's own falling snow wired ({tmWhy})");
                     else
                     {
+                        snowKind = "cam";
                         SnowFall.Spawn(si);
                         Log.LogInfo($"[SnowFall] camera-follow snow spawned (intensity {si:F2}); TM snow unavailable: {tmWhy}");
                         LoadClock.Mark("SnowFall");
@@ -1222,11 +1248,13 @@ namespace TrickyMaddnessLevelHook
                     break;
                 }
             }
+            blocks.Add($"snow={snowKind}");
 
             // Engine-drawn lamp halos. Naming contract with SSXImporter.BuildGlowSprites:
             // a "GlowSprites*" MeshRenderer baked DISABLED whose vertex channels carry the
             // halos. GlowSprites rebuilds the camera-facing quads every camera and enables
             // the renderer only once the data reads back whole.
+            int glows = 0;
             foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
             {
                 foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
@@ -1234,11 +1262,13 @@ namespace TrickyMaddnessLevelHook
                     if (!t.name.StartsWith("GlowSprites") || t.GetComponent<GlowSprites>() != null) continue;
                     var gs = t.gameObject.AddComponent<GlowSprites>();
                     if (!gs.Init()) { UnityEngine.Object.Destroy(gs); continue; }
+                    glows++;
                     var gm = t.GetComponent<MeshFilter>().sharedMesh;
                     Log.LogInfo($"[Glow] '{t.name}': {gm.vertexCount / 4} halo quads driven");
                     LoadClock.Mark("Glow");
                 }
             }
+            blocks.Add($"glow={glows}");
 
             // Post-process bloom. Naming contract: "Bloom_<intensity>_<threshold>". PostFX
             // creates a global URP Volume with a Bloom override and flips the render
@@ -1271,6 +1301,7 @@ namespace TrickyMaddnessLevelHook
                 }
                 if (PostFX.Active) break;
             }
+            blocks.Add($"bloom={(PostFX.Active ? 1 : 0)}");
 
             // Time-of-day ramp. Naming contract with SSXImporter.BuildLightStops: empty GOs
             // "LightStop_<region>_<y>_<sunI>_<sunHex>_<ambR>_<ambG>_<ambB>_<fillHex>_
@@ -1306,6 +1337,7 @@ namespace TrickyMaddnessLevelHook
                 LoadClock.Mark("Painter");
             }
 
+            int rampStops = -1;   // -1 = [Visual] LightingRamp off
             if (lightingRamp == null || lightingRamp.Value)
             {
                 var stops = new List<LightingRamp.Stop>();
@@ -1339,7 +1371,10 @@ namespace TrickyMaddnessLevelHook
                     Log.LogWarning("[LightingRamp] only 1 stop marker found; a ramp needs 2 to "
                         + "interpolate, so the map keeps its single baked grade.");
                 }
+                rampStops = stops.Count;
             }
+            blocks.Add($"ramp={rampStops}");
+            Log.LogInfo("[LevelBuild] blocks: " + string.Join(" ", blocks));
 
             // Respawn / OOB instrumentation. Last, so it belongs to the scene the
             // player will actually ride and dies with it (which is what guarantees
