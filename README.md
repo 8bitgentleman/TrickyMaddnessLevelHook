@@ -77,6 +77,26 @@ platform-independent; copy it into `BepInEx/plugins/`.
 It also references `TrickyMaddnessLevelMaker.dll` (GlitcherOG's LevelMaker,
 which every custom map already needs installed) from your `BepInEx/plugins/`.
 
+## How the source is laid out
+
+The plugin is one `partial class Plugin` split over three tiers:
+
+- **`Core/`** — what any custom map needs: loading the bundle, the level build
+  order (`Core/LevelBuild.cs`), spawn and starting gate, respawn, rails, AI
+  paths, the sidecar, shader handling, level select.
+- **`Features/`** — optional level features a map turns on by naming a marker
+  object (wind, launch pads, teleports, animated doors and movers, UV scroll,
+  skydome, falling snow, smashables, glow, post-processing, lighting ramp).
+- **`Games/`** — code that only makes sense for maps converted from one
+  original game (`SsxTricky/`, `Ssx3/`).
+
+`Core/` and `Features/` never refer to anything in `Games/` directly; they call
+the hooks declared in `Core/GameHooks.cs`, which `Games/GameHooks.cs` fills in.
+So **you can delete `Games/` and the Hook still builds** — maps just lose the
+game-specific extras. That is the intended starting point if you want
+a Hook for your own maps without the SSX conversion code; to add your own
+game's code, implement a hook in `Games/` rather than calling into it from core.
+
 ## Making a map the Hook understands
 
 A map is `<name>.asset` (a Unity scene AssetBundle) in the game's `Maps/`
@@ -104,7 +124,7 @@ either send the change upstream or give your build its own GUID and name.
   plays — it is the version a player's log reports.
 - Stay backward-compatible: every map already shipped must load unchanged.
   New sidecar headers must default to the old behaviour when absent, and must
-  be added to `SidecarHeaders` in `Plugin.cs` (a missing one fails silently).
+  be added to `SidecarHeaders` in `Core/Sidecar.cs` (a missing one fails silently).
 - A patch that changes the game's **own** courses must be off by default and
   bail out on any IL mismatch.
 - `CLAUDE.md` lists the rules whose violation breaks maps silently — read it

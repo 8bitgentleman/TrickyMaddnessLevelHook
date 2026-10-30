@@ -13,6 +13,33 @@ only the rules whose violation breaks a map *silently*.
 Full mechanism, IL evidence and dead ends for each §N: `../HOOK_NOTES.md`, same
 numbering.
 
+## Where things live
+
+`Plugin` is one `partial class` spread over three tiers (`build.sh` compiles
+every `.cs` outside `release/` and `obj/`, so a new file needs no registration):
+
+- `Plugin.cs` — config binding, `Awake`, Harmony wiring.
+- `Core/` — what every custom map needs: bundle load (`BundleLoad.cs`), the build
+  order (`LevelBuild.cs` `LoadLevelManager` + `BuildContext`), spawn/gate,
+  respawn, rails, AI paths, the sidecar, materials, level select, `Debug/`.
+- `Features/` — optional level features keyed off marker names (wind, launch,
+  teleport, anim doors/movers, UV scroll, skydome, snow, smashables, glow,
+  post-FX, lighting ramp).
+- `Games/` — code for one source game (`SsxTricky/`, `Ssx3/`).
+
+⚠️ **Core and Features must never name a `Games/` type.** They reach game code
+only through the partial-method hooks declared in `Core/GameHooks.cs` and
+implemented in `Games/GameHooks.cs` (or the four `LoadLevelManager` blocks' own
+files); game-driven fog goes through the core `GameFog` slot. With `Games/`
+deleted the compiler drops every hook call and the Hook still builds — check
+that after touching the seam (`mv Games /tmp/x && ./build.sh --mac`; move it
+back). A partial method returns `void` and takes no `out`, so results come back
+through `ref`; and it can be implemented **once**, so every game's part of a
+hook goes in that one body.
+
+**Cite symbols, not line numbers** — `Core/Respawn.cs` `BuildRaceLineRespawns`,
+never `Plugin.cs:1471`. Code moves between files; a symbol survives it.
+
 - §3 Never `Path.*` to split scene names — on macOS `\` is an ordinary filename
   char. Use `Split('\\','/')`.
 - §4 Bundle shaders are DISTRUSTED on Metal|Vulkan|D3D11|D3D12 (`isSupported`
@@ -32,7 +59,7 @@ numbering.
   target speed; that is retired (HOOK_NOTES §11.1 has why, and the geometry that
   refutes it).
   ⚠️ **The push direction is the `"Dir"` CHILD's forward, not the `Wind_` box's
-  own forward** (`Plugin.cs` ~2051) — the importer orients the BOX to the source
+  own forward** (`Features/Wind.cs` `AttachWindVolumes`) — the importer orients the BOX to the source
   volume so OBB containment matches, and carries the push vector on the child
   because the two are unrelated. Reading the box's own `transform.forward` out of
   a built bundle yields a confidently wrong direction that still looks plausible:
@@ -156,7 +183,7 @@ numbering.
   prop is a 7-post grid at pitch 1.5 with **8 bays** at `gateX ± 0.75, 2.25,
   3.75, 5.25`, and lanes are `x = -6.75 + 1.5k` for `k = 1..racerEntries.Count`
   off `MakerSpawnPoint` (which is what `LevelManager.startingGate` is set to,
-  `Plugin.cs:1471`). A bay lands on a lane only when `gateX` is a **multiple of
+  in `Core/LevelBuild.cs` `LoadLevelManager`). A bay lands on a lane only when `gateX` is a **multiple of
   1.5**, so use `1.5f * (N / 2) - 6f` (int division), **not** mid-field
   `0.75N - 6`. ⚠️ Mid-field is only a multiple of 1.5 for **even** N; at N = 9 it
   is `+0.75` and drives all seven posts through seven riders — that shipped as
@@ -173,7 +200,8 @@ numbering.
   the one left out is an AI, never the human.
 
 - ⚠️ **`MenuManager.LoadScene` is ADDITIVE and unloads NOTHING — so the bundle
-  `Unload(true)` at `Plugin.cs:3364-3376` rests on an assumption its own comment
+  `Unload(true)` in `Core/BundleLoad.cs` `MenuManager_SelectLevel.Prefix`
+  (step 3, "Switching maps") rests on an assumption its own comment
   states and the game does not guarantee.** IL:
   `LoadSceneAsync(sceneName, LoadSceneMode.Additive)`, with no unload anywhere in
   the coroutine; the game's unloads live in the sibling coroutines `UnloadLevel`
@@ -194,13 +222,14 @@ numbering.
   Again button has NOT been checked** and would hit the same path if it routes
   to `PlayAgain()`. Full account with the measured numbers:
   `AI_BRAIN_PLAN.md` §5.1.
-  ⚠️ And `SkyboxWatch` cannot see any of it: `ShaderLooksBroken` (`:840`)
+  ⚠️ And `SkyboxWatch` cannot see any of it: `ShaderLooksBroken` (`Core/Materials.cs`)
   short-circuits on `gameOrigin`, and `Hidden/InternalErrorShader` is
   permanently resident in a built player, so it is in the menu-time
   `GameShaderIds` snapshot and gets logged `is usable, untouched`.
 - ⚠️ **`PlayAgain()` on a custom map silently unloads the bundle.** The
   `LoadScene` prefix rewrites `levelEntry.sceneName` from the `$<bundle path>`
-  marker to the bundle's real scene name (`Plugin.cs:3154`) and the game keeps
+  marker to the bundle's real scene name (`Core/BundleLoad.cs`
+  `MenuManager_SelectLevel.Prefix`) and the game keeps
   that copy as `MenuManager.lastLevelEntry`; replaying it strips the `$`, so the
   prefix takes the built-in branch instead. This is the game's own Play Again
   button, on every custom map — workaround and full mechanism:
@@ -222,9 +251,9 @@ note, confirmed there from a user log — **not yet confirmed here**, but the
 Hook has the identical exposure: `Instance` lives on the object BepInEx
 parents every plugin under, and four runtime features gate on
 `if (Instance != null)` before calling `Instance.StartCoroutine(...)` —
-`SkyboxWatch` (`Plugin.cs:791`), `TelemetryOnBuiltIn` (`:803`),
-`SolidColorSky` (`:1133`), `RailProbe` (`:1879`), and `LoadWatchdog`
-(`:4160-4161`). Unity's `!=` treats a destroyed object as null, so if the
+`SkyboxWatch` and `TelemetryOnBuiltIn` (started in `Core/SceneHooks.cs`
+`OnSceneLoaded`), `SolidColorSky` (`Core/Materials.cs`), `RailProbe`
+(`Core/Rails.cs` `ConvertRails`), and `LoadWatchdog` (`Core/BundleLoad.cs`). Unity's `!=` treats a destroyed object as null, so if the
 manager GameObject gets cleared, all five just never start — no exception,
 no log line, they silently don't run. `LoadWatchdog` not firing is the one
 that would read as "custom level hangs on a black screen" from the outside.
@@ -242,7 +271,7 @@ and `LevelEntry` became a **struct**, so the old community Harmony patch silentl
 fails to bind → custom levels load to a black screen. Patch `LoadScene`, with a
 `ref LevelEntry` prefix. If a future update breaks it again, disassemble
 `Assembly-CSharp.dll` (`monodis`/`ikdasm`) and re-check `MenuManager`'s load
-method + `LevelEntry`'s shape against `Plugin.cs`.
+method + `LevelEntry`'s shape against `Core/BundleLoad.cs`.
 
 ⚠️ Don't start that by hand. `python3 tm_re_baseline.py check` (from the repo root)
 resolves **every** `[HarmonyPatch]`/`AccessTools` target in all five mods against the
