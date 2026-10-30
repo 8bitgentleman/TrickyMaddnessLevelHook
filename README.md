@@ -60,3 +60,61 @@ from `CharacterHook-src`/`AIMod-src`). Does not auto-deploy; copy the DLL to
   instead of one long scrolling row.
 - Debug toggles (shader logging, rail-collider checks, telemetry export, perf
   harness) — all off by default.
+
+## Building from source
+
+Needs Mono's `mcs` (`brew install mono` on Mac) and an installed copy of the
+game with BepInEx 5.4.x — the Hook compiles against the game's own assemblies,
+which are not in this repo and never will be.
+
+    ./build.sh --mac        # native Mac build (Steam's default install path)
+    ./build.sh              # Windows build under CrossOver
+
+Anywhere else, point it at your install: `GAME=/path/to/Tricky\ Madness ./build.sh`
+(or set `MANAGED`, `CORE`, `MAKER` individually). The output DLL is
+platform-independent; copy it into `BepInEx/plugins/`.
+
+It also references `TrickyMaddnessLevelMaker.dll` (GlitcherOG's LevelMaker,
+which every custom map already needs installed) from your `BepInEx/plugins/`.
+
+## Making a map the Hook understands
+
+A map is `<name>.asset` (a Unity scene AssetBundle) in the game's `Maps/`
+folder, plus two optional files next to it with the same stem:
+
+- `<name>.png` — the 1024×576 level-select thumbnail.
+- `<name>.aipaths.txt` — the **sidecar**: per-map settings the game has no slot
+  for (world scale, gravity, physics rate, platform, level-select group/order,
+  display name…) and the AI paths. **The format is specified in full in
+  `gen_aipaths.py`'s docstring**, which also generates it from a bundle.
+
+Build one bundle per platform (`mac` and `windows`) and declare it with the
+`platform` header — a foreign-platform bundle loads, but its shaders get
+swapped for the game's own and that swap is lossy.
+
+## Contributing
+
+Pull requests are welcome. One rule: **only builds from this repo ship under
+the Hook's plugin GUID.** BepInEx loads a single plugin per GUID, so a fork
+released under the same one means players can't tell which Hook they have and
+log reports stop meaning anything. Fork for your own experiments freely, but
+either send the change upstream or give your build its own GUID and name.
+
+- Bump `PLUGIN_VERSION` in `PluginInfo.cs` on any change that alters how a map
+  plays — it is the version a player's log reports.
+- Stay backward-compatible: every map already shipped must load unchanged.
+  New sidecar headers must default to the old behaviour when absent, and must
+  be added to `SidecarHeaders` in `Plugin.cs` (a missing one fails silently).
+- A patch that changes the game's **own** courses must be off by default and
+  bail out on any IL mismatch.
+- `CLAUDE.md` lists the rules whose violation breaks maps silently — read it
+  before touching the area it covers. Some comments and notes reference docs
+  from the private conversion workspace this came out of (`HOOK_NOTES.md`,
+  `ssx/…`); the rule stated next to them is the part that matters.
+
+## License
+
+The Hook began as a fork of GlitcherOG's
+[TrickyMaddnessLevelHook](https://github.com/GlitcherOG/TrickyMaddnessLevelHook),
+which has no license. **Licensing is pending GlitcherOG's agreement**; until a
+LICENSE file lands here, no license is granted.
