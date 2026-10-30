@@ -137,30 +137,16 @@ namespace TrickyMaddnessLevelHook
             // SnowFallMan instead (SsxSnowFall, BakeSsxSnowMarker); a failed per-race roll
             // still consumes the marker. "WeatherSSX3_<S>_<x0>_<y0>_<rawPerPixel>" is SSX 3's
             // zone-mapped weather (Ssx3SnowFall, BakeSsx3WeatherMarker).
-            bool snowDone = SnowFall.Active || SsxSnowFall.Active || Ssx3SnowFall.Active;
+            bool snowDone = SnowFall.Active;
+            GameSnowActive(ref snowDone);
             string snowKind = snowDone ? "active" : "none";
             foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
             {
                 if (snowDone) break;
                 foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
                 {
-                    if (t.name.StartsWith("SnowSSX_"))
-                    {
-                        SpawnSsxSnow(t);
-                        snowKind = "ssx";
-                        snowDone = true;
-                        break;
-                    }
-                    if (t.name.StartsWith("WeatherSSX3_"))
-                    {
-                        if (Ssx3SnowFall.TrySpawn(t, ssx3SnowFlakeSize.Value, out string why))
-                            Log.LogInfo($"[SnowFall] SSX 3 weather snow spawned: {why}");
-                        else
-                            Log.LogWarning($"[SnowFall] SSX 3 weather: {why}");
-                        snowKind = "ssx3";
-                        snowDone = true;
-                        break;
-                    }
+                    TrySpawnGameSnow(t, ref snowKind, ref snowDone);
+                    if (snowDone) break;
                     if (!t.name.StartsWith("SnowFX_")) continue;
                     float si;
                     if (!float.TryParse(t.name.Substring("SnowFX_".Length), NumberStyles.Float,

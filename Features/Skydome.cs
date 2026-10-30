@@ -165,8 +165,8 @@ namespace TrickyMaddnessLevelHook
                 // SSX 3 per-zone fog (§37): the game fogs its sky at the zone's full cap, and
                 // Unity fogs the dome mesh but never the clear colour above its open rim. The
                 // PS2 blends in display space, so lerp the gamma-space colours.
-                Color fill = Ssx3Painter.SkyFogAmount > 0f
-                    ? Color.Lerp(_fill, Ssx3Painter.SkyFogColor, Ssx3Painter.SkyFogAmount) : _fill;
+                Color fill = GameFog.SkyAmount > 0f
+                    ? Color.Lerp(_fill, GameFog.SkyColor, GameFog.SkyAmount) : _fill;
                 if (cam.clearFlags != CameraClearFlags.SolidColor || cam.backgroundColor != fill)
                 {
                     cam.clearFlags = CameraClearFlags.SolidColor;

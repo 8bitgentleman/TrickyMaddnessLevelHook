@@ -137,15 +137,7 @@ namespace TrickyMaddnessLevelHook
                     // marker-child contract as MoverHazard below, for the same reason.
                     if (t.Find("MoverPlayerOnly") != null)
                         moveSurfPlayerOnly.Add(t.name.Substring("MoveSurf_".Length));
-                    // Contact with this mover wrecks the rider. Flagged by a marker CHILD
-                    // rather than by the mover's own name, because the trigger join below
-                    // parses "MoveSurfTrig_<mover>_<trig>" positionally — decorating
-                    // "MoveSurf_<idx>" would silently unwire every trigger on the course.
-                    if (t.Find("MoverHazard") != null && t.GetComponent<AvalancheHazard>() == null)
-                    {
-                        t.gameObject.AddComponent<AvalancheHazard>().target = anim;
-                        msHaz++;
-                    }
+                    AttachGameMoverParts(t, anim, ref msHaz);
                 }
             foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
                 foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))

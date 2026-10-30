@@ -110,7 +110,7 @@ namespace TrickyMaddnessLevelHook
             return i;
         }
 
-        static void LowerScaledGems(UnityEngine.SceneManagement.Scene scene)
+        static partial void LowerScaledGems(UnityEngine.SceneManagement.Scene scene)
         {
             if (lowerScaledGems == null || !lowerScaledGems.Value) return;
             if (BundleSource != "ssx_tricky" || WorldScale <= 1f) return;

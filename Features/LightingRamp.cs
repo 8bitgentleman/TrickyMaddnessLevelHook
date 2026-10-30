@@ -263,7 +263,7 @@ namespace TrickyMaddnessLevelHook
 
             // Ssx3Painter owns fog on an SSX 3 map whose sidecar carries per-zone fog (the
             // chain has both); the ramp keeps sun, ambient, dome and terrain.
-            if (_anyFog && !Ssx3Painter.OwnsFog)
+            if (_anyFog && !GameFog.Owned)
             {
                 bool linear = g.fogMode == "linear";
                 RenderSettings.fog = linear ? g.fogEnd > 0f : g.fogDen > 0f;

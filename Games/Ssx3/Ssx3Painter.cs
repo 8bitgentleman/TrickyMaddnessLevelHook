@@ -18,7 +18,7 @@ namespace TrickyMaddnessLevelHook
 {
     public partial class Plugin
     {
-        static void SpawnSsx3Painter(BuildContext ctx)
+        static partial void SpawnSsx3Painter(BuildContext ctx)
         {
             var levelManagerMaker = ctx.Maker;
             // SSX 3 per-zone fog + ScreenTint (WorldPainter slots 5/7) from the plain-text
@@ -79,12 +79,9 @@ namespace TrickyMaddnessLevelHook
     // the volume's weight to 0, as the game skips the pass.
     public class Ssx3Painter : MonoBehaviour
     {
-        public static bool Active, OwnsFog;
-        // The sky's share of the fog, read by SkydomeFollow for the unfogged clear colour above
-        // the dome's open rim (the game fogs its sky at the full cap; Unity fogs the dome mesh
-        // itself but never the clear colour). 0 = no painter fog.
-        public static float SkyFogAmount;
-        public static Color SkyFogColor;
+        public static bool Active;
+        // Fog ownership and the sky's share of the fog go out through GameFog (Core/GameHooks.cs):
+        // the game fogs its sky at the full cap, which SkydomeFollow reproduces above the rim.
         static Ssx3Painter _inst;
         const float Bucket = 8192f;            // raw units per lookup-grid bucket
         const float FogZCutoffRaw = 6000f;     // d0 ≈ 6,120 raw (farclip 30k) / 5,550 (20k), rounded
@@ -215,7 +212,7 @@ namespace TrickyMaddnessLevelHook
             UnityEngine.Rendering.RenderPipelineManager.beginCameraRendering += p.OnBeginCamera;
             _inst = p;
             Active = true;
-            OwnsFog = p._fog != null;
+            GameFog.Owned = p._fog != null;
             why = (p._fog != null ? $"fog {p._fog.zones.Length} zone(s)/{p._fog.zone.Length} cell(s)" : "fog off")
                 + ", " + (p._tint != null ? $"tint {p._tint.zones.Length} zone(s)/{p._tint.zone.Length} cell(s)" : "tint off")
                 + $", S {p._s}, fog reaches its cap at {(reach > 0f ? reach.ToString("F0", inv) + " u ([Visual] Ssx3FogReach)" : (PsFarClipRaw * p._s).ToString("F0", inv) + " u (PS2 far clip)")}{offNote}";
@@ -332,7 +329,7 @@ namespace TrickyMaddnessLevelHook
             if (!FogMap(k, out float start, out float end, out float cap))
             {
                 RenderSettings.fog = false;
-                SkyFogAmount = 0f;
+                GameFog.SkyAmount = 0f;
                 return;
             }
             var col = new Color(k[4], k[5], k[6], 1f);   // CLUT = int(c·255), gamma space
@@ -341,8 +338,8 @@ namespace TrickyMaddnessLevelHook
             RenderSettings.fogStartDistance = start;
             RenderSettings.fogEndDistance = end;
             RenderSettings.fogColor = col;
-            SkyFogAmount = cap;
-            SkyFogColor = col;
+            GameFog.SkyAmount = cap;
+            GameFog.SkyColor = col;
         }
 
         void ApplyTint(float[] k)
@@ -408,7 +405,7 @@ namespace TrickyMaddnessLevelHook
                 RenderSettings.fog = _origFog; RenderSettings.fogMode = _origMode; RenderSettings.fogColor = _origColor;
                 RenderSettings.fogDensity = _origDen; RenderSettings.fogStartDistance = _origStart; RenderSettings.fogEndDistance = _origEnd;
             }
-            if (_inst == this) { _inst = null; Active = false; OwnsFog = false; SkyFogAmount = 0f; }
+            if (_inst == this) { _inst = null; Active = false; GameFog.Owned = false; GameFog.SkyAmount = 0f; }
         }
     }
 }

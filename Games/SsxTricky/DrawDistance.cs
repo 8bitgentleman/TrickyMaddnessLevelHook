@@ -18,7 +18,7 @@ namespace TrickyMaddnessLevelHook
 {
     public partial class Plugin
     {
-        static void AttachDrawDistance(BuildContext ctx, List<string> blocks)
+        static partial void AttachDrawDistance(BuildContext ctx, List<string> blocks)
         {
             var levelManagerMaker = ctx.Maker;
             // Per-level camera draw distance. Naming contract with SSXImporter.BuildLighting:
