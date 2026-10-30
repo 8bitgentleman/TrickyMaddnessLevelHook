@@ -18,10 +18,14 @@ pack should claim a version the DLL doesn't have.
 """
 import io, os, re, shutil, subprocess, sys
 
-REPO = "/Users/mtvogel/Downloads/claude_scratch/tricky_mods"
-HOOK_SRC = os.path.join(REPO, "LevelHook-src")
+HOOK_SRC = os.path.dirname(os.path.abspath(__file__))
+# Inside the tricky_mods monorepo this folder is LevelHook-src/ and the shared
+# README text + Discord Releases/ staging dir sit one level up. Split out on its
+# own (the public Hook repo) neither exists, so pack into ./dist instead.
+REPO = os.path.dirname(HOOK_SRC)
+IN_MONOREPO = os.path.isfile(os.path.join(REPO, "release_shared/sync_readmes.py"))
 HOOK_DLL = os.path.join(HOOK_SRC, "TrickyMaddnessLevelHook.dll")
-MAKER_DLL = os.path.join(REPO, "GaribaldiRebuild/Assets/Plugins/TrickyMaddnessLevelMaker.dll")
+MAKER_DLL = os.environ.get("MAKER") or os.path.join(REPO, "GaribaldiRebuild/Assets/Plugins/TrickyMaddnessLevelMaker.dll")
 README = os.path.join(HOOK_SRC, "release/README.txt")
 
 m = re.search(r'PLUGIN_VERSION\s*=\s*"([^"]+)"', io.open(os.path.join(HOOK_SRC, "PluginInfo.cs"), encoding="utf-8").read())
@@ -40,7 +44,7 @@ if VERSION not in lines:
              % (os.path.basename(HOOK_DLL), VERSION))
 if not os.path.isfile(MAKER_DLL):
     sys.exit("missing %s -- the Hook rebuilds levels from its Maker* types, "
-              "this DLL is required alongside it" % MAKER_DLL)
+              "this DLL is required alongside it (set MAKER=<path> to point at one)" % MAKER_DLL)
 
 # ⚠️ The README is COMMITTED at LevelHook-src/release/README.txt, same pattern as
 # CharacterHook-src/release/ and ssx/release/. Refuse rather than pack stale prose.
@@ -52,11 +56,11 @@ if VERSION not in head:
               % (head.strip(), VERSION))
 # The install walkthrough is shared with every other mod/pack README and lives in
 # release_shared/ -- refuse a pack whose copy drifted from it.
-if subprocess.call([sys.executable, os.path.join(REPO, "release_shared/sync_readmes.py"), "--check"]):
+if IN_MONOREPO and subprocess.call([sys.executable, os.path.join(REPO, "release_shared/sync_readmes.py"), "--check"]):
     sys.exit("fix the README install text first (release_shared/sync_readmes.py)")
 
 NAME = "Tricky Madness Level Hook v%s - Tricky Madness Mod" % VERSION
-DEST = os.path.join(REPO, "Discord Releases", NAME)
+DEST = os.path.join(REPO, "Discord Releases", NAME) if IN_MONOREPO else os.path.join(HOOK_SRC, "dist", NAME)
 if os.path.isdir(DEST):
     shutil.rmtree(DEST)
 os.makedirs(os.path.join(DEST, "BepInEx/plugins"))

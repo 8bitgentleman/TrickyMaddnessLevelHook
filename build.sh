@@ -10,10 +10,10 @@ set -e
 # Defaults target the Windows (CrossOver) build. Override for the native Mac
 # build with:  ./build.sh --mac    (or set GAME/MANAGED/CORE/MAKER env vars).
 if [ "$1" = "--mac" ]; then
-  GAME="${GAME:-/Users/mtvogel/Library/Application Support/Steam/steamapps/common/Tricky Madness}"
+  GAME="${GAME:-$HOME/Library/Application Support/Steam/steamapps/common/Tricky Madness}"
   MANAGED="${MANAGED:-$GAME/TrickyMadness.app/Contents/Resources/Data/Managed}"
 else
-  GAME="${GAME:-/Users/mtvogel/Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)/Steam/steamapps/common/Tricky Madness}"
+  GAME="${GAME:-$HOME/Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)/Steam/steamapps/common/Tricky Madness}"
   MANAGED="${MANAGED:-$GAME/Tricky Madness_Data/Managed}"
 fi
 CORE="${CORE:-$GAME/BepInEx/core}"
@@ -22,8 +22,16 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # build doesn't have it installed yet (e.g. a fresh Mac plugins dir).
 MAKER="${MAKER:-$GAME/BepInEx/plugins/TrickyMaddnessLevelMaker.dll}"
 if [ ! -f "$MAKER" ]; then
-  MAKER="/Users/mtvogel/Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)/Steam/steamapps/common/Tricky Madness/BepInEx/plugins/TrickyMaddnessLevelMaker.dll"
+  MAKER="$HOME/Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)/Steam/steamapps/common/Tricky Madness/BepInEx/plugins/TrickyMaddnessLevelMaker.dll"
 fi
+# Nothing compiles without the game's assemblies and the Maker DLL, and mcs's
+# own error for a missing -r: is a wall of CS0006 -- say which input is absent.
+for f in "$MANAGED/Assembly-CSharp.dll" "$CORE/BepInEx.dll" "$MAKER"; do
+  if [ ! -f "$f" ]; then
+    echo "build.sh: missing $f -- set GAME (or MANAGED/CORE/MAKER) to your install" >&2
+    exit 1
+  fi
+done
 
 mcs -target:library -out:"$HERE/TrickyMaddnessLevelHook.dll" \
   "$HERE/Plugin.cs" "$HERE/PluginInfo.cs" \
