@@ -33,8 +33,23 @@ for f in "$MANAGED/Assembly-CSharp.dll" "$CORE/BepInEx.dll" "$MAKER"; do
   fi
 done
 
+# Compile every .cs under this folder, so a new file can't be left out of the
+# build by forgetting to list it here. Plugin.cs and PluginInfo.cs go first,
+# then the rest sorted, so the type order (which sets Harmony's order for
+# same-priority patches) only changes when files do. POSIX sh has no arrays,
+# hence the positional-parameter list.
+set -- "$HERE/Plugin.cs" "$HERE/PluginInfo.cs"
+while IFS= read -r f; do
+  case "$f" in
+    ''|./Plugin.cs|./PluginInfo.cs) continue ;;
+  esac
+  set -- "$@" "$HERE/${f#./}"
+done <<EOF
+$(cd "$HERE" && find . -name '*.cs' -not -path './release/*' -not -path './obj/*' | LC_ALL=C sort)
+EOF
+
 mcs -target:library -out:"$HERE/TrickyMaddnessLevelHook.dll" \
-  "$HERE/Plugin.cs" "$HERE/PluginInfo.cs" \
+  "$@" \
   -r:"$MANAGED/Assembly-CSharp.dll" \
   -r:"$MANAGED/UnityEngine.dll" \
   -r:"$MANAGED/UnityEngine.CoreModule.dll" \
