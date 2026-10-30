@@ -100,6 +100,9 @@ Sidecar format (one token line per point, invariant-culture floats):
                           already played orphans its times, and two maps sharing
                           one share records. Absent == the filename.
     path               <- starts a new path
+    rail <name>        <- optional, per-path (after `path`): this fragment rides
+                          the named rail. An older Hook counts it as malformed
+                          and drops it, so the fragment dead-ends.
     <x> <z> <0|1>      <- world XZ position + windup flag
 
 Usage:
