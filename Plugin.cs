@@ -5630,7 +5630,10 @@ namespace TrickyMaddnessLevelHook
         static readonly System.Reflection.FieldInfo fCC =
             AccessTools.Field(typeof(Snowboarder), "characterController");
 
-        [HarmonyPostfix]
+        // Runs before Snowboarder_AirborneStuckGuard, whose forced Land() could
+        // otherwise be what this records. Without a priority the two run in
+        // source-file order, which a file split would silently change.
+        [HarmonyPostfix, HarmonyPriority(Priority.HigherThanNormal)]
         public static void Postfix(Snowboarder __instance)
         {
             if (!Plugin.respawnFallClamp.Value || __instance == null || fState == null) return;
