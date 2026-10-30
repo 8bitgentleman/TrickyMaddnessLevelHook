@@ -213,6 +213,72 @@ namespace TrickyMaddnessLevelHook
             }
             return null;
         }
+
+        static void ConvertRails(BuildContext ctx)
+        {
+            //Convert From Make Rails to Game Rails
+            var RailObjects = FindObjectsByType(typeof(MakerRails), FindObjectsSortMode.None) as MakerRails[];
+            int railColliders = 0, railSegments = 0;
+            HookRails.Clear();
+            GameObject probeRailGO = null;
+            List<Rail.Segment> probeSegments = null;
+            for (int i = 0; i < RailObjects.Length; i++)
+            {
+                List<Rail.Segment> NewSegments = BuildRailSegments(RailObjects[i]);
+
+                // Since TM 25714710 a rail's path lives on a sibling RailInstanceData,
+                // which Rail.Awake caches with GetComponent — so the data component
+                // must exist BEFORE the Rail is added, or Awake caches null and every
+                // rail falls back to its transform position (ungrindable, no error).
+                var NewData = RailObjects[i].gameObject.AddComponent<RailInstanceData>();
+                NewData.segments = NewSegments;
+                var NewRail = RailObjects[i].gameObject.AddComponent<RailInvis>();
+
+                // The bool is checked, not discarded: on a miss TryParse yields
+                // default(RailMaterial) silently, which is indistinguishable from an
+                // authored value and just changes the grind sound/FX for no visible reason.
+                Rail.RailMaterial material1;
+                if (!Enum.TryParse(RailObjects[i].Materials.ToString(), out material1))
+                    Log.LogWarning($"[Rails] '{RailObjects[i].gameObject.name}' declares material "
+                        + $"'{RailObjects[i].Materials}', which has no match in Rail.RailMaterial — "
+                        + $"using {material1} instead (grind sound/FX will be wrong on this rail).");
+
+                NewRail.material = material1;
+
+                // Grind detection BoxCast/SphereCasts layer 9 ("Rail") and then does
+                // GetComponent<Rail>() on the collider's OWN GameObject — so a rail
+                // is only grindable with a collider on this exact GO, on layer 9.
+                // Maker rails ship with neither. (MakerRails.Start() sets the layer
+                // too, but a frame after scene build — set it now.)
+                RailObjects[i].gameObject.layer = 9;
+                railSegments += NewSegments.Count;
+                if (NewSegments.Count < 2)
+                {
+                    Log.LogDebug($"[Rails] '{RailObjects[i].name}': {NewSegments.Count} segment(s), no collider built");
+                    continue;
+                }
+                if (RailObjects[i].GetComponent<Collider>() != null)
+                {
+                    Log.LogDebug($"[Rails] '{RailObjects[i].name}': already has a collider, left as-is");
+                    continue;
+                }
+                if (BuildRailCollider(RailObjects[i].gameObject, NewSegments))
+                {
+                    railColliders++;
+                    HookRails.Add(NewRail);
+                    if (probeRailGO == null)
+                    {
+                        probeRailGO = RailObjects[i].gameObject;
+                        probeSegments = NewSegments;
+                    }
+                }
+            }
+            if (RailObjects.Length > 0)
+                Log.LogInfo($"[Rails] converted {RailObjects.Length} rail(s), built {railColliders} collider(s), {railSegments} segment(s) total");
+            LoadClock.Mark("Rails");
+            if (railColliderProbe.Value && probeRailGO != null && Instance != null)
+                Instance.StartCoroutine(RailProbe(probeRailGO, probeSegments));
+        }
     }
 
     // Rail-to-rail handover at a rail's end. The game has one already
