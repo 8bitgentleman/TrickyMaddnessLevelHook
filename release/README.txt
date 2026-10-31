@@ -329,12 +329,27 @@ HOW TO INSTALL
   STEP 4 - Start the game from Steam like normal. Wait for the main menu,
     then quit.
 
-  Steam Deck / Linux - UNTESTED. Nobody has tried these mods on a Steam
-  Deck yet. If you want to try: do steps 2-4 above, and also set
-  Steam -> right-click Tricky Madness -> Properties -> Launch Options to
-      WINEDLLOVERRIDES="winhttp=n,b" %command%
-  Without that, BepInEx most likely never starts. Please report back
-  whether it worked either way.
+  STEAM DECK / LINUX - UNTESTED. Nobody has tried these mods on a Steam
+  Deck yet. Tricky Madness has its own Linux version, and Steam uses it
+  by default - but these mods and maps are only made for the Windows and
+  Mac versions, so on a Deck you run the WINDOWS version through Proton
+  (Steam's built-in Windows layer) and follow the Windows steps. Do all
+  of this in Desktop Mode:
+    a) Steam -> right-click Tricky Madness -> Properties -> Compatibility
+       -> tick "Force the use of a specific Steam Play compatibility
+       tool" and pick a recent Proton. Steam downloads the Windows
+       version - let it finish.
+    b) Steam -> right-click Tricky Madness -> Properties -> General ->
+       Launch Options, and paste in exactly:
+           WINEDLLOVERRIDES="winhttp=n,b" %command%
+       Without this, BepInEx never starts and there is no error.
+    c) Do Windows steps 1-4 above. Your GAME FOLDER should now have
+       "Tricky Madness.exe" in it - if it doesn't, step a) has not
+       finished.
+    d) For every mod and map pack, download the WINDOWS zip, never the
+       Mac one.
+  Please report back whether it worked either way - and if it didn't,
+  send the file "LogOutput.log" from the BepInEx folder.
 
   MAC
   ---
