@@ -113,7 +113,7 @@ namespace TrickyMaddnessLevelHook
             catch (Exception e) { Log.LogWarning($"[Debug] AutoLoadMap: could not apply the saved difficulty: {e.Message}"); }
             Log.LogInfo($"[Debug] AutoLoadMap: selecting '{trackName}' (index {index}), difficulty "
                 + (difficulty < 0 ? "UNSET (casual)" : difficulty.ToString()));
-            MenuManager.Instance.SelectLevel(index);
+            MenuManager.Instance.SelectLevel(index, MenuManager.Weather.Clear);
         }
     }
 }

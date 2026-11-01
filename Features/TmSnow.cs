@@ -36,13 +36,21 @@ namespace TrickyMaddnessLevelHook
             if (fs == null) { Destroy(go); why = "fallingSnowPrefab has no FallingSnow"; return false; }
             // Same clamp and meaning as SnowFall: snowIntensity scales emission and cap.
             intensity = Mathf.Clamp(intensity, 0.05f, 8f);
-            var ps = go.GetComponent<ParticleSystem>();
-            var main = ps.main;
-            main.maxParticles = Mathf.CeilToInt(main.maxParticles * intensity);
-            var em = ps.emission;
-            em.rateOverTimeMultiplier *= intensity;
+            // TM 26365637 split the effect into near/far (+ blizzard) child systems, so
+            // the root may carry none: scale every system under the prefab.
+            var systems = go.GetComponentsInChildren<ParticleSystem>(true);
+            if (systems.Length == 0) { Destroy(go); why = "fallingSnowPrefab has no ParticleSystem"; return false; }
+            float rate = 0f; int cap = 0;
+            foreach (var ps in systems)
+            {
+                var main = ps.main;
+                main.maxParticles = Mathf.CeilToInt(main.maxParticles * intensity);
+                var em = ps.emission;
+                em.rateOverTimeMultiplier *= intensity;
+                rate += em.rateOverTimeMultiplier; cap += main.maxParticles;
+            }
             fFallingSnow.SetValue(lm, fs);
-            why = $"intensity {intensity:F2}, rate {em.rateOverTimeMultiplier:F0}/s, cap {main.maxParticles}";
+            why = $"intensity {intensity:F2}, {systems.Length} system(s), rate {rate:F0}/s, cap {cap}";
             return true;
         }
 

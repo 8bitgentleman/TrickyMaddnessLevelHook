@@ -620,6 +620,10 @@ namespace TrickyMaddnessLevelHook
                 {
                     name = TrackNames[i],
                     sceneName = "$" + Paths[i],
+                    // Default (0) makes ResolveWeather roll a random blizzard/fog,
+                    // whose ApplyFog overrides the map's own fog, sky and far clip.
+                    defaultWeather = MenuManager.Weather.Clear,
+                    canChangeWeather = false,
                     scoreThresholds = new float[]
                     {
                     100000f,
