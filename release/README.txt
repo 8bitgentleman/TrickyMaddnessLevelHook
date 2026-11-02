@@ -1,4 +1,4 @@
-Tricky Madness Level Hook v2.19.0 — required for every custom map pack
+Tricky Madness Level Hook v2.19.1 — required for every custom map pack
 ========================================================================
 
 This is the plugin that makes custom map packs (SSX Tricky Ports, SSX 3 Ports,
@@ -49,6 +49,27 @@ WHAT IT DOES
   - Shows a proper thumbnail image for each course on the level-select screen,
     with an optional grid layout (grouped by source game) for once you've got
     a lot of custom courses installed.
+
+WHAT'S NEW IN v2.19.1
+---------------------
+  Compatibility fix for the Tricky Madness update that added random weather
+  (blizzard / fog). If you've updated the game, update this too. No map pack
+  needs re-downloading and no settings changed.
+
+  - Custom courses are always raced in Clear weather. The game's new blizzard
+    and fog replaced a course's own fog, sky and draw distance, so converted
+    courses could come up washed out or cut off. The four built-in courses
+    still get the game's weather as normal.
+
+  - The level-select screen's weather setting is now shown inside the
+    button prompt: "CHANGE WEATHER (FOG)", updating as you cycle it. The
+    game's separate Weather readout sat at a fixed spot on screen, so with a
+    lot of maps installed it landed on top of course cards.
+
+  - On custom courses (whose weather can't be changed) the CHANGE WEATHER
+    prompt is hidden instead of greyed out.
+
+  - Fixed an error in the falling-snow effect on the new game version.
 
 WHAT'S NEW IN v2.19.0
 ---------------------
