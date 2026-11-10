@@ -92,6 +92,7 @@ namespace TrickyMaddnessLevelHook
         internal static ConfigEntry<float> ssx3SnowFlakeSize;
         internal static ConfigEntry<bool> zoneWeatherExitHolds;
         internal static ConfigEntry<float> zoneWeatherFlakeSize;
+        internal static ConfigEntry<float> zoneWeatherWindUnit;
 
         // SSX domes only reach ~+20 deg elevation — an open-topped bowl. Above the rim
         // the camera shows its clear color, which is black by default (feature-5's blue
@@ -401,6 +402,11 @@ namespace TrickyMaddnessLevelHook
                 "Multiplier on SSX (2012)'s flake size (0.09 m +/- 0.03 m, from the game's own " +
                 "fx_falling_snow effect). 1 is the game's number; it has not been ridden yet. Raise it " +
                 "if the flakes are too faint to see, lower it if they read as blobs. Relaunch to apply.");
+            zoneWeatherWindUnit = Config.Bind("SnowFall", "Ssx2012WindUnit", 1f,
+                "SSX (2012) maps: metres per second of snow drift per unit of the track's wind " +
+                "volumes (they say 1 or 5, and the game never states the unit). 1 assumes m/s, " +
+                "which is a GUESS that has not been checked against the real game. 0 turns the " +
+                "drift off. Relaunch to apply.");
             lightingRamp = Config.Bind("Visual", "TimeOfDayRamp", true,
                 "On whole-mountain chain maps, blend the lighting between each source " +
                 "course's grade as you descend — SSX 3's final run starts in daylight at " +

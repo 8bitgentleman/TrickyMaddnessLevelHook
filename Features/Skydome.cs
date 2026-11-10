@@ -114,6 +114,7 @@ namespace TrickyMaddnessLevelHook
         // straight onto the camera: OnBeginCamera re-asserts _fill every frame, so an external
         // per-frame write would just be fought and the two would flicker against each other.
         public void SetFill(Color c) { _fill = c; _fillValid = true; }
+        public Color Fill => _fill;
 
         // Farthest dome vertex from the pivot, in the dome's UNSCALED local frame — the
         // InverseTransformPoint round-trip cancels the root's own localScale, so this is

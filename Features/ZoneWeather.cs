@@ -12,30 +12,44 @@ namespace TrickyMaddnessLevelHook
     //   child "WxSnow_<key>_<v...>"                               fx_falling_snow state 0002
     //   child "WxBox_<kind>_<index>_<tail>"                       disabled BoxCollider = the volume
     // Each frame the camera picks the precip box it is inside; flakes drawn = precip × cap, as
-    // a STEP (2012 re-applies the value every tick, no blend: W6.21). Only precip is read here —
-    // wind and lighting boxes are later phases. Game-agnostic on purpose (Features/), so a
-    // future source game can bake the same markers.
+    // a STEP (2012 re-applies the value every tick, no blend: W6.21). Wind boxes drift the
+    // flakes along the box's +Z at <value> × upm × the effect's wind response (Phase 4 — the
+    // unit is a GUESS, m/s; RPCS3 Gate M measures it). Lighting boxes are ZoneWeatherLight's.
+    // Game-agnostic on purpose (Features/), so a future source game can bake the same markers.
     public class ZoneWeatherSnow : MonoBehaviour
     {
         public static bool Active;
         const int FORMAT = 1;
         const float FadeFrac = 0.8f;   // guess, borrowed from Ssx3SnowFall: fade the outer 20%
+        // fx_falling_snow's ParticleActionWeather fWeatherScalar (W6.21: VERIFIED value,
+        // INFERRED to be the wind-response multiplier).
+        const float WindResponse = 1f;
+        // Roof cut-off, ported from TM's FallingSnow.Update (IL, build 26514993): one ray up
+        // from the camera per frame, 150 u, Snowboarder.CastLayerMask; a hit stops emission.
+        // TM's live flakes then expire over their lifetime — ours have none (they wrap), so the
+        // count ramps over fx_falling_snow's 2 s life instead (judgment call).
+        const float RoofRay = 150f, RoofRamp = 2f;
 
         struct Box { public Transform t; public Vector3 c, half; public float v; public int idx; }
 
-        float _defaultPrecip, _wrap, _sizeMean, _sizeVar, _fallMean, _fallVar, _alpha, _sizeScale;
+        float _defaultPrecip, _defaultWind, _windUnit, _wrap, _sizeMean, _sizeVar, _fallMean, _fallVar, _alpha, _sizeScale;
         int _cap;
         bool _exitHolds;
-        Box[] _boxes;
+        Box[] _boxes, _wind;
+        Vector3 _defaultDir, _windVel, _windOff;
+        int _lastWind = -2;
 
         Transform _cam;
         ParticleSystem _ps;
         ParticleSystem.Particle[] _buf;
         Vector3[] _base;
         float[] _fall, _size;
-        float _t, _precip;
+        float _t, _precip, _roof = 1f;
+        bool _underRoof;
+        int _roofMask;
         int _lastBox = -2;
         bool _seeded;
+        Texture _flakeTex;
 
         static float F(string s) => float.Parse(s, NumberStyles.Float, CultureInfo.InvariantCulture);
 
@@ -46,7 +60,7 @@ namespace TrickyMaddnessLevelHook
             missing.Add(k); return dflt;
         }
 
-        public static bool TrySpawn(Transform root, bool exitHolds, float sizeScale, out string why)
+        public static bool TrySpawn(Transform root, bool exitHolds, float sizeScale, float windUnit, out string why)
         {
             float upm;
             var tok = root.name.Split('_');
@@ -57,8 +71,11 @@ namespace TrickyMaddnessLevelHook
                 return false;
             }
             var snow = new Dictionary<string, float[]>();
-            float defPrecip = float.NaN;
+            float defPrecip = float.NaN, defWind = 0f;
+            Vector3 defDir = Vector3.forward;
             var boxes = new List<Box>();
+            var wind = new List<Box>();
+            Texture flakeTex = null;
             try
             {
                 foreach (Transform c in root)
@@ -72,13 +89,24 @@ namespace TrickyMaddnessLevelHook
                             if (float.TryParse(p[i], NumberStyles.Float, CultureInfo.InvariantCulture, out f)) v.Add(f);
                         snow[p[1]] = v.ToArray();
                     }
-                    else if (p[0] == "WxDefault" && p.Length == 6) defPrecip = F(p[1]);
-                    else if (p[0] == "WxBox" && p.Length == 4 && p[1] == "precip")
+                    else if (c.name == "WxFlake")
+                    {
+                        var mr = c.GetComponent<MeshRenderer>();
+                        if (mr != null && mr.sharedMaterial != null) flakeTex = mr.sharedMaterial.GetTexture("_BaseMap");
+                    }
+                    else if (p[0] == "WxDefault" && p.Length == 6)
+                    {
+                        defPrecip = F(p[1]); defWind = F(p[2]);
+                        // The default's direction is in the importer's raw frame order (x, y, z)
+                        // = the source's own axes, which the adapter round-trips to Unity's.
+                        defDir = new Vector3(F(p[3]), F(p[4]), F(p[5]));
+                    }
+                    else if (p[0] == "WxBox" && p.Length == 4 && (p[1] == "precip" || p[1] == "wind"))
                     {
                         var bc = c.GetComponent<BoxCollider>();
                         if (bc == null) { why = $"'{c.name}' has no BoxCollider; no snow"; return false; }
                         bc.enabled = false;   // geometry only; containment is analytic below
-                        boxes.Add(new Box { t = c, c = bc.center, half = 0.5f * bc.size, v = F(p[3]), idx = int.Parse(p[2]) });
+                        (p[1] == "precip" ? boxes : wind).Add(new Box { t = c, c = bc.center, half = 0.5f * bc.size, v = F(p[3]), idx = int.Parse(p[2]) });
                     }
                 }
             }
@@ -95,6 +123,7 @@ namespace TrickyMaddnessLevelHook
             for (int i = 1; i < ramp.Length; i += 2) alpha = Mathf.Max(alpha, ramp[i]);
 
             boxes.Sort((a, b) => a.idx.CompareTo(b.idx));
+            wind.Sort((a, b) => a.idx.CompareTo(b.idx));
             var go = new GameObject("HookZoneWeatherSnow");
             var z = go.AddComponent<ZoneWeatherSnow>();
             z._defaultPrecip = defPrecip;
@@ -108,11 +137,16 @@ namespace TrickyMaddnessLevelHook
             z._sizeScale = sizeScale;
             z._exitHolds = exitHolds;
             z._boxes = boxes.ToArray();
+            z._wind = wind.ToArray();
+            z._defaultWind = defWind;
+            z._defaultDir = defDir.sqrMagnitude > 1e-6f ? defDir.normalized : Vector3.forward;
+            z._windUnit = windUnit * upm;
             z._precip = defPrecip;
+            z._flakeTex = flakeTex;
             z.Build();
             Active = true;
-            why = $"{boxes.Count} precip volume(s), default precip {defPrecip:0.##}, cap {z._cap}, " +
-                  $"wrap {z._wrap:0.#} u, {upm:0.###} u/m, exit {(exitHolds ? "HOLDS last value" : "returns to default")} (guess)" +
+            why = $"{boxes.Count} precip + {wind.Count} wind volume(s), default precip {defPrecip:0.##} wind {defWind:0.##}, cap {z._cap}, " +
+                  $"wrap {z._wrap:0.#} u, {upm:0.###} u/m, flake {(flakeTex != null ? flakeTex.name : "stand-in blob (no WxFlake)")}, exit {(exitHolds ? "HOLDS last value" : "returns to default")} (guess)" +
                   (missing.Count > 0 ? $"; WxSnow_ keys missing, W6.21 values used: {string.Join(",", missing)}" : "");
             return true;
         }
@@ -135,21 +169,23 @@ namespace TrickyMaddnessLevelHook
             pr.alignment = ParticleSystemRenderSpace.View;
             pr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             pr.receiveShadows = false;
-            // 2012 draws fx_snowballblur, alpha-blended. That texture isn't baked yet, so the
-            // soft procedural blob stands in (plan §3).
-            pr.material = SnowFall.FlakeMaterial();
+            // 2012 draws fx_snowballblur, alpha-blended (W6.21). The importer bakes it onto a
+            // disabled "WxFlake" renderer; without one the soft procedural blob stands in.
+            var m = new Material(SnowFall.FlakeMaterial()) { name = "HookZoneWeatherFlake" };
+            if (_flakeTex != null) m.SetTexture("_BaseMap", _flakeTex);
+            pr.material = m;
             _ps.Play();
             _buf = new ParticleSystem.Particle[Mathf.Max(1, _cap)];
         }
 
         // Last containing box by index wins. 2012's overlap order is unknown (W6.21: last
         // writer per tick); on newzeal0901 every precip box is 0.5, so it can't matter there.
-        int BoxAt(Vector3 p)
+        static int BoxAt(Box[] boxes, Vector3 p)
         {
             int hit = -1;
-            for (int i = 0; i < _boxes.Length; i++)
+            for (int i = 0; i < boxes.Length; i++)
             {
-                var b = _boxes[i];
+                var b = boxes[i];
                 if (b.t == null) continue;
                 Vector3 l = b.t.InverseTransformPoint(p) - b.c;
                 if (Mathf.Abs(l.x) <= b.half.x && Mathf.Abs(l.y) <= b.half.y && Mathf.Abs(l.z) <= b.half.z) hit = i;
@@ -169,7 +205,7 @@ namespace TrickyMaddnessLevelHook
             float dt = Time.deltaTime;
             _t += dt;
 
-            int box = BoxAt(cp);
+            int box = BoxAt(_boxes, cp);
             if (box >= 0) _precip = _boxes[box].v;
             else if (!_exitHolds) _precip = _defaultPrecip;
             if (box != _lastBox)
@@ -180,6 +216,19 @@ namespace TrickyMaddnessLevelHook
                                    $"precip {_precip:0.##} = {(int)(Mathf.Clamp01(_precip) * _cap)} flakes");
                 _lastBox = box;
             }
+
+            // Wind: same step + exit rule as precip (2012's WindSpeedTrack is re-applied per tick
+            // like precip — INFERRED from the shared script shape, W6.21).
+            int wb = BoxAt(_wind, cp);
+            if (wb >= 0) _windVel = _wind[wb].t.forward * (_wind[wb].v * _windUnit * WindResponse);
+            else if (!_exitHolds) _windVel = _defaultDir * (_defaultWind * _windUnit * WindResponse);
+            if (wb != _lastWind)
+            {
+                Plugin.Log.LogInfo($"[SnowFall] 2012 wind volume {(_lastWind >= 0 ? _wind[_lastWind].idx : -1)} -> " +
+                                   $"{(wb >= 0 ? _wind[wb].idx : -1)}: drift ({_windVel.x:F1}, {_windVel.y:F1}, {_windVel.z:F1}) u/s");
+                _lastWind = wb;
+            }
+            _windOff += _windVel * dt;
 
             float half = 0.5f * _wrap, side = _wrap, inv = 1f / side;
             if (!_seeded)
@@ -197,11 +246,22 @@ namespace TrickyMaddnessLevelHook
                 _seeded = true;
             }
 
-            int n = Mathf.Clamp((int)(Mathf.Clamp01(_precip) * _cap), 0, _cap);
+            if (_roofMask == 0) _roofMask = RoofMask();
+            // QueryTriggerInteraction.Ignore, unlike TM's UseGlobal: an overhead trigger (finish
+            // box, launch volume) is not a roof — deliberate deviation.
+            bool roof = Physics.Raycast(cp, Vector3.up, RoofRay, _roofMask, QueryTriggerInteraction.Ignore);
+            if (roof != _underRoof)
+            {
+                Plugin.Log.LogInfo($"[SnowFall] 2012 snow {(roof ? "under a roof — stopping" : "out from under a roof — resuming")} at ({cp.x:F0}, {cp.y:F0}, {cp.z:F0})");
+                _underRoof = roof;
+            }
+            _roof = Mathf.MoveTowards(_roof, roof ? 0f : 1f, dt / RoofRamp);
+
+            int n = Mathf.Clamp((int)(Mathf.Clamp01(_precip) * _roof * _cap), 0, _cap);
             float fadeStart = FadeFrac * half, fadeSpan = half - fadeStart;
             for (int i = 0; i < n; i++)
             {
-                Vector3 d = _base[i] - cp;
+                Vector3 d = _base[i] + _windOff - cp;
                 d.y -= Mathf.Repeat(_fall[i] * _t, side);
                 d.x -= side * Mathf.Floor((d.x + half) * inv);
                 d.y -= side * Mathf.Floor((d.y + half) * inv);
@@ -216,6 +276,20 @@ namespace TrickyMaddnessLevelHook
                 _buf[i].startColor = new Color(1f, 1f, 1f, _alpha * fade);
             }
             _ps.SetParticles(_buf, n);
+        }
+
+        // Snowboarder.CastLayerMask is 0 until a Snowboarder builds it; same exclusions rebuilt
+        // from layer names otherwise (IL-verified list).
+        static int RoofMask()
+        {
+            if (Snowboarder.CastLayerMask != 0) return Snowboarder.CastLayerMask;
+            int ex = 0;
+            foreach (var n in new[] { "Rail", "Ignore Raycast", "OOB", "PipeWall", "Snowboarder", "Ragdoll", "PhysicsProp", "Caster" })
+            {
+                int l = LayerMask.NameToLayer(n);
+                if (l >= 0) ex |= 1 << l;
+            }
+            return ~ex;
         }
 
         void OnDestroy() { Active = false; }

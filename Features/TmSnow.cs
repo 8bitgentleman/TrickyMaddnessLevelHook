@@ -149,6 +149,23 @@ namespace TrickyMaddnessLevelHook
             GameSnowActive(ref snowDone);
             if (ZoneWeatherSnow.Active) snowDone = true;
             string snowKind = snowDone ? "active" : "none";
+            // SSX (2012)'s lighting volumes ride the same root but are independent of snow:
+            // they spawn even when another snow system already claimed the scene.
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                bool lightDone = false;
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("ZoneWeather_")) continue;
+                    if (ZoneWeatherLight.TrySpawn(t, out string zlWhy))
+                        Log.LogInfo($"[ZoneWeather] lighting blend spawned: {zlWhy}");
+                    else if (zlWhy != null)
+                        Log.LogWarning($"[ZoneWeather] {zlWhy}");
+                    lightDone = true;
+                    break;
+                }
+                if (lightDone) break;
+            }
             // SSX (2012)'s per-volume weather (ZoneWeatherSnow) first: its root is a plain marker
             // name, so it needs no game hook, and a 2012 map carries no other snow marker.
             foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
@@ -157,7 +174,7 @@ namespace TrickyMaddnessLevelHook
                 foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
                 {
                     if (!t.name.StartsWith("ZoneWeather_")) continue;
-                    if (ZoneWeatherSnow.TrySpawn(t, zoneWeatherExitHolds.Value, zoneWeatherFlakeSize.Value, out string zwWhy))
+                    if (ZoneWeatherSnow.TrySpawn(t, zoneWeatherExitHolds.Value, zoneWeatherFlakeSize.Value, zoneWeatherWindUnit.Value, out string zwWhy))
                     {
                         snowKind = "zone";
                         Log.LogInfo($"[SnowFall] per-volume weather snow spawned: {zwWhy}");
