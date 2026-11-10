@@ -90,6 +90,8 @@ namespace TrickyMaddnessLevelHook
         internal static ConfigEntry<float> ssxSnowFlakeSize;
 
         internal static ConfigEntry<float> ssx3SnowFlakeSize;
+        internal static ConfigEntry<bool> zoneWeatherExitHolds;
+        internal static ConfigEntry<float> zoneWeatherFlakeSize;
 
         // SSX domes only reach ~+20 deg elevation — an open-topped bowl. Above the rim
         // the camera shows its clear color, which is black by default (feature-5's blue
@@ -389,6 +391,16 @@ namespace TrickyMaddnessLevelHook
                 "unknown: 1 reads it as a quad that many source units across, which rode as nearly " +
                 "invisible; 5 is the playtested default (6 read slightly big). Raise it if the " +
                 "flakes are too faint to see, lower it if they read as blobs. Relaunch to apply.");
+            zoneWeatherExitHolds = Config.Bind("SnowFall", "Ssx2012ExitHolds", false,
+                "SSX (2012) maps: what the snow does when you ride OUT of a snow volume. false = it " +
+                "stops (back to the track's default weather); true = it keeps the last volume's " +
+                "density until you enter another. This is a GUESS either way: 2012's script sets the " +
+                "density every tick while you are inside and does nothing on exit, and which of the " +
+                "two that means has not been measured in the real game yet. Relaunch to apply.");
+            zoneWeatherFlakeSize = Config.Bind("SnowFall", "Ssx2012FlakeSize", 1f,
+                "Multiplier on SSX (2012)'s flake size (0.09 m +/- 0.03 m, from the game's own " +
+                "fx_falling_snow effect). 1 is the game's number; it has not been ridden yet. Raise it " +
+                "if the flakes are too faint to see, lower it if they read as blobs. Relaunch to apply.");
             lightingRamp = Config.Bind("Visual", "TimeOfDayRamp", true,
                 "On whole-mountain chain maps, blend the lighting between each source " +
                 "course's grade as you descend — SSX 3's final run starts in daylight at " +

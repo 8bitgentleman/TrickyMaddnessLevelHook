@@ -147,7 +147,28 @@ namespace TrickyMaddnessLevelHook
             // zone-mapped weather (Ssx3SnowFall, BakeSsx3WeatherMarker).
             bool snowDone = SnowFall.Active;
             GameSnowActive(ref snowDone);
+            if (ZoneWeatherSnow.Active) snowDone = true;
             string snowKind = snowDone ? "active" : "none";
+            // SSX (2012)'s per-volume weather (ZoneWeatherSnow) first: its root is a plain marker
+            // name, so it needs no game hook, and a 2012 map carries no other snow marker.
+            foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
+            {
+                if (snowDone) break;
+                foreach (var t in sceneRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.name.StartsWith("ZoneWeather_")) continue;
+                    if (ZoneWeatherSnow.TrySpawn(t, zoneWeatherExitHolds.Value, zoneWeatherFlakeSize.Value, out string zwWhy))
+                    {
+                        snowKind = "zone";
+                        Log.LogInfo($"[SnowFall] per-volume weather snow spawned: {zwWhy}");
+                        LoadClock.Mark("ZoneWeather");
+                    }
+                    else
+                        Log.LogWarning($"[SnowFall] {zwWhy}");
+                    snowDone = true;
+                    break;
+                }
+            }
             foreach (var sceneRoot in levelManagerMaker.gameObject.scene.GetRootGameObjects())
             {
                 if (snowDone) break;
