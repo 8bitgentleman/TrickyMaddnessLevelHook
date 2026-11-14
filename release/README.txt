@@ -1,4 +1,4 @@
-Tricky Madness Level Hook v2.19.1 — required for every custom map pack
+Tricky Madness Level Hook v2.21.0 — required for every custom map pack
 ========================================================================
 
 This is the plugin that makes custom map packs (SSX Tricky Ports, SSX 3 Ports,
@@ -49,6 +49,17 @@ WHAT IT DOES
   - Shows a proper thumbnail image for each course on the level-select screen,
     with an optional grid layout (grouped by source game) for once you've got
     a lot of custom courses installed.
+
+WHAT'S NEW IN v2.21.0
+---------------------
+  Two new optional effects that a course pack can turn on. Both are off unless
+  a course asks for them, so every course released so far looks and plays as
+  it did before, and no map pack needs re-downloading.
+
+  - Colour grade: a course can set its own overall colour, saturation,
+    contrast and brightness.
+  - Snow glitter: a course can add sun sparkle on snow and ice. It is an
+    approximation of the effect in the original game, not an exact copy.
 
 WHAT'S NEW IN v2.19.1
 ---------------------

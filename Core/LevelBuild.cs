@@ -118,7 +118,9 @@ namespace TrickyMaddnessLevelHook
 
             AttachGlowSprites(ctx, blocks);
 
-            EnableBloom(ctx, blocks);
+            EnablePostFX(ctx, blocks);
+
+            SpawnSnowGlitter(ctx, blocks);
 
             SpawnSsx3Painter(ctx);
 
