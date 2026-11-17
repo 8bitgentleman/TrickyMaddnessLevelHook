@@ -61,6 +61,14 @@ WHAT'S NEW IN v2.21.0
   - Snow glitter: a course can add sun sparkle on snow and ice. It is an
     approximation of the effect in the original game, not an exact copy.
 
+WHAT'S NEW IN v2.20.0
+---------------------
+  Weather for SSX 2012 courses only. Every other course pack is untouched.
+
+  - Snow on a 2012 course now changes with where you are on the mountain
+    (the original game's own snow zones), drifts with the wind, stops under
+    roofs, and whiteout areas fade the light the way they did in 2012.
+
 WHAT'S NEW IN v2.19.1
 ---------------------
   Compatibility fix for the Tricky Madness update that added random weather
